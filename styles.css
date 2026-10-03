@@ -1,0 +1,9 @@
+.unitedshare-modal .setting-item {
+  border-top: none;
+  padding-top: 0;
+}
+
+.unitedshare-answer {
+  margin-top: 0.75rem;
+  white-space: pre-wrap;
+}
