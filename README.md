@@ -32,6 +32,8 @@ node scripts/bundle.mjs
 
 Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. Die Release-Datei `main.js` enthält den Kern deshalb schon und lädt keine Nachbardatei.
 
+Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.github/workflows/release.yml`. Der Lauf baut `main.js` und schreibt die Herkunftsnachweise für `main.js`, `manifest.json` und `styles.css`.
+
 ## Stand
 
 Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/mikebaumgart/obsidian-unitedshare. Release-Tag `1.0.0`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.
