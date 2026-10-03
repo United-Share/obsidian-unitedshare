@@ -19,7 +19,6 @@ Befehl: **UnitedShare fragen**. Eine Markierung wird zur Frage und durch Frage p
 ## Prüfen
 
 ```bash
-cd /Volumes/SecondBrainReemax/UnitedShare/plugins/obsidian-unitedshare
 node --test unitedshare-core.test.js
 ```
 
@@ -35,4 +34,4 @@ Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. D
 
 ## Stand
 
-Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/mikebaumgart/obsidian-unitedshare. Release-Tag `1.0.0`, ohne `v`. Der Tresor unter `/Volumes/SecondBrainReemax/UnitedShare/obsidian-vault` enthält das Plugin nicht.
+Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/mikebaumgart/obsidian-unitedshare. Release-Tag `1.0.0`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.
