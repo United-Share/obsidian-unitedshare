@@ -1,0 +1,201 @@
+"use strict";
+
+const http = require("node:http");
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const {
+  buildAnthropicBody,
+  completeMessages,
+  loadMentionedNotes,
+  mentionPaths,
+  messagesUrl,
+  UnitedShareError,
+} = require("./unitedshare-core");
+
+function listen(handler) {
+  const server = http.createServer(handler);
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      resolve({ server, port });
+    });
+  });
+}
+
+test("messagesUrl zeigt auf /v1/messages", () => {
+  assert.equal(typeof messagesUrl, "function");
+  assert.equal(
+    messagesUrl("https://api.unitedshare.ai/v1/"),
+    "https://api.unitedshare.ai/v1/messages",
+  );
+});
+
+test("der Körper bleibt ein Textauftrag ohne Werkzeuge und ohne Stream", () => {
+  assert.equal(typeof buildAnthropicBody, "function");
+  const body = buildAnthropicBody({
+    model: "rmxos-mega2026.1",
+    system: "Antworte auf Deutsch.",
+    turns: [
+      { role: "user", content: "Was steht in @\"Notizen/Heute.md\"?", files: [
+        { path: "Notizen/Heute.md", text: "Stand: grün" },
+      ] },
+      { role: "assistant", content: "Kurz." },
+      { role: "system", content: "darf nicht in messages landen" },
+    ],
+    tools: [{ name: "Bash" }],
+  });
+  assert.equal(body.model, "rmxos-mega2026.1");
+  assert.equal(body.stream, false);
+  assert.equal(body.max_tokens, 1200);
+  assert.equal(body.system, "Antworte auf Deutsch.");
+  assert.equal(Object.hasOwn(body, "tools"), false);
+  assert.deepEqual(body.messages.map((message) => message.role), ["user", "assistant"]);
+  const blocks = body.messages[0].content;
+  assert.ok(blocks.every((block) => block.type === "text"));
+  assert.match(blocks[0].text, /Was steht/);
+  assert.match(blocks[1].text, /linked_content path="Notizen\/Heute.md"/);
+  assert.match(blocks[1].text, /Stand: grün/);
+  assert.equal(blocks.some((block) => block.type === "image" || block.type === "tool_use"), false);
+});
+
+test("eine fehlende Erwähnung bleibt ein Textblock und wird nicht zum Werkzeug", () => {
+  const body = buildAnthropicBody({
+    model: "rmxos-mega2026.1",
+    system: "s",
+    turns: [{
+      role: "user",
+      content: "Lies @Fehlt.md",
+      files: [{ path: "Fehlt.md", missing: true }],
+    }],
+  });
+  assert.match(body.messages[0].content[1].text, /liegt nicht im Tresor/);
+  assert.equal(body.stream, false);
+});
+
+test("mentionPaths liest @Pfad und @\"Pfad mit Leerzeichen\"", () => {
+  assert.equal(typeof mentionPaths, "function");
+  assert.deepEqual(
+    mentionPaths('Schau @"Notizen/Heute.md" und @Archiv/alt.md und nochmal @Archiv/alt.md'),
+    ["Notizen/Heute.md", "Archiv/alt.md"],
+  );
+});
+
+test("loadMentionedNotes lädt nur den Text der erwähnten Notiz", async () => {
+  assert.equal(typeof loadMentionedNotes, "function");
+  const read = [];
+  const files = await loadMentionedNotes("Bitte @Notizen/Heute.md", async (notePath) => {
+    read.push(notePath);
+    if (notePath === "Notizen/Heute.md") return "Inhalt";
+    return null;
+  });
+  assert.deepEqual(read, ["Notizen/Heute.md"]);
+  assert.deepEqual(files, [{ path: "Notizen/Heute.md", text: "Inhalt" }]);
+});
+
+test("completeMessages sendet den Anthropic-Körper und liest den Textblock", async () => {
+  assert.equal(typeof completeMessages, "function");
+  const seen = [];
+  const { server, port } = await listen(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    seen.push({ url: req.url, authorization: req.headers.authorization, body });
+    assert.equal(body.stream, false);
+    assert.equal(Object.hasOwn(body, "tools"), false);
+    const text = (body.messages || [])
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => {
+        const content = message.content;
+        if (typeof content === "string") return content;
+        return (content || [])
+          .filter((part) => part && part.type === "text")
+          .map((part) => part.text || "")
+          .join("");
+      })
+      .join("\n");
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      content: [{ type: "text", text: `Echo: ${text}` }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 3, output_tokens: 2 },
+    }));
+  });
+  try {
+    const text = await completeMessages({
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      model: "rmxos-mega2026.1",
+      system: "Antworte auf Deutsch.",
+      turns: [{ role: "user", content: "Hallo @Notiz.md", files: [{ path: "Notiz.md", text: "Zeile" }] }],
+    });
+    assert.equal(seen[0].url, "/v1/messages");
+    assert.equal(seen[0].authorization, "Bearer test-key");
+    assert.equal(seen[0].body.system, "Antworte auf Deutsch.");
+    assert.match(text, /Echo:/);
+    assert.match(text, /Hallo @Notiz.md/);
+    assert.match(text, /Zeile/);
+  } finally {
+    server.close();
+  }
+});
+
+test("ein reiner tool_use-Block ist keine Antwort", async () => {
+  const { server, port } = await listen((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }],
+      stop_reason: "tool_use",
+    }));
+  });
+  try {
+    await assert.rejects(
+      () => completeMessages({
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key",
+        model: "rmxos-mega2026.1",
+        system: "s",
+        turns: [{ role: "user", content: "lies" }],
+      }),
+      (error) => {
+        assert.ok(error instanceof UnitedShareError);
+        assert.match(error.message, /keine Antwort/);
+        return true;
+      },
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test("401 auf /v1/messages nennt den Key", async () => {
+  const { server, port } = await listen((_req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+  });
+  try {
+    await assert.rejects(
+      () => completeMessages({
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key",
+        model: "rmxos-mega2026.1",
+        system: "s",
+        turns: [{ role: "user", content: "hallo" }],
+      }),
+      (error) => {
+        assert.ok(error instanceof UnitedShareError);
+        assert.equal(error.status, 401);
+        assert.match(error.message, /API-Key/);
+        assert.equal(error.message.includes("Unauthorized"), false);
+        return true;
+      },
+    );
+  } finally {
+    server.close();
+  }
+});
