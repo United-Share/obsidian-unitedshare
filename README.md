@@ -72,4 +72,4 @@ Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.githu
 
 ## Stand
 
-Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.2`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.
+Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.3`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.

@@ -612,6 +612,34 @@ test("die Tastatur schiebt das Promptfeld in den sichtbaren Bereich", async () =
   assert.equal(open, 0);
   assert.equal(view.contentEl.classList.has("is-keyboard-open"), false);
   assert.equal(view.contentEl.style["--unitedshare-keyboard-inset"], "0px");
+  const native = view.syncKeyboardInset({
+    rect: { bottom: 844, height: 760 },
+    viewport: { offsetTop: 0, height: 844 },
+    layoutHeight: 844,
+    cssKeyboardHeight: "300px",
+    fixedOverlay: true,
+  });
+  assert.equal(native, 300);
+  assert.equal(view.contentEl.classList.has("is-keyboard-open"), true);
+  assert.equal(view.contentEl.style["--unitedshare-keyboard-inset"], "300px");
+  const pinned = view.syncKeyboardInset({
+    rect: { bottom: 844, height: 760 },
+    viewport: { offsetTop: 0, height: 844 },
+    layoutHeight: 844,
+    cssKeyboardHeight: "300px",
+    fixedOverlay: false,
+  });
+  assert.equal(pinned, 0);
+  assert.equal(view.contentEl.classList.has("is-keyboard-open"), false);
+  const src = fs.readFileSync(path.join(root, "main.src.js"), "utf8");
+  const core = fs.readFileSync(path.join(root, "unitedshare-core.js"), "utf8");
+  assert.match(src, /keyboardWillShow/);
+  assert.match(src, /keyboardWillHide/);
+  assert.match(src, /--keyboard-height/);
+  assert.match(core, /\.workspace-drawer/);
+  assert.match(core, /is-pinned/);
+  assert.match(css, /\.workspace-drawer:not\(\.is-pinned\)/);
+  assert.match(css, /var\(--keyboard-height, 0px\)/);
   await view.onClose();
   assert.equal(view.keyboardSync, null);
 });

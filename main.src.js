@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { assertVaultRelative, completeMessages, coveredByKeyboard, executeVaultAction, isObsidianModel, listModels, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");
+const { assertVaultRelative, completeMessages, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -16,6 +16,24 @@ function markInner() {
 
 function markSvg() {
   return `<svg class="unitedshare-mark" viewBox="0 0 68 70" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="${MARK_D}" fill="currentColor"/></svg>`;
+}
+
+function nativeKeyboardHeight() {
+  if (typeof document === "undefined" || !document.documentElement) return "";
+  const el = document.documentElement;
+  let inline = "";
+  if (el.style && typeof el.style.getPropertyValue === "function") {
+    inline = el.style.getPropertyValue("--keyboard-height");
+  } else if (el.style) {
+    inline = el.style["--keyboard-height"] || "";
+  }
+  if (String(inline || "").trim()) return inline;
+  if (typeof getComputedStyle !== "function") return "";
+  try {
+    return getComputedStyle(el).getPropertyValue("--keyboard-height");
+  } catch (_err) {
+    return "";
+  }
 }
 
 const DEFAULT_SETTINGS = {
@@ -194,7 +212,13 @@ class UnitedShareView extends ItemView {
 
   bindKeyboardInset() {
     this.unbindKeyboardInset();
-    const sync = () => this.syncKeyboardInset();
+    const sync = (event) => {
+      this.syncKeyboardInset();
+      const type = event && event.type;
+      if (type === "focus" || (typeof type === "string" && type.indexOf("keyboard") === 0)) {
+        this.armKeyboardRecheck();
+      }
+    };
     this.keyboardSync = sync;
     if (this.questionEl) {
       this.questionEl.addEventListener("focus", sync);
@@ -202,19 +226,45 @@ class UnitedShareView extends ItemView {
     }
     if (typeof window === "undefined") return;
     window.addEventListener("resize", sync);
+    for (const name of ["keyboardWillShow", "keyboardWillHide", "keyboardDidShow", "keyboardDidHide"]) {
+      window.addEventListener(name, sync);
+    }
     const viewport = window.visualViewport;
     if (viewport && typeof viewport.addEventListener === "function") {
       viewport.addEventListener("resize", sync);
       viewport.addEventListener("scroll", sync);
       this.keyboardViewport = viewport;
     }
+    if (
+      typeof MutationObserver === "function" &&
+      typeof document !== "undefined" &&
+      document.documentElement
+    ) {
+      const observer = new MutationObserver(() => this.syncKeyboardInset());
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
+      this.keyboardObserver = observer;
+    }
     sync();
   }
 
   unbindKeyboardInset() {
+    this.clearKeyboardRecheck();
+    if (this.keyboardObserver && typeof this.keyboardObserver.disconnect === "function") {
+      this.keyboardObserver.disconnect();
+    }
+    this.keyboardObserver = null;
     const sync = this.keyboardSync;
     if (!sync) return;
-    if (typeof window !== "undefined") window.removeEventListener("resize", sync);
+    if (this.questionEl && typeof this.questionEl.removeEventListener === "function") {
+      this.questionEl.removeEventListener("focus", sync);
+      this.questionEl.removeEventListener("blur", sync);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("resize", sync);
+      for (const name of ["keyboardWillShow", "keyboardWillHide", "keyboardDidShow", "keyboardDidHide"]) {
+        window.removeEventListener(name, sync);
+      }
+    }
     const viewport = this.keyboardViewport;
     if (viewport && typeof viewport.removeEventListener === "function") {
       viewport.removeEventListener("resize", sync);
@@ -222,6 +272,29 @@ class UnitedShareView extends ItemView {
     }
     this.keyboardViewport = null;
     this.keyboardSync = null;
+  }
+
+  armKeyboardRecheck() {
+    this.clearKeyboardRecheck();
+    const timers = [];
+    if (typeof requestAnimationFrame === "function") {
+      const frame = requestAnimationFrame(() => this.syncKeyboardInset());
+      timers.push(() => cancelAnimationFrame(frame));
+    }
+    if (typeof setTimeout === "function") {
+      for (const delay of [50, 320]) {
+        const timer = setTimeout(() => this.syncKeyboardInset(), delay);
+        timers.push(() => clearTimeout(timer));
+      }
+    }
+    this.keyboardRecheck = () => {
+      for (const cancel of timers) cancel();
+      this.keyboardRecheck = null;
+    };
+  }
+
+  clearKeyboardRecheck() {
+    if (typeof this.keyboardRecheck === "function") this.keyboardRecheck();
   }
 
   setKeyboardInset(px) {
@@ -252,7 +325,13 @@ class UnitedShareView extends ItemView {
     if (!Number.isFinite(layoutHeight) && typeof window !== "undefined") {
       layoutHeight = window.innerHeight;
     }
-    const px = coveredByKeyboard(rect, viewport, layoutHeight);
+    const cssKeyboardHeight = Object.hasOwn(given, "cssKeyboardHeight")
+      ? given.cssKeyboardHeight
+      : nativeKeyboardHeight();
+    const fixedOverlay = typeof given.fixedOverlay === "boolean"
+      ? given.fixedOverlay
+      : viewSitsUnderKeyboard(root);
+    const px = keyboardCoverPx(rect, viewport, layoutHeight, cssKeyboardHeight, { fixedOverlay });
     this.setKeyboardInset(px);
     return px;
   }

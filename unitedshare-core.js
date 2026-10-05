@@ -48,6 +48,37 @@ function coveredByKeyboard(viewRect, viewport, layoutHeight) {
   return Math.min(Math.ceil(overlap), Math.floor(cap));
 }
 
+function keyboardHeightFromCss(styleValue) {
+  const raw = String(styleValue == null ? "" : styleValue).trim();
+  if (!raw) return 0;
+  const height = parseFloat(raw);
+  if (!Number.isFinite(height) || height <= 1) return 0;
+  return Math.ceil(height);
+}
+
+// Der feste Handy-Drawer schrumpft nicht mit der App. Dort zählt --keyboard-height.
+// Ein bereits geschrumpftes Blatt darf diese Höhe nicht noch einmal addieren.
+function keyboardCoverPx(viewRect, viewport, layoutHeight, cssKeyboardHeight, options) {
+  const measured = coveredByKeyboard(viewRect, viewport, layoutHeight);
+  const overlay = Boolean(options && options.fixedOverlay);
+  if (!overlay) return measured;
+  const css = keyboardHeightFromCss(cssKeyboardHeight);
+  const cover = Math.max(measured, css);
+  if (cover <= 1) return 0;
+  const viewHeight = Number(viewRect && viewRect.height);
+  const cap = Number.isFinite(viewHeight) && viewHeight > 0 ? Math.floor(viewHeight) : cover;
+  return Math.min(cover, cap);
+}
+
+function viewSitsUnderKeyboard(el) {
+  if (!el || typeof el.closest !== "function") return false;
+  const drawer = el.closest(".workspace-drawer");
+  if (!drawer) return false;
+  const list = drawer.classList;
+  if (list && typeof list.contains === "function" && list.contains("is-pinned")) return false;
+  return true;
+}
+
 function mentionPaths(question) {
   const paths = [];
   const seen = new Set();
@@ -790,6 +821,8 @@ module.exports = {
   completeChat,
   completeMessages,
   coveredByKeyboard,
+  keyboardCoverPx,
+  viewSitsUnderKeyboard,
   executeVaultAction,
   fsVaultHost,
   loadMentionedNotes,

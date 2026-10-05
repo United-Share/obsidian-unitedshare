@@ -7,6 +7,8 @@ const {
   buildAnthropicBody,
   completeMessages,
   coveredByKeyboard,
+  keyboardCoverPx,
+  viewSitsUnderKeyboard,
   isObsidianModel,
   listModels,
   loadMentionedNotes,
@@ -35,6 +37,27 @@ test("coveredByKeyboard hebt nur den verdeckten Prompt", () => {
   assert.equal(coveredByKeyboard({ bottom: 480, height: 760 }, keyboard, 844), 364);
   assert.equal(coveredByKeyboard(null, null, 800), 0);
   assert.equal(coveredByKeyboard({ bottom: 800, height: 200 }, { offsetTop: 0, height: 100 }, 800), 200);
+});
+
+test("keyboardCoverPx hebt den festen Drawer über --keyboard-height", () => {
+  const rect = { bottom: 844, height: 760 };
+  const closed = { offsetTop: 0, height: 844 };
+  const open = { offsetTop: 0, height: 430 };
+  assert.equal(keyboardCoverPx(rect, closed, 844, "300px", { fixedOverlay: true }), 300);
+  assert.equal(keyboardCoverPx(rect, closed, 844, "300px", { fixedOverlay: false }), 0);
+  assert.equal(keyboardCoverPx(rect, closed, 844, "300px"), 0);
+  assert.equal(keyboardCoverPx(rect, open, 844, "300px", { fixedOverlay: true }), 414);
+  assert.equal(keyboardCoverPx({ bottom: 844, height: 200 }, closed, 844, "300px", { fixedOverlay: true }), 200);
+  assert.equal(keyboardCoverPx(rect, closed, 844, "0px", { fixedOverlay: true }), 0);
+  assert.equal(keyboardCoverPx(rect, closed, 844, "1px", { fixedOverlay: true }), 0);
+  const pinned = {
+    classList: { contains: (name) => name === "is-pinned" },
+  };
+  const loose = { classList: { contains: () => false } };
+  assert.equal(viewSitsUnderKeyboard({ closest: (sel) => (sel === ".workspace-drawer" ? pinned : null) }), false);
+  assert.equal(viewSitsUnderKeyboard({ closest: (sel) => (sel === ".workspace-drawer" ? loose : null) }), true);
+  assert.equal(viewSitsUnderKeyboard({}), false);
+  assert.equal(viewSitsUnderKeyboard(null), false);
 });
 
 test("messagesUrl zeigt auf /v1/messages", () => {

@@ -545,6 +545,15 @@ body.is-mobile .unitedshare-welcome,
   display: none;
 }
 
+/* Fester Handy-Drawer: die App-Höhe schrumpft nicht, nur --keyboard-height. */
+body.is-mobile .workspace-drawer:not(.is-pinned) .unitedshare-chat-panel {
+  padding-bottom: max(
+    calc(12px + env(safe-area-inset-bottom, 0px)),
+    calc(8px + var(--keyboard-height, 0px)),
+    calc(8px + var(--unitedshare-keyboard-inset, 0px))
+  );
+}
+
 @media (max-width: 520px) {
   .unitedshare-input-wrapper {
     min-height: 0;

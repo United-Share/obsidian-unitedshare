@@ -49,6 +49,37 @@ function coveredByKeyboard(viewRect, viewport, layoutHeight) {
   return Math.min(Math.ceil(overlap), Math.floor(cap));
 }
 
+function keyboardHeightFromCss(styleValue) {
+  const raw = String(styleValue == null ? "" : styleValue).trim();
+  if (!raw) return 0;
+  const height = parseFloat(raw);
+  if (!Number.isFinite(height) || height <= 1) return 0;
+  return Math.ceil(height);
+}
+
+// Der feste Handy-Drawer schrumpft nicht mit der App. Dort zählt --keyboard-height.
+// Ein bereits geschrumpftes Blatt darf diese Höhe nicht noch einmal addieren.
+function keyboardCoverPx(viewRect, viewport, layoutHeight, cssKeyboardHeight, options) {
+  const measured = coveredByKeyboard(viewRect, viewport, layoutHeight);
+  const overlay = Boolean(options && options.fixedOverlay);
+  if (!overlay) return measured;
+  const css = keyboardHeightFromCss(cssKeyboardHeight);
+  const cover = Math.max(measured, css);
+  if (cover <= 1) return 0;
+  const viewHeight = Number(viewRect && viewRect.height);
+  const cap = Number.isFinite(viewHeight) && viewHeight > 0 ? Math.floor(viewHeight) : cover;
+  return Math.min(cover, cap);
+}
+
+function viewSitsUnderKeyboard(el) {
+  if (!el || typeof el.closest !== "function") return false;
+  const drawer = el.closest(".workspace-drawer");
+  if (!drawer) return false;
+  const list = drawer.classList;
+  if (list && typeof list.contains === "function" && list.contains("is-pinned")) return false;
+  return true;
+}
+
 function mentionPaths(question) {
   const paths = [];
   const seen = new Set();
@@ -797,6 +828,24 @@ function markSvg() {
   return `<svg class="unitedshare-mark" viewBox="0 0 68 70" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="${MARK_D}" fill="currentColor"/></svg>`;
 }
 
+function nativeKeyboardHeight() {
+  if (typeof document === "undefined" || !document.documentElement) return "";
+  const el = document.documentElement;
+  let inline = "";
+  if (el.style && typeof el.style.getPropertyValue === "function") {
+    inline = el.style.getPropertyValue("--keyboard-height");
+  } else if (el.style) {
+    inline = el.style["--keyboard-height"] || "";
+  }
+  if (String(inline || "").trim()) return inline;
+  if (typeof getComputedStyle !== "function") return "";
+  try {
+    return getComputedStyle(el).getPropertyValue("--keyboard-height");
+  } catch (_err) {
+    return "";
+  }
+}
+
 const DEFAULT_SETTINGS = {
   apiKey: "",
   baseUrl: "https://api.unitedshare.ai/v1",
@@ -973,7 +1022,13 @@ class UnitedShareView extends ItemView {
 
   bindKeyboardInset() {
     this.unbindKeyboardInset();
-    const sync = () => this.syncKeyboardInset();
+    const sync = (event) => {
+      this.syncKeyboardInset();
+      const type = event && event.type;
+      if (type === "focus" || (typeof type === "string" && type.indexOf("keyboard") === 0)) {
+        this.armKeyboardRecheck();
+      }
+    };
     this.keyboardSync = sync;
     if (this.questionEl) {
       this.questionEl.addEventListener("focus", sync);
@@ -981,19 +1036,45 @@ class UnitedShareView extends ItemView {
     }
     if (typeof window === "undefined") return;
     window.addEventListener("resize", sync);
+    for (const name of ["keyboardWillShow", "keyboardWillHide", "keyboardDidShow", "keyboardDidHide"]) {
+      window.addEventListener(name, sync);
+    }
     const viewport = window.visualViewport;
     if (viewport && typeof viewport.addEventListener === "function") {
       viewport.addEventListener("resize", sync);
       viewport.addEventListener("scroll", sync);
       this.keyboardViewport = viewport;
     }
+    if (
+      typeof MutationObserver === "function" &&
+      typeof document !== "undefined" &&
+      document.documentElement
+    ) {
+      const observer = new MutationObserver(() => this.syncKeyboardInset());
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
+      this.keyboardObserver = observer;
+    }
     sync();
   }
 
   unbindKeyboardInset() {
+    this.clearKeyboardRecheck();
+    if (this.keyboardObserver && typeof this.keyboardObserver.disconnect === "function") {
+      this.keyboardObserver.disconnect();
+    }
+    this.keyboardObserver = null;
     const sync = this.keyboardSync;
     if (!sync) return;
-    if (typeof window !== "undefined") window.removeEventListener("resize", sync);
+    if (this.questionEl && typeof this.questionEl.removeEventListener === "function") {
+      this.questionEl.removeEventListener("focus", sync);
+      this.questionEl.removeEventListener("blur", sync);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("resize", sync);
+      for (const name of ["keyboardWillShow", "keyboardWillHide", "keyboardDidShow", "keyboardDidHide"]) {
+        window.removeEventListener(name, sync);
+      }
+    }
     const viewport = this.keyboardViewport;
     if (viewport && typeof viewport.removeEventListener === "function") {
       viewport.removeEventListener("resize", sync);
@@ -1001,6 +1082,29 @@ class UnitedShareView extends ItemView {
     }
     this.keyboardViewport = null;
     this.keyboardSync = null;
+  }
+
+  armKeyboardRecheck() {
+    this.clearKeyboardRecheck();
+    const timers = [];
+    if (typeof requestAnimationFrame === "function") {
+      const frame = requestAnimationFrame(() => this.syncKeyboardInset());
+      timers.push(() => cancelAnimationFrame(frame));
+    }
+    if (typeof setTimeout === "function") {
+      for (const delay of [50, 320]) {
+        const timer = setTimeout(() => this.syncKeyboardInset(), delay);
+        timers.push(() => clearTimeout(timer));
+      }
+    }
+    this.keyboardRecheck = () => {
+      for (const cancel of timers) cancel();
+      this.keyboardRecheck = null;
+    };
+  }
+
+  clearKeyboardRecheck() {
+    if (typeof this.keyboardRecheck === "function") this.keyboardRecheck();
   }
 
   setKeyboardInset(px) {
@@ -1031,7 +1135,13 @@ class UnitedShareView extends ItemView {
     if (!Number.isFinite(layoutHeight) && typeof window !== "undefined") {
       layoutHeight = window.innerHeight;
     }
-    const px = coveredByKeyboard(rect, viewport, layoutHeight);
+    const cssKeyboardHeight = Object.hasOwn(given, "cssKeyboardHeight")
+      ? given.cssKeyboardHeight
+      : nativeKeyboardHeight();
+    const fixedOverlay = typeof given.fixedOverlay === "boolean"
+      ? given.fixedOverlay
+      : viewSitsUnderKeyboard(root);
+    const px = keyboardCoverPx(rect, viewport, layoutHeight, cssKeyboardHeight, { fixedOverlay });
     this.setKeyboardInset(px);
     return px;
   }
