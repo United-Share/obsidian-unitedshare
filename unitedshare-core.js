@@ -16,6 +16,10 @@ function messagesUrl(baseUrl) {
   return `${String(baseUrl || "").replace(/\/+$/, "")}/messages`;
 }
 
+function modelsUrl(baseUrl) {
+  return `${String(baseUrl || "").replace(/\/+$/, "")}/models`;
+}
+
 function mentionPaths(question) {
   const paths = [];
   const seen = new Set();
@@ -172,6 +176,87 @@ async function postJson({
   }
 
   return typeof response.json === "function" ? response.json() : response;
+}
+
+function modelIdsFromPayload(payload) {
+  const rows = payload && Array.isArray(payload.data) ? payload.data : [];
+  const ids = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const id = row && typeof row.id === "string" ? row.id.trim() : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+async function getJson({
+  url,
+  apiKey,
+  timeoutMs = 15000,
+  fetchImpl = globalThis.fetch,
+}) {
+  if (!apiKey) throw new UnitedShareError("Der UnitedShare-API-Key fehlt.", 0);
+  if (typeof fetchImpl !== "function") {
+    throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
+  }
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error("timeout");
+      error.name = "AbortError";
+      reject(error);
+    }, timeoutMs);
+  });
+
+  let response;
+  try {
+    response = await Promise.race([
+      fetchImpl(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+      }),
+      timeout,
+    ]);
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new UnitedShareError("Die Modellliste hat nicht rechtzeitig geantwortet.", 0);
+    }
+    throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response || !response.ok) {
+    const status = response && response.status ? response.status : 0;
+    if (response && typeof response.text === "function") {
+      try {
+        await response.text();
+      } catch (_err) {
+        /* Rohtext bleibt ungelesen. */
+      }
+    }
+    throw new UnitedShareError(messageForStatus(status), status);
+  }
+
+  return typeof response.json === "function" ? response.json() : response;
+}
+
+async function listModels({
+  baseUrl,
+  apiKey,
+  timeoutMs = 15000,
+  fetchImpl = globalThis.fetch,
+}) {
+  const data = await getJson({
+    url: modelsUrl(baseUrl),
+    apiKey,
+    timeoutMs,
+    fetchImpl,
+  });
+  return modelIdsFromPayload(data);
 }
 
 async function completeChat({
@@ -674,7 +759,9 @@ module.exports = {
   fsVaultHost,
   loadMentionedNotes,
   mentionPaths,
+  listModels,
   messagesUrl,
+  modelsUrl,
   parseAnthropicContent,
   parseContent,
   parseVaultActions,

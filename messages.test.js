@@ -6,9 +6,11 @@ const assert = require("node:assert/strict");
 const {
   buildAnthropicBody,
   completeMessages,
+  listModels,
   loadMentionedNotes,
   mentionPaths,
   messagesUrl,
+  modelsUrl,
   UnitedShareError,
 } = require("./unitedshare-core");
 
@@ -28,6 +30,76 @@ test("messagesUrl zeigt auf /v1/messages", () => {
     messagesUrl("https://api.unitedshare.ai/v1/"),
     "https://api.unitedshare.ai/v1/messages",
   );
+});
+
+test("modelsUrl zeigt auf /v1/models", () => {
+  assert.equal(typeof modelsUrl, "function");
+  assert.equal(
+    modelsUrl("https://api.unitedshare.ai/v1/"),
+    "https://api.unitedshare.ai/v1/models",
+  );
+});
+
+test("listModels liest die Kennungen aus einem authentifizierten GET /v1/models", async () => {
+  assert.equal(typeof listModels, "function");
+  const seen = [];
+  const { server, port } = await listen((req, res) => {
+    seen.push({ method: req.method, url: req.url, authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      object: "list",
+      data: [
+        { id: "rmxos-sema2026.1", object: "model" },
+        { id: "rmxos-mega2026.1" },
+        { id: "  " },
+        { id: "rmxos-mega2026.1" },
+        { id: "rmxos-mobil2026.1" },
+        { object: "model" },
+      ],
+    }));
+  });
+  try {
+    const ids = await listModels({
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+    });
+    assert.equal(seen[0].method, "GET");
+    assert.equal(seen[0].url, "/v1/models");
+    assert.equal(seen[0].authorization, "Bearer test-key");
+    assert.deepEqual(ids, ["rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"]);
+  } finally {
+    server.close();
+  }
+});
+
+test("listModels lehnt einen fehlenden oder abgelehnten Schlüssel ab", async () => {
+  await assert.rejects(
+    () => listModels({ baseUrl: "http://127.0.0.1:9/v1", apiKey: "" }),
+    (error) => {
+      assert.ok(error instanceof UnitedShareError);
+      assert.match(error.message, /API-Key fehlt/);
+      return true;
+    },
+  );
+  const { server, port } = await listen((_req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  try {
+    await assert.rejects(
+      () => listModels({
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "nope",
+      }),
+      (error) => {
+        assert.ok(error instanceof UnitedShareError);
+        assert.match(error.message, /abgelehnt/);
+        return true;
+      },
+    );
+  } finally {
+    server.close();
+  }
 });
 
 test("der Körper bleibt ein Textauftrag ohne Werkzeuge und ohne Stream", () => {

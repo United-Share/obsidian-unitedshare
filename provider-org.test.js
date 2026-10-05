@@ -23,7 +23,7 @@ test("öffentliche Herkunft nennt die Organisation United-Share und den Anbieter
   assert.equal(readme.includes(PROVIDER), true, "README nennt den Anbieter");
   assert.equal(manifest.author, PROVIDER);
   assert.equal(manifest.authorUrl, "https://unitedshare.ai");
-  assert.equal(manifest.version, "1.1.0");
-  assert.equal(readme.includes("Release-Tag `1.1.0`"), true);
+  assert.equal(manifest.version, "1.1.1");
+  assert.equal(readme.includes("Release-Tag `1.1.1`"), true);
   assert.equal(license.includes(`Copyright (c) 2026 ${PROVIDER}`), true);
 });

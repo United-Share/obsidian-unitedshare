@@ -10,11 +10,13 @@ Der API-Schlüssel liegt nur in den Plugin-Daten des Tresors (`data.json`, von G
 
 Ordner nach `<tresor>/.obsidian/plugins/unitedshare/` kopieren. In Obsidian unter Einstellungen → Community-Plugins den eingeschränkten Modus aus und **UnitedShare** an.
 
-Danach in den Plugin-Einstellungen:
+Danach in den Plugin-Einstellungen. Die Anmeldung ist der API-Schlüssel. Ein Browser-Login legt in diesem Plugin keinen Chat-Schlüssel an.
 
-1. API-Schlüssel
+1. API-Schlüssel. Sobald er gespeichert ist, lädt die Aufklappliste die Modellnamen von `GET /v1/models`.
 2. Basis-URL, Vorgabe `https://api.unitedshare.ai/v1`
-3. Modell-Kennung aus einem authentifizierten `GET /v1/models`
+3. Modell aus der Liste. Eine schon gespeicherte Kennung bleibt wählbar, auch wenn sie in der Liste fehlt. Ohne gespeicherte Kennung bleibt die Auswahl leer.
+
+Dieselbe Liste steht in der Seitenleiste unter dem Eingabefeld.
 
 Nach dem Einschalten öffnet UnitedShare eine Ansicht in der rechten Seitenleiste. Das Symbol **UnitedShare** in der linken Leiste und der Befehl **UnitedShare in der Seitenleiste** holen dieselbe Ansicht nach vorn. Die Ansicht ist eine Chat-Spalte: die Gesprächsnummer und die Symbole für neuen Tab, neues Gespräch und Verlauf stehen über dem Eingabefeld, der Verlauf darüber, der Willkommenstext **UnitedShare** solange das Gespräch leer ist. **Aktive Notiz** setzt den Pfad der offenen Notiz als `@"Pfad"` in das Feld. Eine Bitte, eine benannte Datei zu lesen, schickt ihren Text mit. Eine Bitte, eine benannte Quelldatei anzulegen, speichert den Codeblock aus der Antwort. Eine Bitte, sie zu starten, führt sie im Tresor aus. Ein Block `unitedshare` mit `read`, `list`, `write` oder `run` tut dasselbe, wenn der Pfad in der Antwort steht. Enter oder der Pfeil schickt die Nachricht. **In die Notiz** schreibt die letzte Frage und Antwort an die Cursor-Position der aktiven Notiz.
 
@@ -40,4 +42,4 @@ Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.githu
 
 ## Stand
 
-Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.0`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.
+Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.1`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.

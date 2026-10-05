@@ -132,6 +132,13 @@ function installObsidianMock() {
     },
     addIcon() {},
     requestUrl: async (options) => {
+      if (String(options.url || "").endsWith("/models")) {
+        return {
+          status: 200,
+          text: "",
+          json: { object: "list", data: [{ id: "rmxos-mega2026.1" }, { id: "rmxos-sema2026.1" }] },
+        };
+      }
       state.requests.push(options);
       const text = state.replies.length ? state.replies.shift() : "Antwort aus messages";
       return {

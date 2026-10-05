@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const needle = 'const { assertVaultRelative, completeMessages, executeVaultAction, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");';
+const needle = 'const { assertVaultRelative, completeMessages, executeVaultAction, listModels, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");';
 
 const core = readFileSync(join(root, "unitedshare-core.js"), "utf8")
   .replace(/^"use strict";\n+/, "")

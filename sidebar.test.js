@@ -126,7 +126,9 @@ function installObsidianMock() {
     addCommand(command) {
       this.commands.push(command);
     }
-    addSettingTab() {}
+    addSettingTab(tab) {
+      this.settingTab = tab;
+    }
     async loadData() {
       return {};
     }
@@ -145,15 +147,82 @@ function installObsidianMock() {
       this.contentEl = createNode("div");
     }
   }
-  class PluginSettingTab {}
+  class PluginSettingTab {
+    constructor() {
+      this.containerEl = createNode("div");
+    }
+  }
+  const settings = [];
   class Setting {
-    setName() {
+    constructor() {
+      settings.push(this);
+      this.name = "";
+      this.desc = "";
+      this.dropdown = null;
+      this.text = null;
+    }
+    setName(name) {
+      this.name = name;
       return this;
     }
-    setDesc() {
+    setDesc(desc) {
+      this.desc = desc;
       return this;
     }
-    addText() {
+    addText(build) {
+      const text = {
+        inputEl: {},
+        value: "",
+        placeholder: "",
+        setPlaceholder(placeholder) {
+          this.placeholder = placeholder;
+          return this;
+        },
+        setValue(value) {
+          this.value = value;
+          return this;
+        },
+        onChange(fn) {
+          this.onChangeFn = fn;
+          return this;
+        },
+        async change(value) {
+          this.value = value;
+          if (this.onChangeFn) await this.onChangeFn(value);
+        },
+      };
+      this.text = text;
+      if (build) build(text);
+      return this;
+    }
+    addDropdown(build) {
+      const dropdown = {
+        options: {},
+        order: [],
+        value: "",
+        addOption(value, label) {
+          if (!Object.hasOwn(this.options, value)) this.order.push(value);
+          this.options[value] = label;
+          return this;
+        },
+        setValue(value) {
+          this.value = value;
+          return this;
+        },
+        getValue() {
+          return this.value;
+        },
+        onChange(fn) {
+          this.onChangeFn = fn;
+          return this;
+        },
+        async change(value) {
+          this.value = value;
+          if (this.onChangeFn) await this.onChangeFn(value);
+        },
+      };
+      this.dropdown = dropdown;
+      if (build) build(dropdown);
       return this;
     }
     addButton() {
@@ -194,6 +263,27 @@ function installObsidianMock() {
     addIcon,
     requestUrl: async (options) => {
       requests.push(options);
+      const url = String(options.url || "");
+      const authorization = options.headers && options.headers.Authorization;
+      if (url.endsWith("/models")) {
+        if (authorization === "Bearer rejected-key") {
+          return { status: 401, text: "", json: {} };
+        }
+        return {
+          status: 200,
+          text: "",
+          json: {
+            object: "list",
+            data: [
+              { id: "rmxos-sema2026.1" },
+              { id: "rmxos-mega2026.1" },
+              { id: "  " },
+              { id: "rmxos-mega2026.1" },
+              { id: "rmxos-mobil2026.1" },
+            ],
+          },
+        };
+      }
       return {
         status: 200,
         text: "Antwort aus messages",
@@ -217,6 +307,7 @@ function installObsidianMock() {
     icons,
     requests,
     MarkdownView,
+    settings,
     restore() {
       Module.prototype.require = original;
     },
@@ -585,6 +676,137 @@ test("completeThread geht an /v1/messages ohne Werkzeuge", async () => {
   assert.equal(Object.hasOwn(body, "tools"), false);
   assert.equal(body.messages[0].content[0].type, "text");
   assert.equal(text, "Antwort aus messages");
+});
+
+function lastSetting(name) {
+  return [...mock.settings].reverse().find((setting) => setting.name === name);
+}
+
+function modelCalls() {
+  return mock.requests.filter((call) => String(call.url || "").endsWith("/models"));
+}
+
+test("ein hinterlegter Schlüssel lädt die Modellnamen in die Aufklappliste", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.test/v1",
+    model: "rmxos-mega2026.1",
+  });
+  const stored = [];
+  plugin.saveData = async (data) => {
+    stored.push(JSON.parse(JSON.stringify(data)));
+  };
+  await plugin.onload();
+  const before = modelCalls().length;
+  await plugin.settingTab.display();
+  const loaded = modelCalls();
+  assert.equal(loaded.length, before + 1);
+  assert.equal(loaded[before].method, "GET");
+  assert.equal(loaded[before].url, "https://api.example.test/v1/models");
+  assert.equal(loaded[before].headers.Authorization, "Bearer test-key");
+  const model = lastSetting("Modell");
+  assert.ok(model.dropdown, "Modell ist eine Aufklappliste");
+  assert.deepEqual(model.dropdown.order, [
+    "",
+    "rmxos-sema2026.1",
+    "rmxos-mega2026.1",
+    "rmxos-mobil2026.1",
+  ]);
+  assert.equal(model.dropdown.value, "rmxos-mega2026.1");
+  assert.equal(plugin.settings.model, "rmxos-mega2026.1");
+
+  const leaf = { type: VIEW_TYPE, app, view: null };
+  app.workspace.leaves.push(leaf);
+  const view = plugin.registeredViews[0].factory(leaf);
+  leaf.view = view;
+  await view.onOpen();
+  const select = find(view.contentEl, (node) => node.tag === "select" && node.classList.has("unitedshare-model-select"));
+  assert.ok(select, "die Seitenleiste bietet die Modelle als Aufklappliste");
+  assert.equal(select.value, "rmxos-mega2026.1");
+  assert.deepEqual(
+    select.children.filter((node) => node.tag === "option").map((node) => node.attrs.value),
+    ["", "rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"],
+  );
+  assert.equal(modelCalls().length, before + 1, "dieselbe Liste wird nicht erneut geladen");
+
+  select.value = "rmxos-sema2026.1";
+  await select.listeners.change();
+  assert.equal(plugin.settings.model, "rmxos-sema2026.1");
+  assert.equal(model.dropdown.value, "rmxos-sema2026.1");
+  assert.equal(stored.at(-1).model, "rmxos-sema2026.1");
+});
+
+test("ohne gespeichertes Modell bleibt die Auswahl leer", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.test/v1",
+    model: "",
+  });
+  await plugin.onload();
+  await plugin.settingTab.display();
+  const model = lastSetting("Modell");
+  assert.equal(model.dropdown.value, "");
+  assert.equal(plugin.settings.model, "");
+  assert.equal(model.dropdown.options["rmxos-mega2026.1"], "rmxos-mega2026.1");
+});
+
+test("eine gespeicherte Kennung außerhalb der Liste bleibt wählbar", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.test/v1",
+    model: "haus-lokal",
+  });
+  await plugin.onload();
+  await plugin.settingTab.display();
+  const model = lastSetting("Modell");
+  assert.equal(model.dropdown.value, "haus-lokal");
+  assert.equal(model.dropdown.options["haus-lokal"], "haus-lokal");
+  assert.equal(plugin.settings.model, "haus-lokal");
+});
+
+test("ohne Schlüssel geht kein Modellabruf raus", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({ apiKey: "", model: "" });
+  await plugin.onload();
+  const before = modelCalls().length;
+  await plugin.settingTab.display();
+  assert.equal(modelCalls().length, before);
+  const model = lastSetting("Modell");
+  assert.equal(model.dropdown.options[""], "Zuerst den Schlüssel eintragen");
+});
+
+test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die Kennung als Text", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({ apiKey: "", baseUrl: "https://api.example.test/v1", model: "haus-lokal" });
+  await plugin.onload();
+  await plugin.settingTab.display();
+  const before = modelCalls().length;
+  const key = lastSetting("API-Schlüssel");
+  await key.text.change("a");
+  await key.text.change("ab");
+  await key.text.change("test-key");
+  assert.equal(modelCalls().length, before);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const loaded = modelCalls();
+  assert.equal(loaded.length, before + 1);
+  assert.equal(loaded[before].headers.Authorization, "Bearer test-key");
+  assert.equal(lastSetting("Modell").dropdown.value, "haus-lokal");
+
+  await key.text.change("rejected-key");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const failed = lastSetting("Modell");
+  assert.equal(failed.dropdown, null);
+  assert.match(failed.desc, /abgelehnt/);
+  assert.equal(failed.text.value, "haus-lokal");
+  assert.equal(plugin.settings.model, "haus-lokal");
 });
 
 test.after(() => {

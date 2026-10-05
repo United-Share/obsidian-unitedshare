@@ -481,6 +481,19 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   white-space: nowrap;
 }
 
+.unitedshare-model-select {
+  max-width: 220px;
+  margin: 0;
+  padding: 0 14px 0 0;
+  border: none;
+  background-color: transparent;
+  color: var(--interactive-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
 .unitedshare-status {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);

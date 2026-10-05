@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { assertVaultRelative, completeMessages, executeVaultAction, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");
+const { assertVaultRelative, completeMessages, executeVaultAction, listModels, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -170,8 +170,8 @@ class UnitedShareView extends ItemView {
 
     const toolbar = inputWrap.createEl("div", { cls: "unitedshare-input-toolbar" });
     const modelBtn = toolbar.createEl("div", { cls: "unitedshare-model-btn" });
-    const modelName = (this.plugin.settings && this.plugin.settings.model) || "Modell";
-    modelBtn.createEl("span", { cls: "unitedshare-model-label", text: modelName });
+    this.modelSelectEl = modelBtn.createEl("select", { cls: "unitedshare-model-select unitedshare-model-label" });
+    this.modelSelectEl.addEventListener("change", () => this.plugin.applyModel(this.modelSelectEl.value));
     const toolbarActions = toolbar.createEl("div", { cls: "unitedshare-toolbar-actions" });
     this.navButton(toolbarActions, "Aktive Notiz", "file-plus", () => this.attachActiveNote());
     this.insertButton = this.navButton(toolbarActions, "In die Notiz", "clipboard", () => this.insertIntoNote());
@@ -188,6 +188,35 @@ class UnitedShareView extends ItemView {
     this.renderTabs();
     await this.renderMessages();
     this.renderHistory();
+    await this.refreshModelSelect();
+  }
+
+  async refreshModelSelect() {
+    const select = this.modelSelectEl;
+    if (!select || !this.plugin || typeof this.plugin.ensureModels !== "function") return;
+    const saved = String((this.plugin.settings && this.plugin.settings.model) || "").trim();
+    let ids = [];
+    if (this.plugin.modelError) {
+      ids = [];
+    } else {
+      try {
+        ids = await this.plugin.ensureModels();
+      } catch (_err) {
+        ids = [];
+      }
+    }
+    if (this.modelSelectEl !== select) return;
+    const choices = [];
+    if (saved && !ids.includes(saved)) choices.push(saved);
+    for (const id of ids) choices.push(id);
+    const hasKey = String((this.plugin.settings && this.plugin.settings.apiKey) || "").trim();
+    select.empty();
+    select.createEl("option", {
+      text: hasKey ? "Modell wählen" : "Zuerst den Schlüssel",
+      attr: { value: "" },
+    });
+    for (const id of choices) select.createEl("option", { text: id, attr: { value: id } });
+    select.value = saved;
   }
 
   navButton(parent, label, icon, onClick) {
@@ -434,6 +463,10 @@ class UnitedShareSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.modelTimer = null;
+    this.modelGeneration = 0;
+    this.modelDropdown = null;
+    this.modelHost = null;
   }
 
   display() {
@@ -441,7 +474,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "UnitedShare" });
     containerEl.createEl("p", {
-      text: "Der API-Schlüssel bleibt in den lokalen Plugin-Daten dieses Tresors. Er wird nicht in die Notiz und nicht in Git geschrieben.",
+      text: "Die Anmeldung ist der API-Schlüssel. Er bleibt in den lokalen Plugin-Daten dieses Tresors und wird nicht in die Notiz und nicht in Git geschrieben.",
     });
     const hinweis = containerEl.createEl("p");
     hinweis.appendText(
@@ -462,6 +495,8 @@ class UnitedShareSettingTab extends PluginSettingTab {
         text.onChange(async (value) => {
           this.plugin.settings.apiKey = value.trim();
           await this.plugin.saveSettings();
+          this.plugin.invalidateModels();
+          this.scheduleModels();
         });
       });
 
@@ -473,20 +508,95 @@ class UnitedShareSettingTab extends PluginSettingTab {
         text.onChange(async (value) => {
           this.plugin.settings.baseUrl = value.trim();
           await this.plugin.saveSettings();
+          this.plugin.invalidateModels();
+          this.scheduleModels();
         });
       });
 
-    new Setting(containerEl)
-      .setName("Modell")
-      .setDesc("Kennung aus einem authentifizierten GET /v1/models")
-      .addText((text) => {
-        text.setPlaceholder("Modell-Kennung");
-        text.setValue(this.plugin.settings.model);
-        text.onChange(async (value) => {
-          this.plugin.settings.model = value.trim();
-          await this.plugin.saveSettings();
+    this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
+    return this.renderModelControl();
+  }
+
+  scheduleModels() {
+    clearTimeout(this.modelTimer);
+    this.modelTimer = setTimeout(() => {
+      this.modelTimer = null;
+      void this.renderModelControl();
+    }, 400);
+  }
+
+  async renderModelControl() {
+    const host = this.modelHost;
+    if (!host) return;
+    const generation = (this.modelGeneration += 1);
+    const apiKey = String((this.plugin.settings && this.plugin.settings.apiKey) || "").trim();
+    host.empty();
+    this.modelDropdown = null;
+    if (!apiKey) {
+      new Setting(host)
+        .setName("Modell")
+        .setDesc("Sobald der API-Schlüssel gespeichert ist, lädt diese Liste die Modellnamen.")
+        .addDropdown((dropdown) => {
+          dropdown.addOption("", "Zuerst den Schlüssel eintragen");
+          dropdown.setValue("");
+          this.modelDropdown = dropdown;
         });
+      this.refreshSidebarSelects();
+      return;
+    }
+    new Setting(host)
+      .setName("Modell")
+      .setDesc("Modelle werden geladen.");
+    let ids = [];
+    let error = "";
+    try {
+      ids = await this.plugin.ensureModels();
+    } catch (err) {
+      error = err && err.message ? err.message : "Die Modellliste ist nicht erreichbar.";
+    }
+    if (generation !== this.modelGeneration || this.modelHost !== host) return;
+    host.empty();
+    this.modelDropdown = null;
+    const saved = String((this.plugin.settings && this.plugin.settings.model) || "").trim();
+    if (error) {
+      new Setting(host)
+        .setName("Modell")
+        .setDesc(error)
+        .addText((text) => {
+          text.setPlaceholder("Modell-Kennung");
+          text.setValue(saved);
+          text.onChange(async (value) => {
+            await this.plugin.applyModel(value);
+          });
+        });
+      this.refreshSidebarSelects();
+      return;
+    }
+    const choices = [];
+    if (saved && !ids.includes(saved)) choices.push(saved);
+    for (const id of ids) choices.push(id);
+    new Setting(host)
+      .setName("Modell")
+      .setDesc("Die Namen kommen von GET /v1/models.")
+      .addDropdown((dropdown) => {
+        dropdown.addOption("", "Modell wählen");
+        for (const id of choices) dropdown.addOption(id, id);
+        dropdown.setValue(choices.includes(saved) ? saved : "");
+        dropdown.onChange(async (value) => {
+          await this.plugin.applyModel(value);
+        });
+        this.modelDropdown = dropdown;
       });
+    this.refreshSidebarSelects();
+  }
+
+  refreshSidebarSelects() {
+    const workspace = this.plugin.app && this.plugin.app.workspace;
+    if (!workspace || typeof workspace.getLeavesOfType !== "function") return;
+    for (const leaf of workspace.getLeavesOfType(VIEW_TYPE)) {
+      const view = leaf && leaf.view;
+      if (view && typeof view.refreshModelSelect === "function") void view.refreshModelSelect();
+    }
   }
 }
 
@@ -535,6 +645,71 @@ module.exports = class UnitedSharePlugin extends Plugin {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
+  }
+
+  invalidateModels() {
+    this.modelStamp = "";
+    this.modelIds = null;
+    this.modelError = "";
+    this.modelFlightStamp = "";
+  }
+
+  async ensureModels() {
+    const apiKey = String((this.settings && this.settings.apiKey) || "").trim();
+    const baseUrl = String((this.settings && this.settings.baseUrl) || "").trim();
+    if (!apiKey) {
+      this.modelIds = [];
+      this.modelError = "";
+      this.modelStamp = "";
+      return [];
+    }
+    const stamp = `${baseUrl}\n${apiKey}`;
+    if (this.modelStamp === stamp && Array.isArray(this.modelIds)) return this.modelIds;
+    if (this.modelFlight && this.modelFlightStamp === stamp) return this.modelFlight;
+    this.modelFlightStamp = stamp;
+    const flight = listModels({
+      baseUrl,
+      apiKey,
+      timeoutMs: 15000,
+      fetchImpl: requestUrlAsFetch(),
+    }).then((ids) => {
+      if (this.modelFlightStamp !== stamp) return ids;
+      this.modelIds = ids;
+      this.modelError = "";
+      this.modelStamp = stamp;
+      return ids;
+    }).catch((error) => {
+      if (this.modelFlightStamp === stamp) {
+        this.modelIds = null;
+        this.modelError = error && error.message ? error.message : "Die Modellliste ist nicht erreichbar.";
+        this.modelStamp = "";
+      }
+      throw error;
+    }).finally(() => {
+      if (this.modelFlight === flight) this.modelFlight = null;
+    });
+    this.modelFlight = flight;
+    return flight;
+  }
+
+  async applyModel(model) {
+    const next = String(model || "").trim();
+    this.settings.model = next;
+    const workspace = this.app && this.app.workspace;
+    const leaves = workspace && typeof workspace.getLeavesOfType === "function"
+      ? workspace.getLeavesOfType(VIEW_TYPE)
+      : [];
+    for (const leaf of leaves) {
+      const view = leaf && leaf.view;
+      if (view && view.modelSelectEl && view.modelSelectEl.value !== next) {
+        view.modelSelectEl.value = next;
+      }
+    }
+    const dropdown = this.settingTab && this.settingTab.modelDropdown;
+    if (dropdown && typeof dropdown.getValue === "function" && dropdown.getValue() !== next) {
+      dropdown.setValue(next);
+    }
+    await this.saveSettings();
   }
 
   async loadSettings() {
