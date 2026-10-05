@@ -113,9 +113,11 @@ OTHER DEALINGS IN THE FONT SOFTWARE. */
 
 .workspace-leaf-content[data-type="unitedshare-sidebar"] .view-content,
 .unitedshare-sidebar {
+  --unitedshare-keyboard-inset: 0px;
   display: flex;
   flex-direction: column;
   height: 100%;
+  box-sizing: border-box;
   padding: 0;
   overflow: hidden;
   font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -128,8 +130,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE. */
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  box-sizing: border-box;
   overflow: hidden;
-  padding: 0 8px 32px;
+  padding: 0 8px calc(32px + var(--unitedshare-keyboard-inset, 0px));
 }
 
 .unitedshare-messages-wrapper {
@@ -508,4 +511,54 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   margin: 6px 2px 0;
+}
+
+body.is-mobile .unitedshare-chat-panel {
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px) + var(--unitedshare-keyboard-inset, 0px));
+}
+
+body.is-mobile .unitedshare-input-wrapper,
+.unitedshare-sidebar.is-keyboard-open .unitedshare-input-wrapper {
+  min-height: 0;
+}
+
+body.is-mobile .unitedshare-input-wrapper textarea.unitedshare-input {
+  font-size: 16px;
+}
+
+body.is-mobile .unitedshare-welcome,
+.unitedshare-sidebar.is-keyboard-open .unitedshare-welcome {
+  min-height: 0;
+  padding: 12px;
+}
+
+.unitedshare-sidebar.is-keyboard-open .unitedshare-chat-panel {
+  padding-bottom: calc(8px + var(--unitedshare-keyboard-inset, 0px));
+}
+
+.unitedshare-sidebar.is-keyboard-open .unitedshare-input-wrapper textarea.unitedshare-input {
+  max-height: 6.5em;
+  overflow-y: auto;
+}
+
+.unitedshare-sidebar.is-keyboard-open .unitedshare-hint {
+  display: none;
+}
+
+@media (max-width: 520px) {
+  .unitedshare-input-wrapper {
+    min-height: 0;
+  }
+
+  .unitedshare-input-wrapper textarea.unitedshare-input {
+    font-size: 16px;
+  }
+
+  .unitedshare-welcome {
+    min-height: 0;
+  }
+
+  .unitedshare-model-select {
+    max-width: 42vw;
+  }
 }

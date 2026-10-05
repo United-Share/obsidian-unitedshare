@@ -21,6 +21,34 @@ function modelsUrl(baseUrl) {
   return `${String(baseUrl || "").replace(/\/+$/, "")}/models`;
 }
 
+// 120px trennt eine Bildschirmtastatur von der schmalen Browserleiste.
+const KEYBOARD_MIN_PX = 120;
+
+function coveredByKeyboard(viewRect, viewport, layoutHeight) {
+  const visible = Number(viewport && viewport.height);
+  if (!Number.isFinite(visible) || visible <= 0) return 0;
+  const offset = Number(viewport && viewport.offsetTop);
+  const top = Number.isFinite(offset) ? offset : 0;
+  const visibleBottom = top + visible;
+  const viewBottom = Number(viewRect && viewRect.bottom);
+  const viewHeight = Number(viewRect && viewRect.height);
+  const layout = Number(layoutHeight);
+
+  let overlap = Number.isFinite(viewBottom) ? viewBottom - visibleBottom : 0;
+  if (Number.isFinite(layout)) {
+    const windowOverlap = layout - visibleBottom;
+    const keyboardOpen = windowOverlap > KEYBOARD_MIN_PX;
+    const reachesBottom = !Number.isFinite(viewBottom) || layout - viewBottom < 80;
+    const fillsScreen = Number.isFinite(viewHeight) && viewHeight > layout * 0.55;
+    if (keyboardOpen && (reachesBottom || fillsScreen)) {
+      overlap = Math.max(overlap, windowOverlap);
+    }
+  }
+  if (!Number.isFinite(overlap) || overlap <= 1) return 0;
+  const cap = Number.isFinite(viewHeight) && viewHeight > 0 ? viewHeight : overlap;
+  return Math.min(Math.ceil(overlap), Math.floor(cap));
+}
+
 function mentionPaths(question) {
   const paths = [];
   const seen = new Set();
@@ -179,13 +207,19 @@ async function postJson({
   return typeof response.json === "function" ? response.json() : response;
 }
 
+const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-mobil2026.1"];
+
+function isObsidianModel(id) {
+  return OBSIDIAN_MODELS.includes(String(id || "").trim());
+}
+
 function modelIdsFromPayload(payload) {
   const rows = payload && Array.isArray(payload.data) ? payload.data : [];
   const ids = [];
   const seen = new Set();
   for (const row of rows) {
     const id = row && typeof row.id === "string" ? row.id.trim() : "";
-    if (!id || seen.has(id)) continue;
+    if (!isObsidianModel(id) || seen.has(id)) continue;
     seen.add(id);
     ids.push(id);
   }
@@ -934,6 +968,72 @@ class UnitedShareView extends ItemView {
     await this.renderMessages();
     this.renderHistory();
     await this.refreshModelSelect();
+    this.bindKeyboardInset();
+  }
+
+  bindKeyboardInset() {
+    this.unbindKeyboardInset();
+    const sync = () => this.syncKeyboardInset();
+    this.keyboardSync = sync;
+    if (this.questionEl) {
+      this.questionEl.addEventListener("focus", sync);
+      this.questionEl.addEventListener("blur", sync);
+    }
+    if (typeof window === "undefined") return;
+    window.addEventListener("resize", sync);
+    const viewport = window.visualViewport;
+    if (viewport && typeof viewport.addEventListener === "function") {
+      viewport.addEventListener("resize", sync);
+      viewport.addEventListener("scroll", sync);
+      this.keyboardViewport = viewport;
+    }
+    sync();
+  }
+
+  unbindKeyboardInset() {
+    const sync = this.keyboardSync;
+    if (!sync) return;
+    if (typeof window !== "undefined") window.removeEventListener("resize", sync);
+    const viewport = this.keyboardViewport;
+    if (viewport && typeof viewport.removeEventListener === "function") {
+      viewport.removeEventListener("resize", sync);
+      viewport.removeEventListener("scroll", sync);
+    }
+    this.keyboardViewport = null;
+    this.keyboardSync = null;
+  }
+
+  setKeyboardInset(px) {
+    const root = this.contentEl;
+    if (!root) return;
+    const open = px > 0;
+    const value = open ? `${px}px` : "0px";
+    if (root.style && typeof root.style.setProperty === "function") {
+      root.style.setProperty("--unitedshare-keyboard-inset", value);
+    } else if (root.style) {
+      root.style["--unitedshare-keyboard-inset"] = value;
+    }
+    if (open) root.addClass("is-keyboard-open");
+    else root.removeClass("is-keyboard-open");
+  }
+
+  syncKeyboardInset(metrics) {
+    const root = this.contentEl;
+    if (!root) return 0;
+    const given = metrics || {};
+    let rect = given.rect;
+    if (!rect && typeof root.getBoundingClientRect === "function") {
+      rect = root.getBoundingClientRect();
+    }
+    let viewport = given.viewport;
+    if (!viewport && typeof window !== "undefined") viewport = window.visualViewport;
+    let layoutHeight = given.layoutHeight;
+    if (!Number.isFinite(layoutHeight) && typeof window !== "undefined") {
+      layoutHeight = window.innerHeight;
+    }
+    const px = coveredByKeyboard(rect, viewport, layoutHeight);
+    this.setKeyboardInset(px);
+    return px;
   }
 
   async refreshModelSelect() {
@@ -951,9 +1051,10 @@ class UnitedShareView extends ItemView {
       }
     }
     if (this.modelSelectEl !== select) return;
+    const known = Array.isArray(ids) ? ids.filter((id) => isObsidianModel(id)) : [];
     const choices = [];
-    if (saved && !ids.includes(saved)) choices.push(saved);
-    for (const id of ids) choices.push(id);
+    if (saved && isObsidianModel(saved) && !known.includes(saved)) choices.push(saved);
+    for (const id of known) choices.push(id);
     const hasKey = String((this.plugin.settings && this.plugin.settings.apiKey) || "").trim();
     select.empty();
     select.createEl("option", {
@@ -961,7 +1062,7 @@ class UnitedShareView extends ItemView {
       attr: { value: "" },
     });
     for (const id of choices) select.createEl("option", { text: id, attr: { value: id } });
-    select.value = saved;
+    select.value = choices.includes(saved) ? saved : "";
   }
 
   navButton(parent, label, icon, onClick) {
@@ -1130,6 +1231,7 @@ class UnitedShareView extends ItemView {
   }
 
   async onClose() {
+    this.unbindKeyboardInset();
     this.contentEl.empty();
   }
 
@@ -1218,8 +1320,14 @@ class UnitedShareSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "UnitedShare" });
+    const login = containerEl.createEl("p");
+    login.appendText("Anmeldung: im Browser einen Zugang anlegen. Dort stehen eine key-ID und ein Schlüssel. Die key-ID bleibt auf der Seite. Hier nur den Schlüssel einfügen. Er bleibt in den lokalen Plugin-Daten dieses Tresors und wird nicht in die Notiz und nicht in Git geschrieben. ");
+    login.createEl("a", {
+      text: "Zugang für Obsidian anlegen",
+      href: "https://unitedshare.ai/app/?q=obsidian",
+    });
     containerEl.createEl("p", {
-      text: "Die Anmeldung ist der API-Schlüssel. Er bleibt in den lokalen Plugin-Daten dieses Tresors und wird nicht in die Notiz und nicht in Git geschrieben.",
+      text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Aktive Notiz setzt @\"Pfad\" ins Feld. In die Notiz schreibt Frage und Antwort an den Cursor.",
     });
     const hinweis = containerEl.createEl("p");
     hinweis.appendText(
@@ -1317,12 +1425,13 @@ class UnitedShareSettingTab extends PluginSettingTab {
       this.refreshSidebarSelects();
       return;
     }
+    const known = Array.isArray(ids) ? ids.filter((id) => isObsidianModel(id)) : [];
     const choices = [];
-    if (saved && !ids.includes(saved)) choices.push(saved);
-    for (const id of ids) choices.push(id);
+    if (saved && isObsidianModel(saved) && !known.includes(saved)) choices.push(saved);
+    for (const id of known) choices.push(id);
     new Setting(host)
       .setName("Modell")
-      .setDesc("Die Namen kommen von GET /v1/models.")
+      .setDesc("Nur rmxos-mega2026.1, rmxos-sema2026.1 und rmxos-mobil2026.1. Andere Kennungen zeigt dieses Plugin nicht.")
       .addDropdown((dropdown) => {
         dropdown.addOption("", "Modell wählen");
         for (const id of choices) dropdown.addOption(id, id);
@@ -1438,7 +1547,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
   }
 
   async applyModel(model) {
-    const next = String(model || "").trim();
+    const raw = String(model || "").trim();
+    const next = raw && !isObsidianModel(raw) ? "" : raw;
     this.settings.model = next;
     const workspace = this.app && this.app.workspace;
     const leaves = workspace && typeof workspace.getLeavesOfType === "function"
@@ -1459,6 +1569,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (!isObsidianModel(this.settings.model)) this.settings.model = "";
   }
 
   async saveSettings() {

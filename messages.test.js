@@ -6,6 +6,8 @@ const assert = require("node:assert/strict");
 const {
   buildAnthropicBody,
   completeMessages,
+  coveredByKeyboard,
+  isObsidianModel,
   listModels,
   loadMentionedNotes,
   mentionPaths,
@@ -23,6 +25,17 @@ function listen(handler) {
     });
   });
 }
+
+test("coveredByKeyboard hebt nur den verdeckten Prompt", () => {
+  const keyboard = { offsetTop: 0, height: 480 };
+  assert.equal(coveredByKeyboard({ bottom: 844, height: 760 }, keyboard, 844), 364);
+  assert.equal(coveredByKeyboard({ bottom: 844, height: 760 }, { offsetTop: 20, height: 480 }, 844), 344);
+  assert.equal(coveredByKeyboard({ bottom: 844, height: 760 }, { offsetTop: 0, height: 844 }, 844), 0);
+  assert.equal(coveredByKeyboard({ bottom: 400, height: 360 }, keyboard, 844), 0);
+  assert.equal(coveredByKeyboard({ bottom: 480, height: 760 }, keyboard, 844), 364);
+  assert.equal(coveredByKeyboard(null, null, 800), 0);
+  assert.equal(coveredByKeyboard({ bottom: 800, height: 200 }, { offsetTop: 0, height: 100 }, 800), 200);
+});
 
 test("messagesUrl zeigt auf /v1/messages", () => {
   assert.equal(typeof messagesUrl, "function");
@@ -49,11 +62,14 @@ test("listModels liest die Kennungen aus einem authentifizierten GET /v1/models"
     res.end(JSON.stringify({
       object: "list",
       data: [
+        { id: "devstral" },
+        { id: "reemax-cortex" },
         { id: "rmxos-sema2026.1", object: "model" },
         { id: "rmxos-mega2026.1" },
         { id: "  " },
         { id: "rmxos-mega2026.1" },
         { id: "rmxos-mobil2026.1" },
+        { id: "nemotron-3-nano" },
         { object: "model" },
       ],
     }));
@@ -67,6 +83,9 @@ test("listModels liest die Kennungen aus einem authentifizierten GET /v1/models"
     assert.equal(seen[0].url, "/v1/models");
     assert.equal(seen[0].authorization, "Bearer test-key");
     assert.deepEqual(ids, ["rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"]);
+    assert.equal(isObsidianModel("rmxos-mega2026.1"), true);
+    assert.equal(isObsidianModel("devstral"), false);
+    assert.equal(isObsidianModel("reemax-cortex"), false);
   } finally {
     server.close();
   }

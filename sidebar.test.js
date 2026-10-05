@@ -275,11 +275,14 @@ function installObsidianMock() {
           json: {
             object: "list",
             data: [
+              { id: "devstral" },
+              { id: "reemax-cortex" },
               { id: "rmxos-sema2026.1" },
               { id: "rmxos-mega2026.1" },
               { id: "  " },
               { id: "rmxos-mega2026.1" },
               { id: "rmxos-mobil2026.1" },
+              { id: "nemotron-3-nano" },
             ],
           },
         };
@@ -582,6 +585,37 @@ test("ohne aktive Notiz bleibt der Text in der Seitenleiste", async () => {
   assert.match(mock.notices.at(-1), /Notiz/);
 });
 
+test("die Tastatur schiebt das Promptfeld in den sichtbaren Bereich", async () => {
+  const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  assert.match(css, /--unitedshare-keyboard-inset/);
+  assert.match(css, /\.unitedshare-sidebar\.is-keyboard-open \.unitedshare-chat-panel/);
+  assert.match(css, /safe-area-inset-bottom/);
+  assert.match(css, /@media \(max-width: 520px\)/);
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  const covered = view.syncKeyboardInset({
+    rect: { bottom: 844, height: 760 },
+    viewport: { offsetTop: 0, height: 430 },
+    layoutHeight: 844,
+  });
+  assert.equal(covered, 414);
+  assert.equal(view.contentEl.classList.has("is-keyboard-open"), true);
+  assert.equal(view.contentEl.style["--unitedshare-keyboard-inset"], "414px");
+  const open = view.syncKeyboardInset({
+    rect: { bottom: 844, height: 760 },
+    viewport: { offsetTop: 0, height: 844 },
+    layoutHeight: 844,
+  });
+  assert.equal(open, 0);
+  assert.equal(view.contentEl.classList.has("is-keyboard-open"), false);
+  assert.equal(view.contentEl.style["--unitedshare-keyboard-inset"], "0px");
+  await view.onClose();
+  assert.equal(view.keyboardSync, null);
+});
+
 test("Schrift und Zeichen stammen von unitedshare.ai und liegen im Plugin", () => {
   const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
   const woff = fs.readFileSync(path.join(root, "fonts/Inter-latin.woff2"));
@@ -754,20 +788,22 @@ test("ohne gespeichertes Modell bleibt die Auswahl leer", async () => {
   assert.equal(model.dropdown.options["rmxos-mega2026.1"], "rmxos-mega2026.1");
 });
 
-test("eine gespeicherte Kennung außerhalb der Liste bleibt wählbar", async () => {
+test("eine Kennung außerhalb der drei Hauptmodelle fällt weg", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);
   plugin.loadData = async () => ({
     apiKey: "test-key",
     baseUrl: "https://api.example.test/v1",
-    model: "haus-lokal",
+    model: "devstral",
   });
   await plugin.onload();
+  assert.equal(plugin.settings.model, "");
   await plugin.settingTab.display();
   const model = lastSetting("Modell");
-  assert.equal(model.dropdown.value, "haus-lokal");
-  assert.equal(model.dropdown.options["haus-lokal"], "haus-lokal");
-  assert.equal(plugin.settings.model, "haus-lokal");
+  assert.equal(model.dropdown.value, "");
+  assert.equal(model.dropdown.options.devstral, undefined);
+  assert.equal(model.dropdown.options["reemax-cortex"], undefined);
+  assert.equal(model.dropdown.options["rmxos-mega2026.1"], "rmxos-mega2026.1");
 });
 
 test("ohne Schlüssel geht kein Modellabruf raus", async () => {
@@ -785,7 +821,7 @@ test("ohne Schlüssel geht kein Modellabruf raus", async () => {
 test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die Kennung als Text", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);
-  plugin.loadData = async () => ({ apiKey: "", baseUrl: "https://api.example.test/v1", model: "haus-lokal" });
+  plugin.loadData = async () => ({ apiKey: "", baseUrl: "https://api.example.test/v1", model: "rmxos-mobil2026.1" });
   await plugin.onload();
   await plugin.settingTab.display();
   const before = modelCalls().length;
@@ -798,15 +834,16 @@ test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die
   const loaded = modelCalls();
   assert.equal(loaded.length, before + 1);
   assert.equal(loaded[before].headers.Authorization, "Bearer test-key");
-  assert.equal(lastSetting("Modell").dropdown.value, "haus-lokal");
+  assert.equal(lastSetting("Modell").dropdown.value, "rmxos-mobil2026.1");
+  assert.equal(lastSetting("Modell").dropdown.options.devstral, undefined);
 
   await key.text.change("rejected-key");
   await new Promise((resolve) => setTimeout(resolve, 500));
   const failed = lastSetting("Modell");
   assert.equal(failed.dropdown, null);
   assert.match(failed.desc, /abgelehnt/);
-  assert.equal(failed.text.value, "haus-lokal");
-  assert.equal(plugin.settings.model, "haus-lokal");
+  assert.equal(failed.text.value, "rmxos-mobil2026.1");
+  assert.equal(plugin.settings.model, "rmxos-mobil2026.1");
 });
 
 test.after(() => {

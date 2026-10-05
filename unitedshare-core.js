@@ -20,6 +20,34 @@ function modelsUrl(baseUrl) {
   return `${String(baseUrl || "").replace(/\/+$/, "")}/models`;
 }
 
+// 120px trennt eine Bildschirmtastatur von der schmalen Browserleiste.
+const KEYBOARD_MIN_PX = 120;
+
+function coveredByKeyboard(viewRect, viewport, layoutHeight) {
+  const visible = Number(viewport && viewport.height);
+  if (!Number.isFinite(visible) || visible <= 0) return 0;
+  const offset = Number(viewport && viewport.offsetTop);
+  const top = Number.isFinite(offset) ? offset : 0;
+  const visibleBottom = top + visible;
+  const viewBottom = Number(viewRect && viewRect.bottom);
+  const viewHeight = Number(viewRect && viewRect.height);
+  const layout = Number(layoutHeight);
+
+  let overlap = Number.isFinite(viewBottom) ? viewBottom - visibleBottom : 0;
+  if (Number.isFinite(layout)) {
+    const windowOverlap = layout - visibleBottom;
+    const keyboardOpen = windowOverlap > KEYBOARD_MIN_PX;
+    const reachesBottom = !Number.isFinite(viewBottom) || layout - viewBottom < 80;
+    const fillsScreen = Number.isFinite(viewHeight) && viewHeight > layout * 0.55;
+    if (keyboardOpen && (reachesBottom || fillsScreen)) {
+      overlap = Math.max(overlap, windowOverlap);
+    }
+  }
+  if (!Number.isFinite(overlap) || overlap <= 1) return 0;
+  const cap = Number.isFinite(viewHeight) && viewHeight > 0 ? viewHeight : overlap;
+  return Math.min(Math.ceil(overlap), Math.floor(cap));
+}
+
 function mentionPaths(question) {
   const paths = [];
   const seen = new Set();
@@ -178,13 +206,19 @@ async function postJson({
   return typeof response.json === "function" ? response.json() : response;
 }
 
+const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-mobil2026.1"];
+
+function isObsidianModel(id) {
+  return OBSIDIAN_MODELS.includes(String(id || "").trim());
+}
+
 function modelIdsFromPayload(payload) {
   const rows = payload && Array.isArray(payload.data) ? payload.data : [];
   const ids = [];
   const seen = new Set();
   for (const row of rows) {
     const id = row && typeof row.id === "string" ? row.id.trim() : "";
-    if (!id || seen.has(id)) continue;
+    if (!isObsidianModel(id) || seen.has(id)) continue;
     seen.add(id);
     ids.push(id);
   }
@@ -755,10 +789,12 @@ module.exports = {
   cleanProcessEnv,
   completeChat,
   completeMessages,
+  coveredByKeyboard,
   executeVaultAction,
   fsVaultHost,
   loadMentionedNotes,
   mentionPaths,
+  isObsidianModel,
   listModels,
   messagesUrl,
   modelsUrl,

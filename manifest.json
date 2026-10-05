@@ -1,7 +1,7 @@
 {
   "id": "unitedshare",
   "name": "UnitedShare",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "minAppVersion": "1.5.0",
   "description": "Fragt das Modell hinter api.unitedshare.ai aus der Seitenleiste und der Notiz.",
   "author": "United Share GmbH",
