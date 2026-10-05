@@ -644,6 +644,66 @@ test("die Tastatur schiebt das Promptfeld in den sichtbaren Bereich", async () =
   assert.equal(view.keyboardSync, null);
 });
 
+test("Tippen neben das Feld und leere Eingabe klappen die Tastatur zu", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  plugin.completeThread = async () => "ok";
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  let blurred = 0;
+  view.questionEl.blur = () => {
+    blurred += 1;
+  };
+  const down = view.contentEl.listeners.pointerdown;
+  const touch = view.contentEl.listeners.touchstart;
+  assert.equal(typeof down, "function");
+  assert.equal(typeof touch, "function");
+
+  down({ target: { closest() { return null; } } });
+  assert.equal(blurred, 1);
+  down({ target: view.questionEl });
+  down({
+    target: {
+      closest(selector) {
+        return selector === ".unitedshare-input-footer" ? {} : null;
+      },
+    },
+  });
+  down({ target: { tag: "button", closest() { return null; } } });
+  assert.equal(blurred, 1);
+
+  touch({ target: { closest() { return null; } } });
+  assert.equal(blurred, 2);
+
+  view.keyboardInsetPx = 280;
+  view.questionEl.value = "  ";
+  view.questionEl.listeners.keydown({ key: "Enter", preventDefault() {} });
+  assert.equal(blurred, 3);
+  assert.equal(view.statusEl.text, "");
+
+  view.keyboardInsetPx = 0;
+  view.questionEl.listeners.keydown({ key: "Enter", shiftKey: true, preventDefault() {} });
+  view.questionEl.listeners.keydown({ key: "Enter", preventDefault() {} });
+  assert.equal(blurred, 3);
+  assert.equal(view.statusEl.text, "Bitte eine Frage eingeben.");
+
+  view.keyboardInsetPx = 280;
+  view.questionEl.value = "Hallo";
+  await view.submit();
+  assert.equal(blurred, 4);
+  assert.equal(view.questionEl.value, "");
+
+  view.keyboardInsetPx = 0;
+  view.questionEl.value = "Noch mal";
+  await view.submit();
+  assert.equal(blurred, 4);
+
+  await view.onClose();
+  assert.equal(view.keyboardDismiss, null);
+  assert.equal(view.keyboardSync, null);
+});
+
 test("Schrift und Zeichen stammen von unitedshare.ai und liegen im Plugin", () => {
   const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
   const woff = fs.readFileSync(path.join(root, "fonts/Inter-latin.woff2"));

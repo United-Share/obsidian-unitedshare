@@ -180,10 +180,14 @@ class UnitedShareView extends ItemView {
     this.questionEl = inputWrap.createEl("textarea", { cls: "unitedshare-input" });
     this.questionEl.placeholder = "Nachricht an UnitedShare";
     this.questionEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        if (typeof event.preventDefault === "function") event.preventDefault();
-        this.submit();
+      if (event.key !== "Enter" || event.shiftKey) return;
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      const question = (this.questionEl.value || "").trim();
+      if (!question && this.keyboardInsetPx > 0) {
+        this.dismissKeyboard();
+        return;
       }
+      this.submit();
     });
 
     const toolbar = inputWrap.createEl("div", { cls: "unitedshare-input-toolbar" });
@@ -224,6 +228,14 @@ class UnitedShareView extends ItemView {
       this.questionEl.addEventListener("focus", sync);
       this.questionEl.addEventListener("blur", sync);
     }
+    this.keyboardDismiss = (event) => {
+      if (this.tapKeepsKeyboard(event && event.target)) return;
+      this.dismissKeyboard();
+    };
+    if (this.contentEl && typeof this.contentEl.addEventListener === "function") {
+      this.contentEl.addEventListener("pointerdown", this.keyboardDismiss);
+      this.contentEl.addEventListener("touchstart", this.keyboardDismiss);
+    }
     if (typeof window === "undefined") return;
     window.addEventListener("resize", sync);
     for (const name of ["keyboardWillShow", "keyboardWillHide", "keyboardDidShow", "keyboardDidHide"]) {
@@ -253,6 +265,11 @@ class UnitedShareView extends ItemView {
       this.keyboardObserver.disconnect();
     }
     this.keyboardObserver = null;
+    if (this.contentEl && this.keyboardDismiss && typeof this.contentEl.removeEventListener === "function") {
+      this.contentEl.removeEventListener("pointerdown", this.keyboardDismiss);
+      this.contentEl.removeEventListener("touchstart", this.keyboardDismiss);
+    }
+    this.keyboardDismiss = null;
     const sync = this.keyboardSync;
     if (!sync) return;
     if (this.questionEl && typeof this.questionEl.removeEventListener === "function") {
@@ -307,8 +324,28 @@ class UnitedShareView extends ItemView {
     } else if (root.style) {
       root.style["--unitedshare-keyboard-inset"] = value;
     }
+    this.keyboardInsetPx = open ? px : 0;
     if (open) root.addClass("is-keyboard-open");
     else root.removeClass("is-keyboard-open");
+  }
+
+  dismissKeyboard() {
+    const field = this.questionEl;
+    if (!field || typeof field.blur !== "function") return;
+    field.blur();
+  }
+
+  tapKeepsKeyboard(target) {
+    if (!target || target === this.questionEl) return true;
+    const tag = String(target.tagName || target.tag || "").toLowerCase();
+    if (tag === "button" || tag === "a" || tag === "select" || tag === "textarea" || tag === "input" || tag === "label") {
+      return true;
+    }
+    if (typeof target.closest !== "function") return false;
+    return Boolean(
+      target.closest(".unitedshare-input-footer")
+      || target.closest("button, a, select, textarea, input, label"),
+    );
   }
 
   syncKeyboardInset(metrics) {
@@ -561,6 +598,7 @@ class UnitedShareView extends ItemView {
     if (files.length) entry.files = files;
     tab.messages.push(entry);
     this.questionEl.value = "";
+    if (this.keyboardInsetPx > 0) this.dismissKeyboard();
     this.askedQuestion = question;
     this.answer = "";
     await this.renderMessages();
