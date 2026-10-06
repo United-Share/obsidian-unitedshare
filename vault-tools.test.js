@@ -219,6 +219,213 @@ test("run bricht nach der Frist ab und eine Textdatei startet nicht", async () =
   }
 });
 
+function spawnOk(out) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    process.nextTick(() => {
+      child.stdout.emit("data", out);
+      child.emit("close", 0);
+    });
+    return child;
+  };
+}
+
+test("mesh-join startet reemax mesh join mit der Datei im Tresor", async () => {
+  const { parent, root } = tempVault();
+  const seen = [];
+  const spawnImpl = (cmd, args, opts) => {
+    seen.push({ cmd, args, opts });
+    return spawnOk("receipt\tpeers/linux-b.reemax.receipt\n")();
+  };
+  try {
+    fs.mkdirSync(path.join(root, "peers"));
+    fs.writeFileSync(path.join(root, "peers", "linux-b.reemax.json"), "{\"kind\":\"invite\",\"PrivateKey\":\"NICHT-LESEN\"}\n");
+    const host = fsVaultHost(root, {
+      spawnImpl,
+      env: { PATH: "/usr/bin", HOME: "/tmp", UNITEDSHARE_API_KEY: "sekret" },
+    });
+    const joined = await executeVaultAction({
+      action: "mesh-join",
+      path: "peers/linux-b.reemax.json",
+      command: "rm -rf /",
+    }, host);
+    assert.match(joined, /mesh-join peers\/linux-b\.reemax\.json/);
+    assert.match(joined, /receipt/);
+    assert.equal(joined.includes("NICHT-LESEN"), false);
+    assert.equal(joined.includes("sekret"), false);
+    assert.equal(joined.includes("rm -rf"), false);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].cmd, "reemax");
+    assert.deepEqual(seen[0].args, ["mesh", "join", fs.realpathSync(path.join(root, "peers", "linux-b.reemax.json"))]);
+    assert.equal(seen[0].opts.shell, false);
+    assert.equal(Object.hasOwn(seen[0].opts.env, "UNITEDSHARE_API_KEY"), false);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("sync pull startet reemax sync pull und nie mesh sync", async () => {
+  const { parent, root } = tempVault();
+  const seen = [];
+  const spawnImpl = (cmd, args, opts) => {
+    seen.push({ cmd, args, opts });
+    return spawnOk("code 0\nok\n")();
+  };
+  try {
+    const host = fsVaultHost(root, { spawnImpl, env: { PATH: "/usr/bin", HOME: "/tmp", UNITEDSHARE_API_KEY: "sekret" } });
+    const pulled = await executeVaultAction({
+      action: "sync",
+      peer: "demo",
+      direction: "pull",
+      command: "rm -rf /",
+      path: "../outside",
+    }, host);
+    assert.match(pulled, /sync pull demo/);
+    assert.equal(pulled.includes("sekret"), false);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].cmd, "reemax");
+    assert.deepEqual(seen[0].args, ["sync", "pull", "demo"]);
+    assert.equal(seen[0].args.includes("mesh"), false);
+    assert.equal(seen[0].opts.shell, false);
+    const pushed = await executeVaultAction({ action: "sync", peer: "demo", direction: "push" }, host);
+    assert.match(pushed, /sync push demo/);
+    assert.deepEqual(seen[1].args, ["sync", "push", "demo"]);
+    for (const bad of [
+      { peer: "demo;rm", direction: "pull" },
+      { peer: "../demo", direction: "pull" },
+      { peer: "demo", direction: "both" },
+      { peer: "demo", direction: "mesh" },
+      { peer: "", direction: "pull" },
+    ]) {
+      const refused = await executeVaultAction({ action: "sync", ...bad }, host);
+      assert.equal(refused.includes("ok"), false);
+    }
+    assert.equal(seen.length, 2);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("mesh-sync und ein Befehlstext sind keine Aktionen", () => {
+  const actions = parseVaultActions([
+    fence({ action: "mesh-sync" }),
+    fence({ action: "bash", command: "rm -rf /" }),
+    fence({ action: "mesh-join", path: "peers/a.json", command: "rm -rf /" }),
+    fence({ action: "sync", peer: "demo", direction: "pull", command: "sh" }),
+  ].join("\n"));
+  assert.deepEqual(actions, [
+    { action: "mesh-join", path: "peers/a.json", content: "" },
+    { action: "sync", path: "", content: "", peer: "demo", direction: "pull" },
+  ]);
+  assert.equal(JSON.stringify(actions).includes("rm -rf"), false);
+});
+
+test("mesh-join lässt Wege außerhalb des Tresors und fehlende Dateien stehen", async () => {
+  const { parent, root } = tempVault();
+  const seen = [];
+  const spawnImpl = (cmd, args) => {
+    seen.push({ cmd, args });
+    return spawnOk("nein")();
+  };
+  const outside = path.join(parent, "secret.json");
+  fs.writeFileSync(outside, "PrivateKey AUSSEN\n");
+  try {
+    fs.mkdirSync(path.join(root, "peers"));
+    fs.symlinkSync(outside, path.join(root, "peers", "leak.json"));
+    const host = fsVaultHost(root, { spawnImpl });
+    const escaped = await executeVaultAction({ action: "mesh-join", path: "../secret.json" }, host);
+    const absolute = await executeVaultAction({ action: "mesh-join", path: "/etc/passwd" }, host);
+    const missing = await executeVaultAction({ action: "mesh-join", path: "peers/fehlt.json" }, host);
+    const linked = await executeVaultAction({ action: "mesh-join", path: "peers/leak.json" }, host);
+    assert.match(escaped, /Pfad bleibt im Tresor/);
+    assert.match(absolute, /Pfad bleibt im Tresor/);
+    assert.match(missing, /Einladung liegt nicht im Tresor/);
+    assert.match(linked, /Pfad bleibt im Tresor/);
+    for (const result of [escaped, absolute, missing, linked]) {
+      assert.equal(result.includes("AUSSEN"), false);
+    }
+    assert.equal(seen.length, 0);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("mesh-join gibt einen Fehlercode des CLI als Text zurück", async () => {
+  const { parent, root } = tempVault();
+  const file = path.join(root, "peers");
+  fs.mkdirSync(file);
+  fs.writeFileSync(path.join(file, "b.json"), "{}\n");
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    process.nextTick(() => {
+      child.stderr.emit("data", "mesh_id passt nicht\n");
+      child.emit("close", 2);
+    });
+    return child;
+  };
+  try {
+    const host = fsVaultHost(root, { spawnImpl });
+    const result = await executeVaultAction({ action: "mesh-join", path: "peers/b.json" }, host);
+    assert.match(result, /code 2/);
+    assert.match(result, /mesh_id passt nicht/);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("eine mesh-join-Antwort startet nur den lokalen Beitritt", async () => {
+  const { parent, root } = tempVault();
+  const seen = [];
+  const spawnImpl = (cmd, args) => {
+    seen.push({ cmd, args });
+    return spawnOk("receipt\tok\n")();
+  };
+  try {
+    fs.mkdirSync(path.join(root, "peers"));
+    fs.writeFileSync(path.join(root, "peers", "linux-b.reemax.json"), "{}\n");
+    const host = fsVaultHost(root, { spawnImpl });
+    const answer = await runVaultInstruction({
+      turns: [{ role: "user", content: "nimm die Einladung an" }],
+      host,
+      complete(thread) {
+        if (thread.length === 1) {
+          return fence({ action: "mesh-join", path: "peers/linux-b.reemax.json", command: "rm -rf /" });
+        }
+        return "Der Knoten ist dabei.";
+      },
+    });
+    assert.equal(answer, "Der Knoten ist dabei.");
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].args, [
+      "mesh",
+      "join",
+      fs.realpathSync(path.join(root, "peers", "linux-b.reemax.json")),
+    ]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("Prompt und Readme nennen Beitritt und Abgleich und lassen den Einstellungssatz", () => {
+  const src = fs.readFileSync(path.join(__dirname, "main.src.js"), "utf8");
+  const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+  const settings = 'text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Aktive Notiz setzt @\\"Pfad\\" ins Feld. In die Notiz schreibt Frage und Antwort an den Cursor."';
+  assert.equal(src.includes(settings), true);
+  assert.equal(src.includes('{"action":"mesh-join","path":"relativer/pfad.json"}'), true);
+  assert.equal(src.includes('{"action":"sync","peer":"name","direction":"pull"}'), true);
+  assert.equal(src.includes("reemax mesh sync kopiert keine Dateien und ist keine Aktion."), true);
+  assert.match(readme, /\*\*Beitreten\*\*/);
+  assert.match(readme, /\*\*Abgleich\*\*/);
+  assert.equal(readme.includes("Release-Tag `1.1.7`"), true);
+  assert.equal(readme.includes("Das Plugin legt kein Paar an."), true);
+});
+
 test("cleanProcessEnv lässt Schlüssel weg", () => {
   const env = cleanProcessEnv({
     PATH: "/usr/bin",

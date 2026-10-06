@@ -46,6 +46,8 @@ Die Werkzeuge laufen auf diesem Rechner, mit den Funktionen des offenen Tresors.
 - **Schreiben** legt eine Datei an oder ändert sie. Eine Anlagebitte mit einem Codeblock `python`, `javascript` oder `bash` speichert diesen Inhalt unter dem genannten Pfad.
 - **Starten** führt auf dem Desktop `.py`, `.js`, `.mjs` und `.sh` im Tresor aus.
 - Ein Block `unitedshare` mit `read`, `list`, `write` oder `run` tut dasselbe, wenn der Pfad in der Antwort steht.
+- **Beitreten** nimmt eine Einladungs- oder Empfangsdatei im Tresor an. Das Plugin startet dafür nur `reemax mesh join` mit diesem relativen Pfad.
+- **Abgleich** startet `reemax sync push` oder `reemax sync pull` für einen Namen, der mit `reemax sync pair` schon eingerichtet ist. Beide Richtungen zugleich gibt es nicht. `reemax mesh sync` prüft den Tunnel und kopiert keine Dateien. Das Plugin legt kein Paar an.
 - **In die Notiz** schreibt die letzte Frage und Antwort an die Cursor-Position der aktiven Notiz.
 - `zeige die Graphansicht` oder `öffne den Graphen` öffnet die Graphansicht auf diesem Gerät. `zeige die lokale Graphansicht` und `Graphansicht der Notiz` öffnen den Graphen der offenen Notiz. Diese Sätze gehen nicht ans Modell.
 - Ist die Seitenleiste zugeklappt, steht unten im Fenster die UnitedShare-Eingabe. Ein Rechtsklick bietet UnitedShareAI. Enter schickt den Auftrag. Eine Markierung wird nur durch die Antwort ersetzt. Ohne Markierung wird nur die Antwort am Cursor eingefügt.
@@ -74,4 +76,4 @@ Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.githu
 
 ## Stand
 
-Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.6`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.
+Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.7`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.

@@ -195,6 +195,10 @@ function composerNode(tag) {
       this.classList.add(name);
       return this;
     },
+    removeClass(name) {
+      this.classList.delete(name);
+      return this;
+    },
     createEl(childTag, opts = {}) {
       const child = composerNode(childTag);
       child.parent = this;
@@ -640,7 +644,7 @@ test("die Anleitung beschreibt die Eingabe unten im Fenster", () => {
   assert.match(readme, /unten im Fenster/);
   assert.match(readme, /UnitedShareAI/);
   assert.match(readme, /nur durch die Antwort ersetzt/);
-  assert.match(readme, /Release-Tag `1\.1\.6`/);
+  assert.match(readme, /Release-Tag `1\.1\.7`/);
   assert.doesNotMatch(readme, /schwebendes Feld an der Cursor-Stelle/);
 });
 
@@ -748,6 +752,38 @@ test("ein fehlgeschlagener Aufruf lässt Auftrag und Dokument stehen", async () 
     assert.deepEqual(harness.notices, ["Der Modellaufruf ist fehlgeschlagen."]);
     assert.equal(input.value, "kürzer");
     assert.deepEqual(plain.calls, []);
+  });
+});
+
+test("während der Auftrag läuft bleibt das Feld leer, Senden ist aus und das Zeichen läuft", async () => {
+  const editor = editorWith("alter Satz", { line: 2, ch: 0 });
+  await runComposer(editor, markdownFace(editor), async ({ input, send, field, plugin }) => {
+    let release;
+    let calls = 0;
+    plugin.completeThread = () => {
+      calls += 1;
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    };
+    input.value = "kürzer";
+    input.listeners.keydown({ key: "Enter", shiftKey: false, preventDefault() {} });
+    assert.equal(input.value, "");
+    assert.equal(send.disabled, true);
+    assert.equal(input.disabled, true);
+    assert.equal(field.classList.has("is-busy"), true);
+    const loader = findComposerNode(field, (node) => node.classList.has("unitedshare-loader"));
+    assert.ok(loader);
+    assert.match(String(loader.html || loader.innerHTML || ""), /unitedshare-mark/);
+    input.listeners.keydown({ key: "Enter", shiftKey: false, preventDefault() {} });
+    assert.equal(calls, 1);
+    release("neuer Satz");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(send.disabled, false);
+    assert.equal(input.disabled, false);
+    assert.equal(field.classList.has("is-busy"), false);
+    assert.equal(input.value, "");
+    assert.deepEqual(editor.calls, [{ op: "replace", text: "neuer Satz" }]);
   });
 });
 

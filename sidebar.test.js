@@ -509,6 +509,42 @@ test("die Seitenansicht stellt die Frage und schreibt Frage plus Antwort in die 
   assert.deepEqual(asked[2], [{ role: "user", content: "Neue Frage" }]);
 });
 
+test("während die Frage läuft sind die Knöpfe aus, das Feld leer und das Zeichen läuft", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  let release;
+  plugin.completeThread = () => new Promise((resolve) => {
+    release = resolve;
+  });
+  view.questionEl.value = "Was steht in der Notiz?";
+  const pending = view.askButton.listeners.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(view.questionEl.value, "");
+  const labels = ["Fragen", "In die Notiz", "Aktive Notiz", "Neuer Tab", "Neues Gespräch", "Verlauf"];
+  for (const label of labels) {
+    const button = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === label);
+    assert.equal(button.disabled, true, label);
+  }
+  assert.equal(view.modelSelectEl.disabled, true);
+  const wrap = find(view.contentEl, (node) => node.classList.has("unitedshare-input-wrapper"));
+  assert.equal(wrap.classList.has("is-busy"), true);
+  const loader = find(wrap, (node) => node.classList.has("unitedshare-loader"));
+  assert.ok(loader);
+  assert.match(loader.html || loader.innerHTML || "", /unitedshare-mark/);
+  release("Antworttext");
+  await pending;
+  assert.equal(view.askButton.disabled, false);
+  assert.equal(view.insertButton.disabled, false);
+  assert.equal(wrap.classList.has("is-busy"), false);
+  assert.equal(view.questionEl.value, "");
+  const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  assert.match(css, /@keyframes unitedshare-loader/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
+});
+
 test("die Assistentenantwort wird als Markdown gesetzt und die Nutzerblase bleibt Klartext", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);

@@ -337,6 +337,22 @@ test("eine Erklärung mit Python-Block legt keine Datei an", async () => {
   }
 });
 
+test("Beitritt und Abgleich laufen über den Desktop-Tresor und starten reemax erst nach der Prüfung", async () => {
+  const root = tempRoot();
+  try {
+    const plugin = new UnitedSharePlugin(makeApp(root));
+    const missing = await plugin.executeInstruction({ action: "mesh-join", path: "peers/fehlt.json" });
+    assert.match(missing, /Einladung liegt nicht im Tresor/);
+    const bad = await plugin.executeInstruction({ action: "sync", peer: "demo;rm", direction: "pull" });
+    assert.match(bad, /Buchstaben, Ziffern, Bindestrich oder Unterstrich/);
+    plugin.app.vault.adapter.getBasePath = () => "";
+    const mobile = await plugin.executeInstruction({ action: "sync", peer: "demo", direction: "pull" });
+    assert.match(mobile, /reemax läuft nur in der Desktop-App/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test.after(() => {
   restore();
 });

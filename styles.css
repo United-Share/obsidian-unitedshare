@@ -507,6 +507,58 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   display: none;
 }
 
+.unitedshare-loader {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--interactive-accent);
+}
+
+.unitedshare-loader .unitedshare-mark {
+  width: 28px;
+  height: 29px;
+  animation: unitedshare-loader 1.2s ease-in-out infinite;
+}
+
+@keyframes unitedshare-loader {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .unitedshare-loader .unitedshare-mark {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+.unitedshare-input-wrapper.is-busy .unitedshare-loader {
+  display: flex;
+  position: absolute;
+  inset: 0 0 40px;
+}
+
+.unitedshare-input-wrapper.is-busy textarea.unitedshare-input,
+.unitedshare-input-wrapper.is-busy textarea.unitedshare-input::placeholder {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.unitedshare-sidebar button:disabled,
+.unitedshare-cursor-composer button:disabled,
+.unitedshare-model-select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .unitedshare-hint {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
@@ -647,6 +699,21 @@ body.is-mobile .workspace-drawer:not(.is-pinned) .unitedshare-chat-panel {
 .unitedshare-cursor-composer button.unitedshare-cursor-send svg {
   width: 16px;
   height: 16px;
+}
+
+.unitedshare-cursor-composer.is-busy .unitedshare-loader {
+  display: flex;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 46px;
+  right: 48px;
+}
+
+.unitedshare-cursor-composer.is-busy textarea.unitedshare-cursor-input,
+.unitedshare-cursor-composer.is-busy textarea.unitedshare-cursor-input::placeholder {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 
 body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const needle = 'const { applyComposerAnswer, assertVaultRelative, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");';
+const needle = 'const { applyComposerAnswer, assertVaultRelative, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");';
 
 const core = readFileSync(join(root, "unitedshare-core.js"), "utf8")
   .replace(/^"use strict";\n+/, "")
