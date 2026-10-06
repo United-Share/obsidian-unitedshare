@@ -48,6 +48,7 @@ Die Werkzeuge laufen auf diesem Rechner, mit den Funktionen des offenen Tresors.
 - Ein Block `unitedshare` mit `read`, `list`, `write` oder `run` tut dasselbe, wenn der Pfad in der Antwort steht.
 - **In die Notiz** schreibt die letzte Frage und Antwort an die Cursor-Position der aktiven Notiz.
 - `zeige die Graphansicht` oder `öffne den Graphen` öffnet die Graphansicht auf diesem Gerät. `zeige die lokale Graphansicht` und `Graphansicht der Notiz` öffnen den Graphen der offenen Notiz. Diese Sätze gehen nicht ans Modell.
+- Im Bearbeiten einer Notiz, einer Canvas-Karte oder einer Quelldatei steht ein schwebendes Feld an der Cursor-Stelle. Enter schickt den Auftrag. Eine Markierung wird nur durch die Antwort ersetzt. Ohne Markierung wird nur die Antwort am Cursor eingefügt. Escape blendet das Feld aus, bis der Cursor weiterzieht.
 
 Enter oder der Pfeil schickt die Nachricht.
 

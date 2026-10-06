@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { assertVaultRelative, completeMessages, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
+const { applyComposerAnswer, assertVaultRelative, completeMessages, composerBox, composerPrompt, composerViewState, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -805,6 +805,41 @@ class UnitedShareSettingTab extends PluginSettingTab {
   }
 }
 
+function cursorComposerParent(plugin) {
+  const body = typeof document !== "undefined" && document && document.body;
+  if (body && typeof body.createEl === "function") return body;
+  const workspace = plugin && plugin.app && plugin.app.workspace;
+  const container = workspace && workspace.containerEl;
+  if (container && typeof container.createEl === "function") return container;
+  return null;
+}
+
+function composerCursorKey(editor) {
+  if (!editor || typeof editor.getCursor !== "function") return "";
+  const cursor = editor.getCursor() || {};
+  const selection = typeof editor.getSelection === "function" ? String(editor.getSelection() || "") : "";
+  return `${cursor.line}:${cursor.ch}:${selection.length}`;
+}
+
+function cursorKeyboardCover() {
+  const win = typeof window !== "undefined" ? window : null;
+  if (!win) return 0;
+  const height = Number(win.innerHeight) || 0;
+  const viewport = win.visualViewport || { height, offsetTop: 0 };
+  let css = "";
+  const root = typeof document !== "undefined" && document && document.documentElement;
+  if (root && root.style && typeof root.style.getPropertyValue === "function") {
+    css = root.style.getPropertyValue("--keyboard-height");
+  }
+  return keyboardCoverPx(
+    { top: 0, bottom: height, height },
+    viewport,
+    height,
+    css,
+    { fixedOverlay: true },
+  );
+}
+
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
@@ -832,10 +867,136 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       void this.openSidebar();
     });
+    this.mountCursorComposer();
   }
 
   onunload() {
+    this.removeCursorComposer();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  mountCursorComposer() {
+    const parent = cursorComposerParent(this);
+    if (!parent || this.cursorComposerEl) return;
+    const field = parent.createEl("div", { cls: "unitedshare-cursor-composer" });
+    const input = field.createEl("textarea", {
+      cls: "unitedshare-cursor-input",
+      attr: {
+        rows: "1",
+        placeholder: "An dieser Stelle ändern …",
+        "aria-label": "An dieser Stelle ändern",
+      },
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        this.dismissCursorComposer();
+        return;
+      }
+      if (event.key !== "Enter" || event.shiftKey) return;
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      void this.submitCursorComposer();
+    });
+    const send = field.createEl("button", {
+      cls: "unitedshare-cursor-send",
+      attr: { type: "button", "aria-label": "An dieser Stelle ändern" },
+    });
+    setIcon(send, "arrow-up");
+    send.addEventListener("click", () => {
+      void this.submitCursorComposer();
+    });
+    this.cursorComposerEl = field;
+    this.cursorInput = input;
+    const workspace = this.app && this.app.workspace;
+    if (workspace && typeof workspace.on === "function" && typeof this.registerEvent === "function") {
+      this.registerEvent(workspace.on("active-leaf-change", () => this.syncCursorComposer()));
+      this.registerEvent(workspace.on("editor-change", () => this.syncCursorComposer()));
+    }
+    if (typeof document !== "undefined" && document && typeof this.registerDomEvent === "function") {
+      this.registerDomEvent(document, "selectionchange", () => this.syncCursorComposer());
+    }
+    this.syncCursorComposer();
+  }
+
+  dismissCursorComposer() {
+    const editor = this.cursorTarget && this.cursorTarget.editor;
+    this.cursorDismissedKey = composerCursorKey(editor) || "hidden";
+    if (this.cursorInput) this.cursorInput.value = "";
+    if (this.cursorComposerEl) this.cursorComposerEl.style.display = "none";
+  }
+
+  syncCursorComposer() {
+    const field = this.cursorComposerEl;
+    if (!field) return;
+    const target = composerViewState(this.app && this.app.workspace);
+    this.cursorTarget = target;
+    if (!target) {
+      this.cursorDismissedKey = "";
+      field.style.display = "none";
+      return;
+    }
+    const cursorKey = composerCursorKey(target.editor);
+    if (this.cursorDismissedKey && cursorKey === this.cursorDismissedKey) {
+      field.style.display = "none";
+      return;
+    }
+    this.cursorDismissedKey = "";
+    const editor = target.editor;
+    const cursor = editor.getCursor();
+    const coords = typeof editor.coordsAtPos === "function" ? editor.coordsAtPos(cursor) : null;
+    const win = typeof window !== "undefined" ? window : null;
+    const viewport = {
+      width: win ? Number(win.innerWidth) || 0 : 0,
+      height: win ? Number(win.innerHeight) || 0 : 0,
+    };
+    const box = composerBox(coords || { left: 16, bottom: 32 }, viewport, cursorKeyboardCover());
+    field.style.display = "";
+    field.style.left = `${box.left}px`;
+    field.style.top = `${box.top}px`;
+    field.style.width = `${box.width}px`;
+  }
+
+  async submitCursorComposer() {
+    if (this.cursorBusy) return;
+    const input = this.cursorInput;
+    const target = this.cursorTarget || composerViewState(this.app && this.app.workspace);
+    if (!input || !target) return;
+    const instruction = String(input.value || "").trim();
+    if (!instruction) return;
+    const commandId = localObsidianCommand(instruction);
+    if (commandId) {
+      input.value = "";
+      const commands = this.app && this.app.commands;
+      const run = commands && commands.executeCommandById;
+      const opened = typeof run === "function" ? run.call(commands, commandId) : false;
+      const local = commandId === "graph:open-local";
+      new Notice(opened === false
+        ? "Die Graphansicht lässt sich hier nicht öffnen."
+        : (local ? "Lokale Graphansicht ist offen." : "Graphansicht ist offen."));
+      return;
+    }
+    const selection = String(target.editor.getSelection() || "");
+    const prompt = composerPrompt(instruction, selection);
+    if (!prompt) return;
+    this.cursorBusy = true;
+    try {
+      const answer = await this.completeThread([{ role: "user", content: prompt }]);
+      if (applyComposerAnswer(target.editor, answer) !== "empty") input.value = "";
+    } catch (error) {
+      const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+      new Notice(text);
+    } finally {
+      this.cursorBusy = false;
+    }
+  }
+
+  removeCursorComposer() {
+    const field = this.cursorComposerEl;
+    if (field && typeof field.remove === "function") field.remove();
+    this.cursorComposerEl = null;
+    this.cursorInput = null;
+    this.cursorTarget = null;
+    this.cursorBusy = false;
   }
 
   async openSidebar() {

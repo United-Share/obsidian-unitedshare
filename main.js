@@ -871,6 +871,153 @@ function localObsidianCommand(text) {
   return null;
 }
 
+const COMPOSER_MEDIA_EXT = new Set([
+  "pdf",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "mp3",
+  "mp4",
+  "wav",
+  "m4a",
+  "mov",
+  "avif",
+  "heic",
+]);
+
+const COMPOSER_BLOCKED_VIEWS = new Set([
+  "empty",
+  "pdf",
+  "image",
+  "audio",
+  "video",
+  "graph",
+  "localgraph",
+  "file-explorer",
+  "search",
+  "backlink",
+  "outgoing-link",
+  "tag",
+  "outline",
+  "bookmarks",
+  "unitedshare-sidebar",
+]);
+
+function composerViewState(workspace) {
+  if (!workspace) return null;
+  const leaf = workspace.activeLeaf;
+  const view = leaf && leaf.view;
+  if (!view) return null;
+  const viewType = typeof view.getViewType === "function" ? view.getViewType() : String(view.viewType || "");
+  const mode = typeof view.getMode === "function" ? view.getMode() : view.mode;
+  const file = view.file || null;
+  const extension = file && file.extension ? String(file.extension) : "";
+  let editor = null;
+  if (viewType === "canvas") {
+    const active = workspace.activeEditor;
+    const activePath = active && active.file && active.file.path;
+    const viewPath = file && file.path;
+    if (active && active.editor && activePath && viewPath && activePath === viewPath) editor = active.editor;
+  } else {
+    editor = view.editor || null;
+  }
+  return composerTarget({ viewType, mode, editor, extension });
+}
+
+function composerEditor(editor) {
+  if (!editor || typeof editor.getCursor !== "function" || typeof editor.replaceRange !== "function") {
+    return null;
+  }
+  return editor;
+}
+
+function composerTarget(state) {
+  if (!state || state.mode === "preview") return null;
+  const viewType = String(state.viewType || "");
+  if (COMPOSER_BLOCKED_VIEWS.has(viewType)) return null;
+  const editor = composerEditor(state.editor);
+  if (!editor) return null;
+  if (viewType === "markdown") return { kind: "markdown", editor };
+  if (viewType === "canvas") return { kind: "canvas", editor };
+  const extension = String(state.extension || "").toLowerCase().replace(/^\./, "");
+  if (!extension || COMPOSER_MEDIA_EXT.has(extension)) return null;
+  return { kind: "source", editor };
+}
+
+const COMPOSER_BOX_WIDTH = 320;
+const COMPOSER_BOX_HEIGHT = 44;
+const COMPOSER_BOX_GAP = 8;
+const COMPOSER_BOX_MARGIN = 8;
+
+function composerBox(cursor, viewport, keyboardPx) {
+  const margin = COMPOSER_BOX_MARGIN;
+  const viewWidth = Number(viewport && viewport.width);
+  const viewHeight = Number(viewport && viewport.height);
+  const keyboard = Math.max(0, Number(keyboardPx) || 0);
+  const maxWidth = Number.isFinite(viewWidth) ? Math.max(160, viewWidth - margin * 2) : COMPOSER_BOX_WIDTH;
+  const width = Math.min(COMPOSER_BOX_WIDTH, maxWidth);
+  let left = Number(cursor && cursor.left);
+  if (!Number.isFinite(left)) left = margin;
+  const maxLeft = Number.isFinite(viewWidth) ? Math.max(margin, viewWidth - width - margin) : left;
+  if (left > maxLeft) left = maxLeft;
+  if (left < margin) left = margin;
+  let top = Number(cursor && cursor.bottom);
+  if (!Number.isFinite(top)) top = margin;
+  else top += COMPOSER_BOX_GAP;
+  const limit = (Number.isFinite(viewHeight) ? viewHeight : top) - keyboard - margin - COMPOSER_BOX_HEIGHT;
+  if (top > limit) top = limit;
+  if (top < margin) top = margin;
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    width: Math.round(width),
+    height: COMPOSER_BOX_HEIGHT,
+  };
+}
+
+function composerPrompt(instruction, selection) {
+  const order = String(instruction ?? "").trim();
+  if (!order) return "";
+  const marked = selection == null ? "" : String(selection);
+  if (marked.length > 0) {
+    return [
+      "Bearbeite nur die markierte Stelle im offenen Dokument.",
+      "Antworte nur mit dem Ersatztext.",
+      "Keine Erklärung.",
+      "Setze die ganze Antwort nicht in Anführungszeichen.",
+      "",
+      "Auftrag:",
+      order,
+      "",
+      "Markierter Text:",
+      marked,
+    ].join("\n");
+  }
+  return [
+    "Schreibe an der Cursor-Stelle im offenen Dokument weiter.",
+    "Antworte nur mit dem Text, der eingefügt wird.",
+    "Keine Erklärung.",
+    "Setze die ganze Antwort nicht in Anführungszeichen.",
+    "",
+    "Auftrag:",
+    order,
+  ].join("\n");
+}
+
+function applyComposerAnswer(editor, answer) {
+  const text = String(answer ?? "").trim();
+  if (!text) return "empty";
+  const selection = editor.getSelection();
+  if (String(selection ?? "").length > 0) {
+    editor.replaceSelection(text);
+    return "replace";
+  }
+  editor.replaceRange(text, editor.getCursor());
+  return "insert";
+}
+
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
 const MARK_D = "M67.562 0.672852V55.2979C67.562 63.2369 61.2603 69.6729 53.4866 69.6729H0V16.4854C0 7.75235 6.93196 0.672852 15.483 0.672852H67.562ZM48.9193 14.6729H29.7023C26.4996 14.6729 23.428 15.9679 21.1633 18.2733C18.8986 20.5786 17.6263 23.7053 17.6263 26.9655L17.6267 57.8002C17.636 58.0152 17.68 58.2276 17.7574 58.4287C17.8541 58.6801 18.0008 58.9084 18.1884 59.0993C18.3759 59.2902 18.6002 59.4396 18.8471 59.538C19.094 59.6365 19.3583 59.6819 19.6233 59.6714H27.7053C28.235 59.6714 28.7429 59.4572 29.1175 59.076C29.492 58.6948 29.7023 58.1777 29.7023 57.6386V28.9983C29.701 28.7309 29.7517 28.466 29.8515 28.2187C29.9514 27.9715 30.0984 27.7468 30.2842 27.5577C30.4698 27.3687 30.6906 27.219 30.9335 27.1174C31.1763 27.0157 31.4367 26.9641 31.6993 26.9655H48.9193C49.4489 26.9655 49.9569 26.7513 50.3314 26.3701C50.706 25.9889 50.9163 25.4719 50.9163 24.9327V16.8015C50.9168 16.2531 50.7095 15.7257 50.3375 15.3292C49.9654 14.9326 49.4575 14.6975 48.9193 14.6729Z";
@@ -1673,6 +1820,41 @@ class UnitedShareSettingTab extends PluginSettingTab {
   }
 }
 
+function cursorComposerParent(plugin) {
+  const body = typeof document !== "undefined" && document && document.body;
+  if (body && typeof body.createEl === "function") return body;
+  const workspace = plugin && plugin.app && plugin.app.workspace;
+  const container = workspace && workspace.containerEl;
+  if (container && typeof container.createEl === "function") return container;
+  return null;
+}
+
+function composerCursorKey(editor) {
+  if (!editor || typeof editor.getCursor !== "function") return "";
+  const cursor = editor.getCursor() || {};
+  const selection = typeof editor.getSelection === "function" ? String(editor.getSelection() || "") : "";
+  return `${cursor.line}:${cursor.ch}:${selection.length}`;
+}
+
+function cursorKeyboardCover() {
+  const win = typeof window !== "undefined" ? window : null;
+  if (!win) return 0;
+  const height = Number(win.innerHeight) || 0;
+  const viewport = win.visualViewport || { height, offsetTop: 0 };
+  let css = "";
+  const root = typeof document !== "undefined" && document && document.documentElement;
+  if (root && root.style && typeof root.style.getPropertyValue === "function") {
+    css = root.style.getPropertyValue("--keyboard-height");
+  }
+  return keyboardCoverPx(
+    { top: 0, bottom: height, height },
+    viewport,
+    height,
+    css,
+    { fixedOverlay: true },
+  );
+}
+
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
@@ -1700,10 +1882,136 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       void this.openSidebar();
     });
+    this.mountCursorComposer();
   }
 
   onunload() {
+    this.removeCursorComposer();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  mountCursorComposer() {
+    const parent = cursorComposerParent(this);
+    if (!parent || this.cursorComposerEl) return;
+    const field = parent.createEl("div", { cls: "unitedshare-cursor-composer" });
+    const input = field.createEl("textarea", {
+      cls: "unitedshare-cursor-input",
+      attr: {
+        rows: "1",
+        placeholder: "An dieser Stelle ändern …",
+        "aria-label": "An dieser Stelle ändern",
+      },
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        this.dismissCursorComposer();
+        return;
+      }
+      if (event.key !== "Enter" || event.shiftKey) return;
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      void this.submitCursorComposer();
+    });
+    const send = field.createEl("button", {
+      cls: "unitedshare-cursor-send",
+      attr: { type: "button", "aria-label": "An dieser Stelle ändern" },
+    });
+    setIcon(send, "arrow-up");
+    send.addEventListener("click", () => {
+      void this.submitCursorComposer();
+    });
+    this.cursorComposerEl = field;
+    this.cursorInput = input;
+    const workspace = this.app && this.app.workspace;
+    if (workspace && typeof workspace.on === "function" && typeof this.registerEvent === "function") {
+      this.registerEvent(workspace.on("active-leaf-change", () => this.syncCursorComposer()));
+      this.registerEvent(workspace.on("editor-change", () => this.syncCursorComposer()));
+    }
+    if (typeof document !== "undefined" && document && typeof this.registerDomEvent === "function") {
+      this.registerDomEvent(document, "selectionchange", () => this.syncCursorComposer());
+    }
+    this.syncCursorComposer();
+  }
+
+  dismissCursorComposer() {
+    const editor = this.cursorTarget && this.cursorTarget.editor;
+    this.cursorDismissedKey = composerCursorKey(editor) || "hidden";
+    if (this.cursorInput) this.cursorInput.value = "";
+    if (this.cursorComposerEl) this.cursorComposerEl.style.display = "none";
+  }
+
+  syncCursorComposer() {
+    const field = this.cursorComposerEl;
+    if (!field) return;
+    const target = composerViewState(this.app && this.app.workspace);
+    this.cursorTarget = target;
+    if (!target) {
+      this.cursorDismissedKey = "";
+      field.style.display = "none";
+      return;
+    }
+    const cursorKey = composerCursorKey(target.editor);
+    if (this.cursorDismissedKey && cursorKey === this.cursorDismissedKey) {
+      field.style.display = "none";
+      return;
+    }
+    this.cursorDismissedKey = "";
+    const editor = target.editor;
+    const cursor = editor.getCursor();
+    const coords = typeof editor.coordsAtPos === "function" ? editor.coordsAtPos(cursor) : null;
+    const win = typeof window !== "undefined" ? window : null;
+    const viewport = {
+      width: win ? Number(win.innerWidth) || 0 : 0,
+      height: win ? Number(win.innerHeight) || 0 : 0,
+    };
+    const box = composerBox(coords || { left: 16, bottom: 32 }, viewport, cursorKeyboardCover());
+    field.style.display = "";
+    field.style.left = `${box.left}px`;
+    field.style.top = `${box.top}px`;
+    field.style.width = `${box.width}px`;
+  }
+
+  async submitCursorComposer() {
+    if (this.cursorBusy) return;
+    const input = this.cursorInput;
+    const target = this.cursorTarget || composerViewState(this.app && this.app.workspace);
+    if (!input || !target) return;
+    const instruction = String(input.value || "").trim();
+    if (!instruction) return;
+    const commandId = localObsidianCommand(instruction);
+    if (commandId) {
+      input.value = "";
+      const commands = this.app && this.app.commands;
+      const run = commands && commands.executeCommandById;
+      const opened = typeof run === "function" ? run.call(commands, commandId) : false;
+      const local = commandId === "graph:open-local";
+      new Notice(opened === false
+        ? "Die Graphansicht lässt sich hier nicht öffnen."
+        : (local ? "Lokale Graphansicht ist offen." : "Graphansicht ist offen."));
+      return;
+    }
+    const selection = String(target.editor.getSelection() || "");
+    const prompt = composerPrompt(instruction, selection);
+    if (!prompt) return;
+    this.cursorBusy = true;
+    try {
+      const answer = await this.completeThread([{ role: "user", content: prompt }]);
+      if (applyComposerAnswer(target.editor, answer) !== "empty") input.value = "";
+    } catch (error) {
+      const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+      new Notice(text);
+    } finally {
+      this.cursorBusy = false;
+    }
+  }
+
+  removeCursorComposer() {
+    const field = this.cursorComposerEl;
+    if (field && typeof field.remove === "function") field.remove();
+    this.cursorComposerEl = null;
+    this.cursorInput = null;
+    this.cursorTarget = null;
+    this.cursorBusy = false;
   }
 
   async openSidebar() {

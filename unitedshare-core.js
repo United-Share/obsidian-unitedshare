@@ -870,6 +870,153 @@ function localObsidianCommand(text) {
   return null;
 }
 
+const COMPOSER_MEDIA_EXT = new Set([
+  "pdf",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "mp3",
+  "mp4",
+  "wav",
+  "m4a",
+  "mov",
+  "avif",
+  "heic",
+]);
+
+const COMPOSER_BLOCKED_VIEWS = new Set([
+  "empty",
+  "pdf",
+  "image",
+  "audio",
+  "video",
+  "graph",
+  "localgraph",
+  "file-explorer",
+  "search",
+  "backlink",
+  "outgoing-link",
+  "tag",
+  "outline",
+  "bookmarks",
+  "unitedshare-sidebar",
+]);
+
+function composerViewState(workspace) {
+  if (!workspace) return null;
+  const leaf = workspace.activeLeaf;
+  const view = leaf && leaf.view;
+  if (!view) return null;
+  const viewType = typeof view.getViewType === "function" ? view.getViewType() : String(view.viewType || "");
+  const mode = typeof view.getMode === "function" ? view.getMode() : view.mode;
+  const file = view.file || null;
+  const extension = file && file.extension ? String(file.extension) : "";
+  let editor = null;
+  if (viewType === "canvas") {
+    const active = workspace.activeEditor;
+    const activePath = active && active.file && active.file.path;
+    const viewPath = file && file.path;
+    if (active && active.editor && activePath && viewPath && activePath === viewPath) editor = active.editor;
+  } else {
+    editor = view.editor || null;
+  }
+  return composerTarget({ viewType, mode, editor, extension });
+}
+
+function composerEditor(editor) {
+  if (!editor || typeof editor.getCursor !== "function" || typeof editor.replaceRange !== "function") {
+    return null;
+  }
+  return editor;
+}
+
+function composerTarget(state) {
+  if (!state || state.mode === "preview") return null;
+  const viewType = String(state.viewType || "");
+  if (COMPOSER_BLOCKED_VIEWS.has(viewType)) return null;
+  const editor = composerEditor(state.editor);
+  if (!editor) return null;
+  if (viewType === "markdown") return { kind: "markdown", editor };
+  if (viewType === "canvas") return { kind: "canvas", editor };
+  const extension = String(state.extension || "").toLowerCase().replace(/^\./, "");
+  if (!extension || COMPOSER_MEDIA_EXT.has(extension)) return null;
+  return { kind: "source", editor };
+}
+
+const COMPOSER_BOX_WIDTH = 320;
+const COMPOSER_BOX_HEIGHT = 44;
+const COMPOSER_BOX_GAP = 8;
+const COMPOSER_BOX_MARGIN = 8;
+
+function composerBox(cursor, viewport, keyboardPx) {
+  const margin = COMPOSER_BOX_MARGIN;
+  const viewWidth = Number(viewport && viewport.width);
+  const viewHeight = Number(viewport && viewport.height);
+  const keyboard = Math.max(0, Number(keyboardPx) || 0);
+  const maxWidth = Number.isFinite(viewWidth) ? Math.max(160, viewWidth - margin * 2) : COMPOSER_BOX_WIDTH;
+  const width = Math.min(COMPOSER_BOX_WIDTH, maxWidth);
+  let left = Number(cursor && cursor.left);
+  if (!Number.isFinite(left)) left = margin;
+  const maxLeft = Number.isFinite(viewWidth) ? Math.max(margin, viewWidth - width - margin) : left;
+  if (left > maxLeft) left = maxLeft;
+  if (left < margin) left = margin;
+  let top = Number(cursor && cursor.bottom);
+  if (!Number.isFinite(top)) top = margin;
+  else top += COMPOSER_BOX_GAP;
+  const limit = (Number.isFinite(viewHeight) ? viewHeight : top) - keyboard - margin - COMPOSER_BOX_HEIGHT;
+  if (top > limit) top = limit;
+  if (top < margin) top = margin;
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    width: Math.round(width),
+    height: COMPOSER_BOX_HEIGHT,
+  };
+}
+
+function composerPrompt(instruction, selection) {
+  const order = String(instruction ?? "").trim();
+  if (!order) return "";
+  const marked = selection == null ? "" : String(selection);
+  if (marked.length > 0) {
+    return [
+      "Bearbeite nur die markierte Stelle im offenen Dokument.",
+      "Antworte nur mit dem Ersatztext.",
+      "Keine Erklärung.",
+      "Setze die ganze Antwort nicht in Anführungszeichen.",
+      "",
+      "Auftrag:",
+      order,
+      "",
+      "Markierter Text:",
+      marked,
+    ].join("\n");
+  }
+  return [
+    "Schreibe an der Cursor-Stelle im offenen Dokument weiter.",
+    "Antworte nur mit dem Text, der eingefügt wird.",
+    "Keine Erklärung.",
+    "Setze die ganze Antwort nicht in Anführungszeichen.",
+    "",
+    "Auftrag:",
+    order,
+  ].join("\n");
+}
+
+function applyComposerAnswer(editor, answer) {
+  const text = String(answer ?? "").trim();
+  if (!text) return "empty";
+  const selection = editor.getSelection();
+  if (String(selection ?? "").length > 0) {
+    editor.replaceSelection(text);
+    return "replace";
+  }
+  editor.replaceRange(text, editor.getCursor());
+  return "insert";
+}
+
 module.exports = {
   UnitedShareError,
   assertVaultRelative,
@@ -888,6 +1035,11 @@ module.exports = {
   isObsidianModel,
   listModels,
   localObsidianCommand,
+  applyComposerAnswer,
+  composerTarget,
+  composerViewState,
+  composerPrompt,
+  composerBox,
   messagesUrl,
   modelsUrl,
   parseAnthropicContent,
