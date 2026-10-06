@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {
   buildAnthropicBody,
   completeMessages,
+  parseAnthropicContent,
   coveredByKeyboard,
   keyboardCoverPx,
   viewSitsUnderKeyboard,
@@ -204,6 +205,41 @@ test("loadMentionedNotes lädt nur den Text der erwähnten Notiz", async () => {
   });
   assert.deepEqual(read, ["Notizen/Heute.md"]);
   assert.deepEqual(files, [{ path: "Notizen/Heute.md", text: "Inhalt" }]);
+});
+
+test("ein zitierter JSON-Inhalt wird als Antworttext gelesen", () => {
+  assert.equal(
+    parseAnthropicContent({
+      content: [{ type: "text", text: JSON.stringify("Die Notiz bleibt lokal.") }],
+    }),
+    "Die Notiz bleibt lokal.",
+  );
+  assert.equal(
+    parseAnthropicContent({
+      content: [{
+        type: "text",
+        text: JSON.stringify({ type: "text", text: "Die Notiz bleibt lokal." }),
+      }],
+    }),
+    "Die Notiz bleibt lokal.",
+  );
+  assert.equal(
+    parseAnthropicContent({
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          content: [{ type: "text", text: "Die Notiz bleibt lokal." }],
+        }),
+      }],
+    }),
+    "Die Notiz bleibt lokal.",
+  );
+  assert.equal(
+    parseAnthropicContent({
+      content: [{ type: "text", text: '{"name":"Notiz","ok":true}' }],
+    }),
+    '{"name":"Notiz","ok":true}',
+  );
 });
 
 test("completeMessages sendet den Anthropic-Körper und liest den Textblock", async () => {

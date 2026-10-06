@@ -148,12 +148,53 @@ function buildAnthropicBody({ model, system, turns, maxTokens = 1200 }) {
   };
 }
 
+function textFromEnvelope(parsed) {
+  if (typeof parsed === "string") return parsed;
+  if (Array.isArray(parsed)) {
+    const blocks = parsed.filter((part) => part && part.type === "text" && typeof part.text === "string");
+    if (!blocks.length || blocks.length !== parsed.length) return null;
+    return blocks.map((part) => part.text).join("");
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.type === "text" && typeof parsed.text === "string") return parsed.text;
+  if (typeof parsed.content === "string") return parsed.content;
+  if (Array.isArray(parsed.content)) {
+    const blocks = parsed.content
+      .filter((part) => part && part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("");
+    if (blocks) return blocks;
+  }
+  return null;
+}
+
+function unwrapQuotedContent(text) {
+  let value = String(text ?? "").trim();
+  for (let i = 0; i < 3; i += 1) {
+    if (!value) return "";
+    const lead = value[0];
+    if (lead !== '"' && lead !== "{" && lead !== "[") return value;
+    let parsed;
+    try {
+      parsed = JSON.parse(value);
+    } catch (_err) {
+      return value;
+    }
+    const inner = textFromEnvelope(parsed);
+    if (typeof inner !== "string") return value;
+    const next = inner.trim();
+    if (next === value) return value;
+    value = next;
+  }
+  return value;
+}
+
 function parseAnthropicContent(data) {
   const blocks = data && Array.isArray(data.content) ? data.content : [];
-  const text = blocks
+  const text = unwrapQuotedContent(blocks
     .filter((part) => part && part.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
-    .join("")
+    .join(""))
     .trim();
   if (!text) throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
   return text;
