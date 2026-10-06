@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { applyComposerAnswer, assertVaultRelative, completeMessages, composerBox, composerPrompt, composerViewState, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
+const { applyComposerAnswer, assertVaultRelative, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -814,11 +814,35 @@ function cursorComposerParent(plugin) {
   return null;
 }
 
-function composerCursorKey(editor) {
-  if (!editor || typeof editor.getCursor !== "function") return "";
-  const cursor = editor.getCursor() || {};
-  const selection = typeof editor.getSelection === "function" ? String(editor.getSelection() || "") : "";
-  return `${cursor.line}:${cursor.ch}:${selection.length}`;
+function composerPane(workspace) {
+  const view = workspace && workspace.activeLeaf && workspace.activeLeaf.view;
+  const el = view && view.containerEl;
+  if (!el || typeof el.getBoundingClientRect !== "function") return null;
+  let rect = null;
+  try {
+    rect = el.getBoundingClientRect();
+  } catch (_err) {
+    return null;
+  }
+  const width = Number(rect && rect.width);
+  const left = Number(rect && rect.left);
+  if (!Number.isFinite(width) || width < 32) return null;
+  return { left: Number.isFinite(left) ? left : 0, width };
+}
+
+function statusBarPx() {
+  if (typeof document === "undefined" || !document || typeof document.querySelector !== "function") return 0;
+  const bar = document.querySelector(".status-bar");
+  if (!bar || typeof bar.getBoundingClientRect !== "function") return 0;
+  let rect = null;
+  try {
+    rect = bar.getBoundingClientRect();
+  } catch (_err) {
+    return 0;
+  }
+  const height = Number(rect && rect.height);
+  if (!Number.isFinite(height) || height <= 0) return 0;
+  return Math.round(height);
 }
 
 function cursorKeyboardCover() {
@@ -879,12 +903,17 @@ module.exports = class UnitedSharePlugin extends Plugin {
     const parent = cursorComposerParent(this);
     if (!parent || this.cursorComposerEl) return;
     const field = parent.createEl("div", { cls: "unitedshare-cursor-composer" });
+    const mark = field.createEl("span", {
+      cls: "unitedshare-cursor-mark",
+      attr: { "aria-hidden": "true" },
+    });
+    mark.innerHTML = markSvg();
     const input = field.createEl("textarea", {
       cls: "unitedshare-cursor-input",
       attr: {
         rows: "1",
-        placeholder: "An dieser Stelle ändern …",
-        "aria-label": "An dieser Stelle ändern",
+        placeholder: "Nachricht an UnitedShare",
+        "aria-label": "UnitedShareAI",
       },
     });
     input.addEventListener("keydown", (event) => {
@@ -899,7 +928,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     });
     const send = field.createEl("button", {
       cls: "unitedshare-cursor-send",
-      attr: { type: "button", "aria-label": "An dieser Stelle ändern" },
+      attr: { type: "button", "aria-label": "Senden" },
     });
     setIcon(send, "arrow-up");
     send.addEventListener("click", () => {
@@ -907,10 +936,25 @@ module.exports = class UnitedSharePlugin extends Plugin {
     });
     this.cursorComposerEl = field;
     this.cursorInput = input;
+    this.cursorForced = false;
     const workspace = this.app && this.app.workspace;
     if (workspace && typeof workspace.on === "function" && typeof this.registerEvent === "function") {
       this.registerEvent(workspace.on("active-leaf-change", () => this.syncCursorComposer()));
       this.registerEvent(workspace.on("editor-change", () => this.syncCursorComposer()));
+      this.registerEvent(workspace.on("layout-change", () => this.syncCursorComposer()));
+      this.registerEvent(workspace.on("editor-menu", (menu) => {
+        if (!menu || typeof menu.addItem !== "function") return;
+        menu.addItem((item) => {
+          item.setTitle("UnitedShareAI").setIcon(UNITEDSHARE_ICON).onClick(() => {
+            this.cursorForced = true;
+            this.syncCursorComposer();
+            const shown = this.cursorComposerEl && this.cursorComposerEl.style.display !== "none";
+            if (shown && this.cursorInput && typeof this.cursorInput.focus === "function") {
+              this.cursorInput.focus();
+            }
+          });
+        });
+      }));
     }
     if (typeof document !== "undefined" && document && typeof this.registerDomEvent === "function") {
       this.registerDomEvent(document, "selectionchange", () => this.syncCursorComposer());
@@ -919,40 +963,35 @@ module.exports = class UnitedSharePlugin extends Plugin {
   }
 
   dismissCursorComposer() {
-    const editor = this.cursorTarget && this.cursorTarget.editor;
-    this.cursorDismissedKey = composerCursorKey(editor) || "hidden";
-    if (this.cursorInput) this.cursorInput.value = "";
+    if (this.cursorInput && typeof this.cursorInput.blur === "function") this.cursorInput.blur();
+    const workspace = this.app && this.app.workspace;
+    if (!sidebarPromptOpen(workspace)) return;
+    this.cursorForced = false;
     if (this.cursorComposerEl) this.cursorComposerEl.style.display = "none";
   }
 
   syncCursorComposer() {
     const field = this.cursorComposerEl;
     if (!field) return;
-    const target = composerViewState(this.app && this.app.workspace);
+    const workspace = this.app && this.app.workspace;
+    const target = composerViewState(workspace);
     this.cursorTarget = target;
-    if (!target) {
-      this.cursorDismissedKey = "";
+    if (!target || (sidebarPromptOpen(workspace) && !this.cursorForced)) {
       field.style.display = "none";
       return;
     }
-    const cursorKey = composerCursorKey(target.editor);
-    if (this.cursorDismissedKey && cursorKey === this.cursorDismissedKey) {
-      field.style.display = "none";
-      return;
-    }
-    this.cursorDismissedKey = "";
-    const editor = target.editor;
-    const cursor = editor.getCursor();
-    const coords = typeof editor.coordsAtPos === "function" ? editor.coordsAtPos(cursor) : null;
     const win = typeof window !== "undefined" ? window : null;
     const viewport = {
       width: win ? Number(win.innerWidth) || 0 : 0,
       height: win ? Number(win.innerHeight) || 0 : 0,
     };
-    const box = composerBox(coords || { left: 16, bottom: 32 }, viewport, cursorKeyboardCover());
+    const cover = cursorKeyboardCover();
+    const lift = cover > 0 ? cover : statusBarPx();
+    const box = composerDock(viewport, lift, composerPane(workspace));
     field.style.display = "";
     field.style.left = `${box.left}px`;
-    field.style.top = `${box.top}px`;
+    field.style.top = "";
+    field.style.bottom = `${box.bottom}px`;
     field.style.width = `${box.width}px`;
   }
 

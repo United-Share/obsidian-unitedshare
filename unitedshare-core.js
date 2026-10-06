@@ -950,6 +950,41 @@ const COMPOSER_BOX_HEIGHT = 44;
 const COMPOSER_BOX_GAP = 8;
 const COMPOSER_BOX_MARGIN = 8;
 
+const COMPOSER_DOCK_WIDTH = 720;
+const COMPOSER_DOCK_HEIGHT = 56;
+const COMPOSER_DOCK_MARGIN = 16;
+const COMPOSER_DOCK_MIN = 280;
+
+function composerDock(viewport, keyboardPx, anchor) {
+  const margin = COMPOSER_DOCK_MARGIN;
+  const keyboard = Math.max(0, Number(keyboardPx) || 0);
+  const frameWidth = Number(anchor && anchor.width);
+  const frameLeft = Number(anchor && anchor.left);
+  const hasFrame = Number.isFinite(frameWidth) && frameWidth > 0;
+  const viewWidth = hasFrame ? frameWidth : Number(viewport && viewport.width);
+  const origin = hasFrame && Number.isFinite(frameLeft) ? frameLeft : 0;
+  const available = Number.isFinite(viewWidth) ? Math.max(0, viewWidth - margin * 2) : COMPOSER_DOCK_WIDTH;
+  let width = Math.min(COMPOSER_DOCK_WIDTH, available);
+  if (!hasFrame) width = Math.max(COMPOSER_DOCK_MIN, width);
+  const basis = Number.isFinite(viewWidth) ? viewWidth : width;
+  const left = origin + Math.max(margin, Math.round((basis - width) / 2));
+  return {
+    left: Math.round(left),
+    bottom: Math.round(keyboard + margin),
+    width: Math.round(width),
+    height: COMPOSER_DOCK_HEIGHT,
+  };
+}
+
+function sidebarPromptOpen(workspace) {
+  if (!workspace || typeof workspace.getLeavesOfType !== "function") return false;
+  const leaves = workspace.getLeavesOfType("unitedshare-sidebar");
+  if (!Array.isArray(leaves) || leaves.length === 0) return false;
+  const split = workspace.rightSplit;
+  if (!split) return true;
+  return split.collapsed !== true;
+}
+
 function composerBox(cursor, viewport, keyboardPx) {
   const margin = COMPOSER_BOX_MARGIN;
   const viewWidth = Number(viewport && viewport.width);
@@ -1040,6 +1075,8 @@ module.exports = {
   composerViewState,
   composerPrompt,
   composerBox,
+  composerDock,
+  sidebarPromptOpen,
   messagesUrl,
   modelsUrl,
   parseAnthropicContent,

@@ -188,6 +188,9 @@ function composerNode(tag) {
     focus() {
       this.focused += 1;
     },
+    blur() {
+      this.focused = 0;
+    },
     addClass(name) {
       this.classList.add(name);
       return this;
@@ -328,6 +331,7 @@ function composerApp(editor, view) {
     onLayoutReady(callback) {
       callback();
     },
+    rightSplit: { collapsed: true },
     getLeavesOfType() {
       return [{}];
     },
@@ -378,8 +382,11 @@ test("Enter im schwebenden Feld ersetzt die Markierung nur mit der Antwort", asy
     };
     await plugin.onload();
     const field = findComposerNode(app.workspace.containerEl, (node) => node.classList.has("unitedshare-cursor-composer"));
-    assert.ok(field, "das schwebende Feld fehlt");
-    assert.equal(field.style.top, "448px");
+    assert.ok(field, "die Eingabe fehlt");
+    assert.equal(field.style.top, "");
+    assert.equal(field.style.bottom, "316px");
+    assert.equal(field.style.left, "16px");
+    assert.equal(field.style.width, "358px");
     const input = findComposerNode(field, (node) => node.classList.has("unitedshare-cursor-input"));
     assert.ok(input);
     input.value = "kürzer";
@@ -398,7 +405,7 @@ test("Enter im schwebenden Feld ersetzt die Markierung nur mit der Antwort", asy
   }
 });
 
-test("Escape schließt das Feld, bis der Cursor weiterzieht", async () => {
+test("Escape bei zugeklappter Seitenleiste lässt die Eingabe stehen", async () => {
   const harness = installComposerObsidian();
   const point = { line: 2, ch: 3 };
   const editor = editorWith("alter Satz", point);
@@ -423,16 +430,27 @@ test("Escape schließt das Feld, bis der Cursor weiterzieht", async () => {
     await plugin.onload();
     const field = findComposerNode(app.workspace.containerEl, (node) => node.classList.has("unitedshare-cursor-composer"));
     const input = findComposerNode(field, (node) => node.classList.has("unitedshare-cursor-input"));
+    input.focus();
     input.value = "kürzer";
-    await input.listeners.keydown({ key: "Escape", preventDefault() {} });
-    assert.equal(field.style.display, "none");
+    let prevented = false;
+    await input.listeners.keydown({
+      key: "Escape",
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    assert.equal(prevented, true);
+    assert.equal(input.focused, 0);
+    assert.equal(input.value, "kürzer");
+    assert.notEqual(field.style.display, "none");
+    assert.equal(field.style.bottom, "16px");
+    assert.equal(field.style.top, "");
     assert.deepEqual(asked, []);
     assert.deepEqual(editor.calls, []);
-    app.workspace.listeners["editor-change"]();
-    assert.equal(field.style.display, "none");
     point.line = 5;
     app.workspace.listeners["editor-change"]();
     assert.notEqual(field.style.display, "none");
+    assert.equal(input.value, "kürzer");
     plugin.onunload();
     assert.equal(findComposerNode(app.workspace.containerEl, (node) => node.classList.has("unitedshare-cursor-composer")), null);
   } finally {
@@ -544,10 +562,68 @@ test("ohne Tastatur sitzt das Feld unter dem Cursor", () => {
   assert.equal(box.height, 44);
 });
 
+test("die Eingabe sitzt unten mittig im Fenster", () => {
+  const { composerDock } = require("./unitedshare-core");
+  assert.equal(typeof composerDock, "function");
+  assert.deepEqual(composerDock({ width: 390, height: 800 }, 0), {
+    left: 16,
+    bottom: 16,
+    width: 358,
+    height: 56,
+  });
+  assert.deepEqual(composerDock({ width: 1200, height: 800 }, 0), {
+    left: 240,
+    bottom: 16,
+    width: 720,
+    height: 56,
+  });
+  assert.equal(composerDock({ width: 390, height: 800 }, 300).bottom, 316);
+  assert.deepEqual(composerDock({ width: 1400, height: 900 }, 0, { left: 260, width: 900 }), {
+    left: 350,
+    bottom: 16,
+    width: 720,
+    height: 56,
+  });
+  const narrow = composerDock({ width: 1400, height: 900 }, 0, { left: 40, width: 300 });
+  assert.equal(narrow.width, 268);
+  assert.equal(narrow.left, 56);
+});
+
+test("die Seitenleiste hält die Eingabe, solange sie offen ist", () => {
+  const { sidebarPromptOpen } = require("./unitedshare-core");
+  assert.equal(typeof sidebarPromptOpen, "function");
+  const leavesFor = (type) => (type === "unitedshare-sidebar" ? [{}] : []);
+  assert.equal(sidebarPromptOpen(null), false);
+  assert.equal(sidebarPromptOpen({}), false);
+  assert.equal(sidebarPromptOpen({
+    getLeavesOfType() {
+      return [];
+    },
+    rightSplit: { collapsed: true },
+  }), false);
+  assert.equal(sidebarPromptOpen({
+    getLeavesOfType: leavesFor,
+    rightSplit: { collapsed: false },
+  }), true);
+  assert.equal(sidebarPromptOpen({
+    getLeavesOfType: leavesFor,
+    rightSplit: { collapsed: true },
+  }), false);
+  assert.equal(sidebarPromptOpen({ getLeavesOfType: leavesFor }), true);
+});
+
 test("das schwebende Feld ist fest über dem Dokument und auf dem Handy mit 16px gesetzt", () => {
   const css = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
   assert.match(css, /\.unitedshare-cursor-composer\s*\{[^}]*position:\s*fixed/);
   assert.match(css, /\.unitedshare-cursor-composer\s*\{[^}]*z-index:\s*30/);
+  assert.match(css, /\.unitedshare-cursor-composer\s*\{[^}]*min-height:\s*56px/);
+  assert.match(css, /\.unitedshare-cursor-composer\s*\{[^}]*border-radius:\s*16px/);
+  assert.match(css, /\.unitedshare-cursor-composer\s*\{[^}]*gap:\s*10px/);
+  assert.match(css, /\.unitedshare-cursor-composer \.unitedshare-cursor-mark\s*\{[^}]*width:\s*22px/);
+  assert.match(css, /\.unitedshare-cursor-composer button\.unitedshare-cursor-send\s*\{[^}]*width:\s*32px/);
+  assert.match(css, /\.unitedshare-cursor-composer button\.unitedshare-cursor-send\s*\{[^}]*border-radius:\s*10px/);
+  assert.match(css, /\.unitedshare-cursor-composer button\.unitedshare-cursor-send\s*\{[^}]*background:\s*var\(--interactive-accent\)/);
+  assert.match(css, /\.unitedshare-cursor-composer button\.unitedshare-cursor-send\s*\{[^}]*color:\s*var\(--text-on-accent\)/);
   assert.match(css, /body\.is-mobile \.unitedshare-cursor-composer textarea\.unitedshare-cursor-input\s*\{[^}]*font-size:\s*16px/);
 });
 
@@ -558,11 +634,14 @@ test("der Senden-Knopf im schwebenden Feld trägt den Pfeil nach oben", async ()
   });
 });
 
-test("die Anleitung beschreibt das schwebende Feld an der Cursor-Stelle", () => {
+test("die Anleitung beschreibt die Eingabe unten im Fenster", () => {
   const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
-  assert.match(readme, /schwebendes Feld an der Cursor-Stelle/);
+  assert.match(readme, /Seitenleiste zugeklappt/);
+  assert.match(readme, /unten im Fenster/);
+  assert.match(readme, /UnitedShareAI/);
   assert.match(readme, /nur durch die Antwort ersetzt/);
   assert.match(readme, /Release-Tag `1\.1\.6`/);
+  assert.doesNotMatch(readme, /schwebendes Feld an der Cursor-Stelle/);
 });
 
 test("Enter ohne Markierung fügt nur die Antwort am Cursor ein", async () => {
@@ -743,4 +822,226 @@ test("ein zweiter Enter wartet, bis der erste Auftrag fertig ist", async () => {
     assert.equal(started, 1);
     assert.deepEqual(editor.calls, [{ op: "replace", text: "neu" }]);
   });
+});
+
+function menuStub() {
+  return {
+    items: [],
+    addItem(build) {
+      const item = {
+        title: "",
+        icon: "",
+        click: null,
+        setTitle(title) {
+          this.title = title;
+          return this;
+        },
+        setIcon(icon) {
+          this.icon = icon;
+          return this;
+        },
+        onClick(fn) {
+          this.click = fn;
+          return this;
+        },
+      };
+      build(item);
+      this.items.push(item);
+      return this;
+    },
+  };
+}
+
+test("die Eingabe steht unten in der Mitte der Notiz, nicht am Cursor", async () => {
+  const editor = editorWith("Satz", { line: 4, ch: 2 });
+  editor.coordsAtPos = () => ({ left: 24, top: 40, bottom: 56, right: 40 });
+  await runComposer(editor, markdownFace(editor), ({ field, app }) => {
+    app.workspace.activeLeaf.view.containerEl = {
+      getBoundingClientRect() {
+        return { left: 260, width: 900 };
+      },
+    };
+    app.workspace.listeners["editor-change"]();
+    assert.equal(field.style.top, "");
+    assert.equal(field.style.bottom, "16px");
+    assert.equal(field.style.left, "350px");
+    assert.equal(field.style.width, "720px");
+  });
+});
+
+test("eine zugeklappte Seitenleiste zeigt die Eingabe unten, eine offene blendet sie aus", async () => {
+  const editor = editorWith("Satz", { line: 0, ch: 0 });
+  await runComposer(editor, markdownFace(editor), ({ field, app }) => {
+    assert.notEqual(field.style.display, "none");
+    assert.equal(field.style.bottom, "16px");
+    assert.equal(field.style.top, "");
+    assert.equal(field.style.left, "16px");
+    assert.equal(field.style.width, "358px");
+    app.workspace.rightSplit.collapsed = false;
+    assert.equal(typeof app.workspace.listeners["layout-change"], "function");
+    app.workspace.listeners["layout-change"]();
+    assert.equal(field.style.display, "none");
+    app.workspace.rightSplit.collapsed = true;
+    app.workspace.listeners["layout-change"]();
+    assert.notEqual(field.style.display, "none");
+    assert.equal(field.style.bottom, "16px");
+  });
+});
+
+test("die untere Eingabe trägt das UnitedShare-Zeichen", async () => {
+  const editor = editorWith("", { line: 0, ch: 0 });
+  await runComposer(editor, markdownFace(editor), ({ field, input }) => {
+    const mark = findComposerNode(field, (node) => node.classList.has("unitedshare-cursor-mark"));
+    assert.ok(mark);
+    assert.match(String(mark.innerHTML || ""), /<svg/);
+    assert.equal(input.attrs.placeholder, "Nachricht an UnitedShare");
+    assert.equal(input.attrs["aria-label"], "UnitedShareAI");
+  });
+});
+
+test("ein Rechtsklick bietet UnitedShareAI und holt die Eingabe nach vorn", async () => {
+  const editor = editorWith("Satz", { line: 1, ch: 0 });
+  await runComposer(editor, markdownFace(editor), ({ field, input, app }) => {
+    app.workspace.rightSplit.collapsed = false;
+    assert.equal(typeof app.workspace.listeners["layout-change"], "function");
+    app.workspace.listeners["layout-change"]();
+    assert.equal(field.style.display, "none");
+    const menu = menuStub();
+    assert.equal(typeof app.workspace.listeners["editor-menu"], "function");
+    app.workspace.listeners["editor-menu"](menu, editor);
+    assert.equal(menu.items.length, 1);
+    assert.equal(menu.items[0].title, "UnitedShareAI");
+    assert.equal(menu.items[0].icon, "unitedshare");
+    menu.items[0].click();
+    assert.notEqual(field.style.display, "none");
+    assert.equal(input.focused, 1);
+    assert.equal(field.style.bottom, "16px");
+    assert.equal(field.style.top, "");
+  });
+});
+
+test("UnitedShareAI auf der Lesansicht öffnet keine Eingabe", async () => {
+  const editor = editorWith("sichtbar", { line: 0, ch: 0 });
+  await runComposer(editor, {
+    viewType: "markdown",
+    mode: "preview",
+    editor,
+    file: { path: "Notiz.md", extension: "md" },
+  }, ({ field, input, app }) => {
+    assert.equal(field.style.display, "none");
+    const menu = menuStub();
+    assert.equal(typeof app.workspace.listeners["editor-menu"], "function");
+    app.workspace.listeners["editor-menu"](menu, editor);
+    menu.items[0].click();
+    assert.equal(field.style.display, "none");
+    assert.equal(input.focused, 0);
+  });
+});
+
+test("Escape blendet die erzwungene Eingabe aus, solange die Seitenleiste offen ist", async () => {
+  const editor = editorWith("Satz", { line: 1, ch: 0 });
+  await runComposer(editor, markdownFace(editor), async ({ field, input, app, plugin }) => {
+    const asked = [];
+    plugin.completeThread = async () => {
+      asked.push("asked");
+      return "neu";
+    };
+    app.workspace.rightSplit.collapsed = false;
+    assert.equal(typeof app.workspace.listeners["layout-change"], "function");
+    app.workspace.listeners["layout-change"]();
+    const menu = menuStub();
+    assert.equal(typeof app.workspace.listeners["editor-menu"], "function");
+    app.workspace.listeners["editor-menu"](menu, editor);
+    menu.items[0].click();
+    assert.notEqual(field.style.display, "none");
+    input.value = "kürzer";
+    await input.listeners.keydown({ key: "Escape", preventDefault() {} });
+    assert.equal(field.style.display, "none");
+    assert.equal(input.value, "kürzer");
+    assert.equal(input.focused, 0);
+    assert.deepEqual(asked, []);
+    assert.deepEqual(editor.calls, []);
+    app.workspace.listeners["layout-change"]();
+    assert.equal(field.style.display, "none");
+  });
+});
+
+test("eine Tastatur hebt die Eingabe, die Statusleiste nicht noch einmal", async () => {
+  const harness = installComposerObsidian();
+  const editor = editorWith("Satz", { line: 0, ch: 0 });
+  editor.coordsAtPos = () => ({ left: 20, top: 40, bottom: 56, right: 40 });
+  const previousWindow = global.window;
+  const previousDocument = global.document;
+  global.window = {
+    innerWidth: 390,
+    innerHeight: 800,
+    visualViewport: { height: 500, offsetTop: 0 },
+  };
+  global.document = {
+    documentElement: {
+      style: {
+        getPropertyValue(name) {
+          return name === "--keyboard-height" ? "300px" : "";
+        },
+      },
+    },
+    querySelector(selector) {
+      if (selector === ".status-bar") {
+        return { getBoundingClientRect() { return { height: 28 }; } };
+      }
+      return null;
+    },
+  };
+  try {
+    const app = composerApp(editor, markdownFace(editor));
+    const plugin = new harness.UnitedSharePlugin(app);
+    await plugin.onload();
+    const field = findComposerNode(app.workspace.containerEl, (node) => node.classList.has("unitedshare-cursor-composer"));
+    assert.equal(field.style.bottom, "316px");
+    plugin.onunload();
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+    if (previousDocument === undefined) delete global.document;
+    else global.document = previousDocument;
+    harness.restore();
+  }
+});
+
+test("ohne Tastatur steht die Eingabe über der Statusleiste", async () => {
+  const harness = installComposerObsidian();
+  const editor = editorWith("Satz", { line: 0, ch: 0 });
+  const previousWindow = global.window;
+  const previousDocument = global.document;
+  global.window = {
+    innerWidth: 1200,
+    innerHeight: 800,
+    visualViewport: { height: 800, offsetTop: 0 },
+  };
+  global.document = {
+    documentElement: { style: { getPropertyValue() { return ""; } } },
+    querySelector(selector) {
+      if (selector === ".status-bar") {
+        return { getBoundingClientRect() { return { height: 28 }; } };
+      }
+      return null;
+    },
+  };
+  try {
+    const app = composerApp(editor, markdownFace(editor));
+    const plugin = new harness.UnitedSharePlugin(app);
+    await plugin.onload();
+    const field = findComposerNode(app.workspace.containerEl, (node) => node.classList.has("unitedshare-cursor-composer"));
+    assert.equal(field.style.bottom, "44px");
+    assert.equal(field.style.left, "240px");
+    assert.equal(field.style.width, "720px");
+    assert.equal(field.style.top, "");
+    plugin.onunload();
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+    if (previousDocument === undefined) delete global.document;
+    else global.document = previousDocument;
+    harness.restore();
+  }
 });
