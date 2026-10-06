@@ -812,6 +812,23 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
   return stripVaultActions(last) || "Die Aktionen im Tresor sind ausgeführt.";
 }
 
+function commandKey(text) {
+  return String(text ?? "")
+    .trim()
+    .toLocaleLowerCase("de")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?…]+$/u, "");
+}
+
+function localObsidianCommand(text) {
+  const key = commandKey(text);
+  if (key === "zeige die lokale graphansicht" || key === "graphansicht der notiz") {
+    return "graph:open-local";
+  }
+  if (key === "zeige die graphansicht" || key === "öffne den graphen") return "graph:open";
+  return null;
+}
+
 module.exports = {
   UnitedShareError,
   assertVaultRelative,
@@ -829,6 +846,7 @@ module.exports = {
   mentionPaths,
   isObsidianModel,
   listModels,
+  localObsidianCommand,
   messagesUrl,
   modelsUrl,
   parseAnthropicContent,

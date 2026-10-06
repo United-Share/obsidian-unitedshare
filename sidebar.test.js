@@ -704,6 +704,58 @@ test("Tippen neben das Feld und leere Eingabe klappen die Tastatur zu", async ()
   assert.equal(view.keyboardSync, null);
 });
 
+test("zeige die Graphansicht startet den Obsidian-Befehl und fragt das Modell nicht", async () => {
+  const app = makeApp();
+  const opened = [];
+  app.commands = {
+    executeCommandById(id) {
+      opened.push(id);
+      return true;
+    },
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  let asked = 0;
+  plugin.completeThread = async () => {
+    asked += 1;
+    return "soll nicht";
+  };
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  let blurred = 0;
+  view.questionEl.blur = () => {
+    blurred += 1;
+  };
+  view.keyboardInsetPx = 280;
+  view.questionEl.value = "zeige die Graphansicht";
+  await view.submit();
+  assert.deepEqual(opened, ["graph:open"]);
+  assert.equal(asked, 0);
+  assert.equal(view.questionEl.value, "");
+  assert.equal(view.activeTab().messages.length, 0);
+  assert.equal(view.statusEl.text, "Graphansicht ist offen.");
+  assert.equal(blurred, 1);
+
+  view.questionEl.value = "zeige die lokale Graphansicht";
+  await view.submit();
+  assert.deepEqual(opened, ["graph:open", "graph:open-local"]);
+  assert.equal(view.statusEl.text, "Lokale Graphansicht ist offen.");
+  assert.equal(asked, 0);
+
+  app.commands.executeCommandById = (id) => {
+    opened.push(id);
+    return false;
+  };
+  view.questionEl.value = "öffne den Graphen";
+  await view.submit();
+  assert.equal(view.statusEl.text, "Die Graphansicht lässt sich hier nicht öffnen.");
+  assert.equal(asked, 0);
+
+  view.questionEl.value = "Was ist die Graphansicht?";
+  await view.submit();
+  assert.equal(asked, 1);
+});
+
 test("Schrift und Zeichen stammen von unitedshare.ai und liegen im Plugin", () => {
   const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
   const woff = fs.readFileSync(path.join(root, "fonts/Inter-latin.woff2"));

@@ -47,6 +47,7 @@ Die Werkzeuge laufen auf diesem Rechner, mit den Funktionen des offenen Tresors.
 - **Starten** führt auf dem Desktop `.py`, `.js`, `.mjs` und `.sh` im Tresor aus.
 - Ein Block `unitedshare` mit `read`, `list`, `write` oder `run` tut dasselbe, wenn der Pfad in der Antwort steht.
 - **In die Notiz** schreibt die letzte Frage und Antwort an die Cursor-Position der aktiven Notiz.
+- `zeige die Graphansicht` oder `öffne den Graphen` öffnet die Graphansicht auf diesem Gerät. `zeige die lokale Graphansicht` und `Graphansicht der Notiz` öffnen den Graphen der offenen Notiz. Diese Sätze gehen nicht ans Modell.
 
 Enter oder der Pfeil schickt die Nachricht.
 
@@ -72,4 +73,4 @@ Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.githu
 
 ## Stand
 
-Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.4`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.
+Anbieter: United Share GmbH. Lizenz: MIT, weil für dieses Plugin noch keine eigene Produktlizenz vorlag. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.1.5`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare. In den Firmen-Tresor ist das Plugin nicht kopiert.

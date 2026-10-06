@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { assertVaultRelative, completeMessages, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
+const { assertVaultRelative, completeMessages, executeVaultAction, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -590,6 +590,19 @@ class UnitedShareView extends ItemView {
     const question = (this.questionEl.value || "").trim();
     if (!question) {
       this.statusEl.setText("Bitte eine Frage eingeben.");
+      return;
+    }
+    const commandId = localObsidianCommand(question);
+    if (commandId) {
+      this.questionEl.value = "";
+      if (this.keyboardInsetPx > 0) this.dismissKeyboard();
+      const commands = this.app && this.app.commands;
+      const run = commands && commands.executeCommandById;
+      const opened = typeof run === "function" ? run.call(commands, commandId) : false;
+      const local = commandId === "graph:open-local";
+      this.statusEl.setText(opened === false
+        ? "Die Graphansicht lässt sich hier nicht öffnen."
+        : (local ? "Lokale Graphansicht ist offen." : "Graphansicht ist offen."));
       return;
     }
     const files = await loadMentionedNotes(question, (notePath) => this.plugin.readVaultNote(notePath));

@@ -813,6 +813,23 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
   return stripVaultActions(last) || "Die Aktionen im Tresor sind ausgeführt.";
 }
 
+function commandKey(text) {
+  return String(text ?? "")
+    .trim()
+    .toLocaleLowerCase("de")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?…]+$/u, "");
+}
+
+function localObsidianCommand(text) {
+  const key = commandKey(text);
+  if (key === "zeige die lokale graphansicht" || key === "graphansicht der notiz") {
+    return "graph:open-local";
+  }
+  if (key === "zeige die graphansicht" || key === "öffne den graphen") return "graph:open";
+  return null;
+}
+
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
 const MARK_D = "M67.562 0.672852V55.2979C67.562 63.2369 61.2603 69.6729 53.4866 69.6729H0V16.4854C0 7.75235 6.93196 0.672852 15.483 0.672852H67.562ZM48.9193 14.6729H29.7023C26.4996 14.6729 23.428 15.9679 21.1633 18.2733C18.8986 20.5786 17.6263 23.7053 17.6263 26.9655L17.6267 57.8002C17.636 58.0152 17.68 58.2276 17.7574 58.4287C17.8541 58.6801 18.0008 58.9084 18.1884 59.0993C18.3759 59.2902 18.6002 59.4396 18.8471 59.538C19.094 59.6365 19.3583 59.6819 19.6233 59.6714H27.7053C28.235 59.6714 28.7429 59.4572 29.1175 59.076C29.492 58.6948 29.7023 58.1777 29.7023 57.6386V28.9983C29.701 28.7309 29.7517 28.466 29.8515 28.2187C29.9514 27.9715 30.0984 27.7468 30.2842 27.5577C30.4698 27.3687 30.6906 27.219 30.9335 27.1174C31.1763 27.0157 31.4367 26.9641 31.6993 26.9655H48.9193C49.4489 26.9655 49.9569 26.7513 50.3314 26.3701C50.706 25.9889 50.9163 25.4719 50.9163 24.9327V16.8015C50.9168 16.2531 50.7095 15.7257 50.3375 15.3292C49.9654 14.9326 49.4575 14.6975 48.9193 14.6729Z";
@@ -1400,6 +1417,19 @@ class UnitedShareView extends ItemView {
     const question = (this.questionEl.value || "").trim();
     if (!question) {
       this.statusEl.setText("Bitte eine Frage eingeben.");
+      return;
+    }
+    const commandId = localObsidianCommand(question);
+    if (commandId) {
+      this.questionEl.value = "";
+      if (this.keyboardInsetPx > 0) this.dismissKeyboard();
+      const commands = this.app && this.app.commands;
+      const run = commands && commands.executeCommandById;
+      const opened = typeof run === "function" ? run.call(commands, commandId) : false;
+      const local = commandId === "graph:open-local";
+      this.statusEl.setText(opened === false
+        ? "Die Graphansicht lässt sich hier nicht öffnen."
+        : (local ? "Lokale Graphansicht ist offen." : "Graphansicht ist offen."));
       return;
     }
     const files = await loadMentionedNotes(question, (notePath) => this.plugin.readVaultNote(notePath));
