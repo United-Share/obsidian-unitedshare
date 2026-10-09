@@ -24,10 +24,20 @@ function listen(handler) {
   });
 }
 
-// Wie requestUrlAsFetch in main.src.js, mit Obsidians requestUrl darunter.
-function requestUrlWieObsidian() {
+// Bildet das gefixte requestUrlAsFetch aus main.src.js nach: Content-Length wird
+// case-insensitiv entfernt, bevor der native requestUrl-Ersatz (hier fetch)
+// ihn zu sehen bekommt. "nativ" steht fuer Capacitors requestUrl auf Mobile,
+// das bei gesetztem Content-Length wirft -- diese Haerte simuliert der Server
+// ueber capacitorNativ() im Content-Length-Regressionstest.
+function requestUrlWieObsidian(nativ = fetch) {
   return async (url, init) => {
-    const r = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+    const headers = {};
+    const given = (init && init.headers) || {};
+    for (const key of Object.keys(given)) {
+      if (key.toLowerCase() === "content-length") continue;
+      headers[key] = given[key];
+    }
+    const r = await nativ(url, { method: init.method, headers, body: init.body });
     const text = await r.text();
     return {
       ok: r.status >= 200 && r.status < 300,
@@ -36,6 +46,18 @@ function requestUrlWieObsidian() {
       json: async () => JSON.parse(text),
     };
   };
+}
+
+// Simuliert Capacitors native HTTP-Schicht auf Mobile: ein gesetzter
+// Content-Length-Header ist verboten und laesst den Request werfen.
+function capacitorNativ(url, opts) {
+  const headers = opts.headers || {};
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === "content-length") {
+      throw new TypeError("Failed to construct 'Request': Content-Length is a forbidden header name");
+    }
+  }
+  return fetch(url, opts);
 }
 
 function sse(stuecke) {
@@ -50,7 +72,7 @@ function sse(stuecke) {
   return z.join("\n\n") + "\n\n";
 }
 
-async function frage(port) {
+async function frage(port, fetchImpl = requestUrlWieObsidian()) {
   return completeMessages({
     baseUrl: `http://127.0.0.1:${port}/v1`,
     apiKey: "usk_test",
@@ -59,7 +81,7 @@ async function frage(port) {
     turns: [{ role: "user", content: "Sag ok" }],
     timeoutMs: 5000,
     live: false,
-    fetchImpl: requestUrlWieObsidian(),
+    fetchImpl,
   });
 }
 
@@ -108,4 +130,53 @@ test("ein echter Netzfehler bleibt 'nicht erreichbar'", async () => {
   server.close();
   await new Promise((r) => setTimeout(r, 50));
   await assert.rejects(frage(port), /nicht erreichbar/);
+});
+
+test("ein 401 heisst 'Key abgelehnt', nicht 'nicht erreichbar'", async () => {
+  const { server, port } = await listen((req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "invalid api key" } }));
+  });
+  try {
+    await assert.rejects(frage(port), (err) => {
+      assert.ok(err instanceof UnitedShareError);
+      assert.equal(err.status, 401);
+      assert.match(err.message, /API-Key wurde abgelehnt/);
+      assert.doesNotMatch(err.message, /nicht erreichbar/);
+      return true;
+    });
+  } finally {
+    server.close();
+  }
+});
+
+test("Content-Length wirft nicht auf simuliertem Capacitor-Mobile", async () => {
+  // Regression: jsonPostHeaders setzt immer Content-Length. Ungefiltert wirft
+  // Capacitors natives requestUrl -> frueher als "nicht erreichbar" fehlgedeutet.
+  const { server, port } = await listen((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ type: "message", role: "assistant", content: [{ type: "text", text: "ok" }] }));
+  });
+  try {
+    assert.equal(await frage(port, requestUrlWieObsidian(capacitorNativ)), "ok");
+  } finally {
+    server.close();
+  }
+});
+
+test("ein 401 wirft auch auf simuliertem Capacitor-Mobile korrekt", async () => {
+  const { server, port } = await listen((req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "invalid api key" } }));
+  });
+  try {
+    await assert.rejects(frage(port, requestUrlWieObsidian(capacitorNativ)), (err) => {
+      assert.ok(err instanceof UnitedShareError);
+      assert.match(err.message, /API-Key wurde abgelehnt/);
+      assert.doesNotMatch(err.message, /nicht erreichbar/);
+      return true;
+    });
+  } finally {
+    server.close();
+  }
 });

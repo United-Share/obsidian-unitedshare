@@ -898,7 +898,9 @@ test("completeThread geht an /v1/messages ohne Werkzeuge", async () => {
   const body = JSON.parse(call.body);
   assert.equal(body.model, "rmxos-mega2026.1");
   assert.equal(body.stream, true);
-  assert.equal(call.headers["Content-Length"], String(Buffer.byteLength(call.body)));
+  // requestUrlAsFetch entfernt Content-Length bewusst, bevor es an requestUrl
+  // geht: Capacitors natives HTTP auf Mobile wirft bei diesem verbotenen Header.
+  assert.equal(Object.hasOwn(call.headers, "Content-Length"), false);
   assert.equal(Object.hasOwn(body, "tools"), false);
   assert.equal(body.messages[0].content[0].type, "text");
   assert.equal(text, "Antwort aus messages");

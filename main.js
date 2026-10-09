@@ -2258,10 +2258,20 @@ function blankAnswer() {
 
 function requestUrlAsFetch() {
   return async (url, init) => {
+    // Content-Length ist ein "forbidden header": Capacitors natives requestUrl
+    // auf Mobile berechnet ihn selbst und wirft, wenn er manuell gesetzt ist.
+    // Browser-fetch (Desktop) ignoriert ihn still. Darum hier case-insensitiv
+    // entfernen, sonst wird ein echter 401 als "nicht erreichbar" fehlgedeutet.
+    const headers = {};
+    const given = (init && init.headers) || {};
+    for (const key of Object.keys(given)) {
+      if (key.toLowerCase() === "content-length") continue;
+      headers[key] = given[key];
+    }
     const res = await requestUrl({
       url,
       method: init.method,
-      headers: init.headers,
+      headers,
       body: init.body,
       throw: false,
     });
