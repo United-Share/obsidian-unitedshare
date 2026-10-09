@@ -1228,6 +1228,40 @@ function fsVaultHost(root, options = {}) {
   };
 }
 
+// Gültige Aktionsarten. Nur ein JSON-Objekt mit einem dieser Werte gilt als
+// verfehlter Versuch -- das blosse Wort "action" nicht, sonst griffe der
+// Hinweis bei jeder Erklaerung des Formats.
+const AKTIONSART = /["']action["']\s*:\s*["'](read|list|write|run|sync|mesh-join)["']/;
+
+function verfehltesProtokoll(text) {
+  const quelle = String(text ?? "");
+  if (quelle.includes("```unitedshare")) return false;
+  return AKTIONSART.test(quelle);
+}
+
+// Aus dem Vault, 2026-10-09: auf die Bitte um eine Notiz kam
+// '{"action":"write","path":"DIDNS.md",...}' als blosser Text. Der Nutzer sah
+// rohes JSON, angelegt wurde nichts -- parseVaultActions verlangt den Block,
+// und der Auffangweg actionsFromReply deckt nur ausfuehrbare Dateien mit
+// Pfaden aus der Frage.
+//
+// Den Parser zu lockern waere gefaehrlich: vor Vault-Aktionen wird nicht
+// nachgefragt, ein JSON, das das Format bloss erklaert, wuerde dann
+// ausgefuehrt. Also wird nichts getan, sondern zurueckgemeldet.
+const PROTOKOLL_HINWEIS = [
+  "Die Aktion wurde nicht ausgefuehrt: der Block fehlt.",
+  "",
+  "Soll eine Datei gelesen, gelistet, geschrieben oder gestartet werden,",
+  "steht die Anweisung in einem Codeblock mit der Sprache unitedshare:",
+  "",
+  "```unitedshare",
+  '{"action": "write", "path": "Notiz.md", "content": "..."}',
+  "```",
+  "",
+  "Nur in dieser Form wird sie ausgefuehrt. War nichts auszufuehren,",
+  "antworte bitte noch einmal ohne JSON.",
+].join("\n");
+
 async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
   const thread = [];
   for (const turn of turns || []) {
@@ -1239,6 +1273,7 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
   await attachRequestedReads(thread, host);
   const limit = Math.min(Math.max(Number(maxSteps) || 6, 1), 6);
   const done = new Set();
+  let hinweisGegeben = false;
   let last = "";
   for (let step = 0; step < limit; step += 1) {
     const reply = await complete(thread);
@@ -1248,7 +1283,23 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
       ? protocol
       : actionsFromReply(instructionUserText(thread), last)
         .filter((action) => !done.has(`${action.action}:${action.path}`));
-    if (!actions.length) return last;
+    if (!actions.length) {
+      // Das Modell wollte offenbar etwas tun, hat aber das Format verfehlt.
+      // Ausgefuehrt wird trotzdem nichts -- nur zurueckgemeldet, damit der
+      // Nutzer kein rohes JSON sieht.
+      //
+      // HOECHSTENS EINMAL: beharrt das Modell auf dem falschen Format, darf
+      // daraus keine Schleife ueber alle Schritte werden. Jeder kostet einen
+      // Modellaufruf, und wer es zweimal nicht trifft, trifft es auch beim
+      // sechsten Mal nicht.
+      if (!hinweisGegeben && verfehltesProtokoll(last)) {
+        hinweisGegeben = true;
+        thread.push({ role: "assistant", content: last });
+        thread.push({ role: "user", content: PROTOKOLL_HINWEIS });
+        continue;
+      }
+      return last;
+    }
     if (!protocol.length) {
       for (const action of actions) done.add(`${action.action}:${action.path}`);
     }
