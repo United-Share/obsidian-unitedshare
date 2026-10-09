@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { adapterVaultHost, applyComposerAnswer, assertVaultRelative, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, listIndexedOrHidden, listModels, loadMentionedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
+const { adapterVaultHost, applyComposerAnswer, assertVaultRelative, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, listIndexedOrHidden, listModels, loadMentionedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard, visibleStreamText } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -818,9 +818,14 @@ class UnitedShareView extends ItemView {
     try {
       await this.renderMessages();
       const answer = await this.plugin.completeThread(turns, (text) => {
-        draft.content = text;
-        this.answer = text;
-        if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(text);
+        // Nicht der Rohtext: ein Protokollblock ist Maschinenkommunikation
+        // und darf auch waehrend des Stroms nicht in der Blase stehen.
+        // Scheitert ein spaeterer Schritt, bleibt genau das hier Gezeigte
+        // stehen -- deshalb muss es schon sauber sein.
+        const sichtbar = visibleStreamText(text);
+        draft.content = sichtbar;
+        this.answer = sichtbar;
+        if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(sichtbar);
         if (this.statusEl) this.statusEl.setText("");
         const box = this.messagesEl;
         if (box && typeof box.scrollHeight === "number") box.scrollTop = box.scrollHeight;

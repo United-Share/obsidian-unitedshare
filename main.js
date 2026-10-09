@@ -955,6 +955,52 @@ function stripVaultActions(text) {
     .trim();
 }
 
+// Was der Nutzer waehrend einer Antwort sehen darf.
+//
+// Aus dem Vault, 2026-10-09: im Chat stand ein vollstaendiger und korrekter
+// Protokollblock. Die Aktion lief also -- sichtbar wurde er trotzdem, auf
+// zwei Wegen in main.src.js: die Strom-Rueckmeldung legt den Rohtext in die
+// Blase, und der Fehlerzweig laesst genau diesen Rohtext stehen, wenn ein
+// spaeterer Schritt scheitert.
+//
+// stripVaultActions hilft dort nicht: es greift erst bei einem
+// GESCHLOSSENEN Block und erst am Ende der Schleife. Waehrend des Stroms ist
+// der Block offen, und im Fehlerfall kommt das Ende nie.
+//
+// Der Block ist Maschinenkommunikation und gehoert nie in die Blase, auch
+// nicht fuer einen Moment.
+function visibleStreamText(text) {
+  const quelle = String(text ?? "");
+  if (!quelle.includes("```unitedshare")) return quelle;
+  // Erst die geschlossenen heraus, dann einen etwaigen offenen Rest ab
+  // seinem Beginn abschneiden.
+  const ohneGeschlossene = quelle.replace(/```unitedshare[^\n]*\n[\s\S]*?```/g, "");
+  const beginn = ohneGeschlossene.indexOf("```unitedshare");
+  const sichtbar = beginn >= 0 ? ohneGeschlossene.slice(0, beginn) : ohneGeschlossene;
+  return sichtbar.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Derselbe Pfad ohne fuehrendes @, oder "" wenn keines da ist.
+//
+// Das @ ist die Erwaehnungs-Syntax der Eingabe (@Pfad liest eine Notiz) und
+// kein Teil eines Dateinamens. Modelle nehmen es aus der Frage mit.
+//
+// Eine Datei DARF mit @ beginnen, deshalb wird hier nur ein Zweitname
+// angeboten -- der genannte Pfad behaelt ueberall den Vorrang, und beim
+// Schreiben gibt es gar keinen Zweitversuch: eine Datei anzulegen, die
+// niemand genannt hat, waere schlimmer als ein Fehlschlag.
+function ohneErwaehnung(rel) {
+  const roh = String(rel ?? "");
+  if (!roh.startsWith("@")) return "";
+  const rest = roh.slice(1).trim();
+  if (!rest) return "";
+  try {
+    return assertVaultRelative(rest);
+  } catch (_err) {
+    return "";
+  }
+}
+
 async function executeVaultAction(action, host) {
   const kind = action && action.action;
   const rawPath = action && typeof action.path === "string" ? action.path : "";
@@ -990,8 +1036,19 @@ async function executeVaultAction(action, host) {
     if (kind === "read") {
       if (typeof host.read !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const text = await host.read(rel);
-      if (typeof text !== "string") return `Ergebnis read ${rel}:\nDie Datei liegt nicht im Tresor.`;
-      return `Ergebnis read ${rel}:\n${clipText(text, READ_LIMIT)}`;
+      if (typeof text === "string") return `Ergebnis read ${rel}:\n${clipText(text, READ_LIMIT)}`;
+      // Zweiter Versuch ohne Erwaehnungszeichen. Aus dem Vault kam
+      // {"action":"read","path":"@DID Chats.md"} -- das @ stammt aus der
+      // Eingabe-Syntax und gehoert nicht zum Dateinamen. Ohne diesen Versuch
+      // schlaegt das Lesen fehl, und die Schleife probiert es bis zu sechsmal.
+      const ohneAt = ohneErwaehnung(rel);
+      if (ohneAt) {
+        const zweiter = await host.read(ohneAt);
+        if (typeof zweiter === "string") {
+          return `Ergebnis read ${ohneAt}:\n${clipText(zweiter, READ_LIMIT)}`;
+        }
+      }
+      return `Ergebnis read ${rel}:\nDie Datei liegt nicht im Tresor.`;
     }
     if (kind === "write") {
       if (typeof host.write !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
@@ -1001,8 +1058,20 @@ async function executeVaultAction(action, host) {
       return `Ergebnis write ${rel}:\ngeschrieben, ${content.length} Zeichen.`;
     }
     if (typeof host.run !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
-    const output = await host.run(rel);
-    return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
+    const ohneAt = ohneErwaehnung(rel);
+    if (!ohneAt) {
+      const output = await host.run(rel);
+      return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
+    }
+    try {
+      const output = await host.run(rel);
+      return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
+    } catch (_err) {
+      // Wie beim Lesen: das @ kann aus der Eingabe stammen. Der Pfad mit @
+      // hat Vorrang, erst wenn er scheitert, zaehlt der ohne.
+      const output = await host.run(ohneAt);
+      return `Ergebnis run ${ohneAt}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
+    }
   } catch (error) {
     const message = error instanceof UnitedShareError ? error.message : "Die Aktion ist fehlgeschlagen.";
     return `Ergebnis ${kind || "aktion"} ${rawPath}:\n${message}`;
@@ -2840,9 +2909,14 @@ class UnitedShareView extends ItemView {
     try {
       await this.renderMessages();
       const answer = await this.plugin.completeThread(turns, (text) => {
-        draft.content = text;
-        this.answer = text;
-        if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(text);
+        // Nicht der Rohtext: ein Protokollblock ist Maschinenkommunikation
+        // und darf auch waehrend des Stroms nicht in der Blase stehen.
+        // Scheitert ein spaeterer Schritt, bleibt genau das hier Gezeigte
+        // stehen -- deshalb muss es schon sauber sein.
+        const sichtbar = visibleStreamText(text);
+        draft.content = sichtbar;
+        this.answer = sichtbar;
+        if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(sichtbar);
         if (this.statusEl) this.statusEl.setText("");
         const box = this.messagesEl;
         if (box && typeof box.scrollHeight === "number") box.scrollTop = box.scrollHeight;

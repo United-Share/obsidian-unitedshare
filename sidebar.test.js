@@ -1367,6 +1367,53 @@ test("ein abgeschlossenes Gespräch wird mit seinen Nachrichten abgelegt", async
   assert.equal(abgelegt.messages.length, 2, "die Nachrichten dürfen nicht weggeleert sein");
 });
 
+test("ein Protokollblock steht nie in der Blase, auch nicht während des Stroms", async () => {
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  const gesehen = [];
+  plugin.completeThread = async (turns, onDelta) => {
+    // So kommt es wirklich an: Stück für Stück, der Block zuerst offen.
+    onDelta("Ich sehe nach.\n```unitedshare\n{\"action\":\"read\"");
+    onDelta("Ich sehe nach.\n```unitedshare\n{\"action\":\"read\",\"path\":\"a.md\"}\n```");
+    gesehen.push(view.activeTab().messages.map((m) => m.content).join("|"));
+    return "In der Notiz steht: Guten Tag.";
+  };
+  await view.onOpen();
+  view.questionEl.value = "Lies @a.md";
+  await view.submit();
+
+  for (const stand of gesehen) {
+    assert.equal(stand.includes("unitedshare"), false,
+      `waehrend des Stroms sichtbar: ${stand}`);
+    assert.equal(stand.includes('"action"'), false, stand);
+  }
+  const blasen = view.activeTab().messages.map((m) => m.content);
+  assert.equal(blasen.some((t) => String(t).includes("unitedshare")), false);
+  assert.equal(blasen[blasen.length - 1], "In der Notiz steht: Guten Tag.");
+});
+
+test("auch nach einem Fehler bleibt kein Protokollblock stehen", async () => {
+  // Der gemeldete Fall. Scheitert ein späterer Schritt, lässt der
+  // Fehlerzweig die Teilantwort stehen -- und genau die enthielt bisher den
+  // Block.
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async (turns, onDelta) => {
+    onDelta("Ich sehe nach.\n```unitedshare\n{\"action\":\"read\",\"path\":\"@DID Chats.md\"}\n```");
+    throw new Error("Zeitüberschreitung");
+  };
+  await view.onOpen();
+  view.questionEl.value = "Lies @DID Chats.md";
+  await view.submit();
+
+  const blasen = view.activeTab().messages.map((m) => String(m.content));
+  assert.equal(blasen.some((t) => t.includes("unitedshare")), false,
+    `Block stehen geblieben: ${JSON.stringify(blasen)}`);
+  assert.equal(blasen.some((t) => t.includes('"action"')), false);
+  assert.equal(blasen.some((t) => t.includes("Ich sehe nach.")), true,
+    "der erklärende Satz soll bleiben, nur das Protokoll nicht");
+});
+
 test("ohne Adapter läuft alles weiter, nur ohne Ablage", async () => {
   // Auf einer Plattform ohne Adapter darf das Fragen nicht scheitern.
   const app = makeApp();

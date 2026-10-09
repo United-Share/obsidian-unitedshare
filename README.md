@@ -51,6 +51,8 @@ Die Werkzeuge laufen auf diesem Rechner, mit den Funktionen des offenen Tresors.
 - **Schreiben** legt eine Datei an oder ändert sie. Eine Anlagebitte mit einem Codeblock `python`, `javascript` oder `bash` speichert diesen Inhalt unter dem genannten Pfad.
 - **Starten** führt auf dem Desktop `.py`, `.js`, `.mjs` und `.sh` im Tresor aus.
 - Ein Block `unitedshare` mit `read`, `list`, `write` oder `run` tut dasselbe, wenn der Pfad in der Antwort steht.
+- Der Block selbst erscheint nie im Gespräch, auch nicht während die Antwort läuft oder wenn ein Schritt fehlschlägt. Er ist Maschinenkommunikation.
+- Ein Pfad mit führendem `@` wird auch ohne das Zeichen gesucht. Das `@` stammt aus der Eingabe-Syntax; Modelle nehmen es aus der Frage mit. Der genannte Pfad hat Vorrang, und beim Schreiben gibt es keinen Zweitversuch.
 - Schreibt das Modell die Anweisung als blankes JSON statt in den Block, wird sie **nicht** ausgeführt. Stattdessen bekommt es das Format genannt und antwortet erneut. Du siehst also kein rohes JSON, und ausgeführt wird weiterhin nur, was richtig formatiert ist. Das geschieht höchstens einmal je Frage.
 - **Beitreten** nimmt eine Einladungs- oder Empfangsdatei im Tresor an. Das Plugin startet dafür nur `reemax mesh join` mit diesem relativen Pfad.
 - **Abgleich** startet `reemax sync push` oder `reemax sync pull` für einen Namen, der mit `reemax sync pair` schon eingerichtet ist. Beide Richtungen zugleich gibt es nicht. `reemax mesh sync` prüft den Tunnel und kopiert keine Dateien. Das Plugin legt kein Paar an.
@@ -114,4 +116,4 @@ Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.githu
 
 ## Stand
 
-Anbieter: United Share GmbH. Lizenz: MIT. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.2.1`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare
+Anbieter: United Share GmbH. Lizenz: MIT. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.2.2`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare
