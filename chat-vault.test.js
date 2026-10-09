@@ -287,7 +287,7 @@ test("Fragen legt hallo.py aus einem Python-Block an und startet sie", async () 
     const parsed = bodies();
     assert.equal(parsed.length, 2);
     for (const body of parsed) {
-      assert.equal(body.stream, false);
+      assert.equal(body.stream, true);
       assert.equal(Object.hasOwn(body, "tools"), false);
     }
     assert.equal(state.requests[0].url, "https://api.unitedshare.ai/v1/messages");
@@ -312,7 +312,7 @@ test("Fragen liest eine benannte Notiz und schickt den Text mit", async () => {
     assert.equal(view.answer, "Die Notiz sagt Guten Tag.");
     const parsed = bodies();
     assert.equal(parsed.length, 1);
-    assert.equal(parsed[0].stream, false);
+    assert.equal(parsed[0].stream, true);
     assert.equal(Object.hasOwn(parsed[0], "tools"), false);
     const packed = JSON.stringify(parsed[0].messages);
     assert.match(packed, /Guten Tag/);

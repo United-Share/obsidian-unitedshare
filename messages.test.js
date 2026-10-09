@@ -145,7 +145,7 @@ test("listModels lehnt einen fehlenden oder abgelehnten Schlüssel ab", async ()
   }
 });
 
-test("der Körper bleibt ein Textauftrag ohne Werkzeuge und ohne Stream", () => {
+test("der Körper bleibt ein Textauftrag ohne Werkzeuge und bittet um einen Strom", () => {
   assert.equal(typeof buildAnthropicBody, "function");
   const body = buildAnthropicBody({
     model: "rmxos-mega2026.1",
@@ -160,7 +160,7 @@ test("der Körper bleibt ein Textauftrag ohne Werkzeuge und ohne Stream", () => 
     tools: [{ name: "Bash" }],
   });
   assert.equal(body.model, "rmxos-mega2026.1");
-  assert.equal(body.stream, false);
+  assert.equal(body.stream, true);
   assert.equal(body.max_tokens, 1200);
   assert.equal(body.system, "Antworte auf Deutsch.");
   assert.equal(Object.hasOwn(body, "tools"), false);
@@ -184,7 +184,7 @@ test("eine fehlende Erwähnung bleibt ein Textblock und wird nicht zum Werkzeug"
     }],
   });
   assert.match(body.messages[0].content[1].text, /liegt nicht im Tresor/);
-  assert.equal(body.stream, false);
+  assert.equal(body.stream, true);
 });
 
 test("mentionPaths liest @Pfad und @\"Pfad mit Leerzeichen\"", () => {
@@ -250,7 +250,7 @@ test("completeMessages sendet den Anthropic-Körper und liest den Textblock", as
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     seen.push({ url: req.url, authorization: req.headers.authorization, body });
-    assert.equal(body.stream, false);
+    assert.equal(body.stream, true);
     assert.equal(Object.hasOwn(body, "tools"), false);
     const text = (body.messages || [])
       .filter((message) => message.role === "user" || message.role === "assistant")
@@ -275,12 +275,16 @@ test("completeMessages sendet den Anthropic-Körper und liest den Textblock", as
     }));
   });
   try {
+    const deltas = [];
     const text = await completeMessages({
       baseUrl: `http://127.0.0.1:${port}/v1`,
       apiKey: "test-key",
       model: "rmxos-mega2026.1",
       system: "Antworte auf Deutsch.",
       turns: [{ role: "user", content: "Hallo @Notiz.md", files: [{ path: "Notiz.md", text: "Zeile" }] }],
+      onDelta(value) {
+        deltas.push(value);
+      },
     });
     assert.equal(seen[0].url, "/v1/messages");
     assert.equal(seen[0].authorization, "Bearer test-key");
@@ -288,9 +292,39 @@ test("completeMessages sendet den Anthropic-Körper und liest den Textblock", as
     assert.match(text, /Echo:/);
     assert.match(text, /Hallo @Notiz.md/);
     assert.match(text, /Zeile/);
+    assert.deepEqual(deltas, [text]);
   } finally {
     server.close();
   }
+});
+
+test("completeMessages setzt Content-Length auf die UTF-8-Bytezahl", async () => {
+  let seen;
+  const fetchImpl = async (_url, init) => {
+    seen = init;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+      }),
+    };
+  };
+  const text = await completeMessages({
+    baseUrl: "https://api.unitedshare.ai/v1",
+    apiKey: "test-key",
+    model: "rmxos-mobil2026.1",
+    system: "Antworte knapp.",
+    turns: [{ role: "user", content: "Größe" }],
+    fetchImpl,
+  });
+  assert.equal(text, "ok");
+  assert.equal(typeof seen.body, "string");
+  assert.match(seen.body, /Größe/);
+  assert.notEqual(Buffer.byteLength(seen.body), seen.body.length);
+  assert.equal(seen.headers["Content-Length"], String(Buffer.byteLength(seen.body)));
 });
 
 test("ein reiner tool_use-Block ist keine Antwort", async () => {
@@ -346,6 +380,57 @@ test("401 auf /v1/messages nennt den Key", async () => {
       },
     );
   } finally {
+    server.close();
+  }
+});
+
+test("ein Textstück erscheint, bevor der Strom endet", async () => {
+  let release = () => {};
+  const opened = new Promise((resolve) => {
+    release = resolve;
+  });
+  const seen = [];
+  const { server, port } = await listen(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const body = JSON.parse(raw);
+    assert.equal(body.stream, true);
+    assert.equal(req.headers["content-length"], String(Buffer.byteLength(raw)));
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    res.write('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hallo"}}\n\n');
+    await opened;
+    res.write('data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"geheim"}}\n\n');
+    res.write('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":" Welt"}}\n\n');
+    res.end();
+  });
+  let pending;
+  try {
+    pending = completeMessages({
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      model: "rmxos-mobil2026.1",
+      system: "s",
+      turns: [{ role: "user", content: "Größe" }],
+      live: true,
+      onDelta(text) {
+        seen.push(text);
+      },
+    });
+    const start = Date.now();
+    while (!seen.length) {
+      if (Date.now() - start > 2000) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(seen, ["Hallo"]);
+    release();
+    const text = await pending;
+    assert.equal(text, "Hallo Welt");
+    assert.equal(seen.includes("geheim"), false);
+    assert.equal(seen.at(-1), "Hallo Welt");
+  } finally {
+    release();
+    if (pending) await pending.catch(() => {});
     server.close();
   }
 });
