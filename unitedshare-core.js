@@ -1331,7 +1331,49 @@ const PROTOKOLL_HINWEIS = [
   "antworte bitte noch einmal ohne JSON.",
 ].join("\n");
 
-async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
+// Beschriftung eines Schritts für die Anzeige.
+//
+// Die Mehrschritt-Schleife macht bis zu sechs Durchgänge, und der Nutzer sah
+// davon nichts ausser "Antwort kommt." Gezeigt wird nur, was wirklich
+// passiert: eine Anzeige, die Schritte erfindet, damit es belebter aussieht,
+// waere schlimmer als gar keine.
+const SCHRITT_LAENGE = 60;
+
+function kurzerPfad(pfad, platz) {
+  const roh = String(pfad ?? "");
+  if (roh.length <= platz) return roh;
+  // Das Ende ist das Interessante -- der Dateiname, nicht der Ordnerweg.
+  return `…${roh.slice(-(platz - 1))}`;
+}
+
+function schrittText(action) {
+  const art = action && action.action;
+  const pfad = action && typeof action.path === "string" ? action.path : "";
+  // Der Platz fuer den Pfad ist das Laengenbudget minus der laengsten
+  // Umrahmung ("Tritt bei mit „…“" = 17 Zeichen).
+  const kurz = kurzerPfad(pfad, SCHRITT_LAENGE - 18);
+  if (art === "read") return `Liest „${kurz}“`;
+  if (art === "write") return `Schreibt „${kurz}“`;
+  if (art === "run") return `Startet „${kurz}“`;
+  if (art === "list") return pfad ? `Sieht in „${kurz}“ nach` : "Sieht im Tresor nach";
+  if (art === "mesh-join") return `Tritt bei mit „${kurz}“`;
+  if (art === "sync") {
+    const gegen = action && typeof action.peer === "string" ? action.peer : "";
+    return gegen ? `Gleicht ab mit „${gegen}“` : "Gleicht ab";
+  }
+  return "Arbeitet im Tresor";
+}
+
+function meldeSchritt(onSchritt, zustand, action) {
+  if (typeof onSchritt !== "function") return;
+  try {
+    onSchritt({ zustand, art: action && action.action, text: schrittText(action) });
+  } catch (_err) {
+    // Die Anzeige ist Beiwerk. Stuerzt sie ab, laeuft die Arbeit weiter.
+  }
+}
+
+async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchritt = null }) {
   const thread = [];
   for (const turn of turns || []) {
     if (!turn || (turn.role !== "user" && turn.role !== "assistant")) continue;
@@ -1373,7 +1415,11 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6 }) {
       for (const action of actions) done.add(`${action.action}:${action.path}`);
     }
     const results = [];
-    for (const action of actions) results.push(await executeVaultAction(action, host));
+    for (const action of actions) {
+      meldeSchritt(onSchritt, "laeuft", action);
+      results.push(await executeVaultAction(action, host));
+      meldeSchritt(onSchritt, "fertig", action);
+    }
     thread.push({ role: "assistant", content: last });
     thread.push({
       role: "user",
@@ -2140,6 +2186,7 @@ module.exports = {
   resolveInsideVault,
   runVaultFile,
   runVaultInstruction,
+  schrittText,
   messageForStatus,
   stripVaultActions,
 };
