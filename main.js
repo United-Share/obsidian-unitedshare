@@ -2687,8 +2687,53 @@ class UnitedShareView extends ItemView {
     });
   }
 
+  // Die Schritte der Mehrschritt-Schleife als Kette verbundener Punkte.
+  //
+  // Gezeigt wird nur, was runVaultInstruction wirklich meldet: ein Punkt pro
+  // Aktion, offen solange sie laeuft, gefuellt wenn sie fertig ist. Bricht
+  // die Antwort ab, bleiben offene Punkte als abgebrochen stehen -- der Nutzer
+  // soll sehen, wo es hing, und nicht eine Kette, die "fertig" behauptet.
+  zeichneSchritte(liste, schritte) {
+    liste.empty();
+    for (const schritt of schritte) {
+      const zeile = liste.createEl("div", { cls: `unitedshare-schritt is-${schritt.zustand}` });
+      zeile.createEl("span", { cls: "unitedshare-schritt-punkt" });
+      zeile.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+    }
+  }
+
+  merkeSchritt(draft, schritt) {
+    if (!schritt || typeof schritt.text !== "string") return;
+    if (!draft.schritte) draft.schritte = [];
+    if (schritt.zustand === "fertig") {
+      for (let i = draft.schritte.length - 1; i >= 0; i -= 1) {
+        const offen = draft.schritte[i];
+        if (offen.zustand === "laeuft" && offen.text === schritt.text) {
+          offen.zustand = "fertig";
+          this.zeigeSchritte(draft);
+          return;
+        }
+      }
+    }
+    draft.schritte.push({ text: schritt.text, zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft" });
+    this.zeigeSchritte(draft);
+  }
+
+  zeigeSchritte(draft) {
+    // Die Liste existiert erst ab dem ersten Schritt. Dann einmal neu
+    // zeichnen, danach nur noch die Liste selbst -- kein Flackern der Blase.
+    if (this.schritteEl) {
+      this.zeichneSchritte(this.schritteEl, draft.schritte);
+    } else {
+      void this.renderMessages();
+    }
+    const box = this.messagesEl;
+    if (box && typeof box.scrollHeight === "number") box.scrollTop = box.scrollHeight;
+  }
+
   async renderMessages() {
     this.streamEl = null;
+    this.schritteEl = null;
     this.messagesEl.empty();
     const messages = this.activeTab().messages;
     if (!messages.length) {
@@ -2705,6 +2750,11 @@ class UnitedShareView extends ItemView {
         cls: `unitedshare-message unitedshare-message-${message.role}`,
       });
       if (message.role === "assistant") {
+        if (message.schritte && message.schritte.length) {
+          const liste = row.createEl("div", { cls: "unitedshare-schritte" });
+          this.zeichneSchritte(liste, message.schritte);
+          if (message.streaming) this.schritteEl = liste;
+        }
         const content = row.createEl("div", { cls: "unitedshare-message-content markdown-rendered" });
         if (message.streaming) {
           content.setText(message.content || "");
@@ -2989,7 +3039,7 @@ class UnitedShareView extends ItemView {
         if (this.statusEl) this.statusEl.setText("");
         const box = this.messagesEl;
         if (box && typeof box.scrollHeight === "number") box.scrollTop = box.scrollHeight;
-      });
+      }, (schritt) => this.merkeSchritt(draft, schritt));
       draft.content = answer;
       draft.streaming = false;
       this.answer = answer;
@@ -2997,7 +3047,10 @@ class UnitedShareView extends ItemView {
       await this.renderMessages();
     } catch (error) {
       const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
-      if (!String(draft.content || "")) {
+      for (const schritt of draft.schritte || []) {
+        if (schritt.zustand === "laeuft") schritt.zustand = "abgebrochen";
+      }
+      if (!String(draft.content || "") && !(draft.schritte && draft.schritte.length)) {
         const index = tab.messages.indexOf(draft);
         if (index >= 0) tab.messages.splice(index, 1);
       } else {
@@ -3715,11 +3768,12 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return runVaultFile({ root, relPath: safe });
   }
 
-  async completeThread(turns, onDelta) {
+  async completeThread(turns, onDelta, onSchritt = null) {
     const live = desktopCanStream();
     return runVaultInstruction({
       turns,
       host: this.vaultHost(),
+      onSchritt,
       complete: (next) => completeMessages({
         baseUrl: this.settings.baseUrl,
         apiKey: this.settings.apiKey,

@@ -1430,6 +1430,69 @@ test("ohne Adapter läuft alles weiter, nur ohne Ablage", async () => {
   assert.equal(view.activeTab().messages.length, 2);
 });
 
+function findAll(node, pred, out = []) {
+  if (pred(node)) out.push(node);
+  for (const child of node.children || []) findAll(child, pred, out);
+  return out;
+}
+
+async function sichtMitSchritten(ablauf) {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  plugin.settings.apiKey = "test-key";
+  plugin.settings.model = "rmxos-mega2026.1";
+  plugin.completeThread = ablauf;
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  view.questionEl.value = "Lies a.md";
+  const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+  return { view, pending: askButton.listeners.click() };
+}
+
+const schrittZeilen = (view) => findAll(view.contentEl, (node) => node.classList.has("unitedshare-schritt"));
+
+test("die Schritte erscheinen als Kette über der Antwort und schließen sich", async () => {
+  let zwischen = null;
+  const { view, pending } = await sichtMitSchritten(async (_turns, _onDelta, onSchritt) => {
+    onSchritt({ zustand: "laeuft", art: "read", text: "Liest „a.md“" });
+    zwischen = schrittZeilen(view).map((z) => [...z.classList].join(" "));
+    onSchritt({ zustand: "fertig", art: "read", text: "Liest „a.md“" });
+    onSchritt({ zustand: "laeuft", art: "write", text: "Schreibt „b.md“" });
+    onSchritt({ zustand: "fertig", art: "write", text: "Schreibt „b.md“" });
+    return "Erledigt.";
+  });
+  await pending;
+  assert.deepEqual(zwischen, ["unitedshare-schritt is-laeuft"]);
+  const zeilen = schrittZeilen(view);
+  assert.equal(zeilen.length, 2);
+  assert.ok(zeilen.every((z) => z.classList.has("is-fertig")));
+  const texte = zeilen.map((z) => find(z, (n) => n.classList.has("unitedshare-schritt-text")).text);
+  assert.deepEqual(texte, ["Liest „a.md“", "Schreibt „b.md“"]);
+  const reihe = find(view.contentEl, (node) => node.classList.has("unitedshare-message-assistant"));
+  assert.ok(find(reihe, (node) => node.classList.has("unitedshare-schritte")));
+  assert.equal(view.answer, "Erledigt.");
+});
+
+test("ohne Aktionen gibt es keine Schrittkette", async () => {
+  const { view, pending } = await sichtMitSchritten(async () => "Nur Text.");
+  await pending;
+  assert.equal(schrittZeilen(view).length, 0);
+  assert.equal(find(view.contentEl, (node) => node.classList.has("unitedshare-schritte")), null);
+});
+
+test("bricht die Antwort ab, bleibt der offene Schritt als abgebrochen stehen", async () => {
+  const { view, pending } = await sichtMitSchritten(async (_turns, _onDelta, onSchritt) => {
+    onSchritt({ zustand: "laeuft", art: "run", text: "Startet „x.py“" });
+    throw new Error("weg");
+  });
+  await pending;
+  const zeilen = schrittZeilen(view);
+  assert.equal(zeilen.length, 1);
+  assert.ok(zeilen[0].classList.has("is-abgebrochen"));
+  assert.equal(view.statusEl.text, "Der Modellaufruf ist fehlgeschlagen.");
+});
+
 test.after(() => {
   mock.restore();
 });

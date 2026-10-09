@@ -747,3 +747,82 @@ body.is-mobile .workspace-drawer:not(.is-pinned) .unitedshare-chat-panel {
 body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
   font-size: 16px;
 }
+
+/* Schritte der Mehrschritt-Schleife: eine Kette verbundener Punkte über der
+   Antwort. Offen = läuft, gefüllt = fertig, rot umrandet = abgebrochen. */
+.unitedshare-schritte {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.unitedshare-schritt {
+  position: relative;
+  min-height: 22px;
+  padding-left: 20px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.unitedshare-schritt-punkt {
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid var(--text-faint);
+  background: var(--background-primary);
+}
+
+/* Die Verbindung zum nächsten Punkt. */
+.unitedshare-schritt:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 6.5px;
+  top: 17px;
+  bottom: -5px;
+  width: 1px;
+  background: var(--background-modifier-border);
+}
+
+.unitedshare-schritt.is-laeuft {
+  color: var(--text-normal);
+}
+
+.unitedshare-schritt.is-laeuft .unitedshare-schritt-punkt {
+  border-color: var(--interactive-accent);
+  animation: unitedshare-schritt-puls 1.2s ease-in-out infinite;
+}
+
+.unitedshare-schritt.is-fertig .unitedshare-schritt-punkt {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+}
+
+.unitedshare-schritt.is-fertig:not(:last-child)::after {
+  background: var(--interactive-accent);
+  opacity: 0.5;
+}
+
+.unitedshare-schritt.is-abgebrochen .unitedshare-schritt-punkt {
+  border-color: var(--text-error);
+}
+
+.unitedshare-schritt.is-abgebrochen .unitedshare-schritt-text {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-error);
+}
+
+@keyframes unitedshare-schritt-puls {
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .unitedshare-schritt.is-laeuft .unitedshare-schritt-punkt {
+    animation: none;
+  }
+}
