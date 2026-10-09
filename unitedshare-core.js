@@ -330,13 +330,31 @@ async function readVisible(response, onDelta) {
       push(decoder.decode());
     });
   }
+  // Ohne lesbaren Strom (requestUrl auf Mobil, fetch ohne body) kommt der
+  // Körper am Stück. Er kann trotzdem SSE sein: der Body verlangt stream:true,
+  // und seit 2026-10-09 liefert der Gateway /v1/messages dann wirklich als
+  // event-stream. response.json() warf darauf einen SyntaxError, und
+  // mapTransportError machte daraus "nicht erreichbar". Darum: sieht der
+  // Rohtext nach SSE aus, liest ihn derselbe Leser wie den Strom.
+  const raw = response && typeof response.text === "function"
+    ? String((await response.text()) ?? "")
+    : "";
+  if (/^(event|data):/m.test(raw)) return readChunks(onDelta, async (push) => push(raw));
   if (response && typeof response.json === "function") {
-    const text = parseAnthropicContent(await response.json());
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch (error) {
+      // Kein JSON, kein SSE: finishRaw meldet "keine Antwort" statt eines
+      // SyntaxErrors, der wie ein Netzfehler aussähe.
+      if (!raw.trim()) throw error;
+      return finishRaw(raw, onDelta);
+    }
+    const text = parseAnthropicContent(parsed);
     if (typeof onDelta === "function") onDelta(text);
     return text;
   }
-  const raw = response && typeof response.text === "function" ? await response.text() : "";
-  return finishRaw(String(raw ?? ""), onDelta);
+  return finishRaw(raw, onDelta);
 }
 
 function readNodeBody(res) {
@@ -434,6 +452,11 @@ function mapTransportError(error) {
   if (error instanceof UnitedShareError) throw error;
   if (error && error.name === "AbortError") {
     throw new UnitedShareError("Das Modell hat nicht rechtzeitig geantwortet.", 0);
+  }
+  // Eine Antwort, die ankam, aber nicht lesbar war, ist kein Netzfehler.
+  // Sie als "nicht erreichbar" zu melden, schickt die Fehlersuche ins Netz.
+  if (error instanceof SyntaxError) {
+    throw new UnitedShareError("Die Antwort von api.unitedshare.ai war nicht lesbar.", 0);
   }
   throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
 }
