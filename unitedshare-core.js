@@ -1387,10 +1387,50 @@ function schrittText(action) {
   return "Arbeitet im Tresor";
 }
 
-function meldeSchritt(onSchritt, zustand, action) {
+// Zeichen je Schrittart, fuer die Kette im Verlauf. Die Namen sind die von
+// Obsidian mitgelieferten Lucide-Zeichen.
+const SCHRITT_ZEICHEN = {
+  denken: "loader",
+  antwort: "sparkles",
+  read: "file-text",
+  write: "file-plus",
+  run: "play",
+  list: "folder",
+  "mesh-join": "link",
+  sync: "refresh-cw",
+};
+
+function schrittZeichen(art) {
+  return SCHRITT_ZEICHEN[String(art ?? "")] || "dot";
+}
+
+// Wieviel vom Ergebnis in die Kette darf. Sie soll zeigen, DASS etwas
+// geschah, nicht den Dateiinhalt wiederholen -- dafuer ist die Antwort da.
+const ERGEBNIS_LAENGE = 120;
+
+function ergebnisKurz(text) {
+  // executeVaultAction liefert "Ergebnis read a.md:\n<Inhalt>". Die Kopfzeile
+  // steht schon als Beschriftung daneben, hier zaehlt nur der Inhalt.
+  const roh = String(text ?? "");
+  const nachKopf = roh.includes("\n") ? roh.slice(roh.indexOf("\n") + 1) : roh;
+  const einzeilig = nachKopf.replace(/\s+/g, " ").trim();
+  if (einzeilig.length <= ERGEBNIS_LAENGE) return einzeilig;
+  return `${einzeilig.slice(0, ERGEBNIS_LAENGE - 1)}…`;
+}
+
+function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
   if (typeof onSchritt !== "function") return;
   try {
-    onSchritt({ zustand, art: action && action.action, text: schrittText(action) });
+    const meldung = {
+      zustand,
+      art: action && action.action,
+      text: schrittText(action),
+      zeichen: schrittZeichen(action && action.action),
+    };
+    // Nur die Fertig-Meldung traegt ein Ergebnis -- vorher gibt es nichts zu
+    // melden, und ein leeres Feld waere ein Versprechen ohne Deckung.
+    if (ergebnis !== undefined) meldung.ergebnis = ergebnisKurz(ergebnis);
+    onSchritt(meldung);
   } catch (_err) {
     // Die Anzeige ist Beiwerk. Stuerzt sie ab, laeuft die Arbeit weiter.
   }
@@ -1440,8 +1480,9 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchr
     const results = [];
     for (const action of actions) {
       meldeSchritt(onSchritt, "laeuft", action);
-      results.push(await executeVaultAction(action, host));
-      meldeSchritt(onSchritt, "fertig", action);
+      const ergebnis = await executeVaultAction(action, host);
+      results.push(ergebnis);
+      meldeSchritt(onSchritt, "fertig", action, ergebnis);
     }
     thread.push({ role: "assistant", content: last });
     thread.push({
@@ -2210,6 +2251,7 @@ module.exports = {
   runVaultFile,
   runVaultInstruction,
   schrittText,
+  schrittZeichen,
   messageForStatus,
   stripVaultActions,
 };

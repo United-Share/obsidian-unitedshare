@@ -760,31 +760,67 @@ body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
 
 .unitedshare-schritt {
   position: relative;
-  min-height: 22px;
-  padding-left: 20px;
-  line-height: 22px;
+  min-height: 26px;
+  padding: 1px 0 5px 28px;
+  line-height: 20px;
   overflow-wrap: anywhere;
 }
 
+/* Der Knoten trägt ein Zeichen, sobald eines gesetzt ist, und bleibt sonst
+   ein Punkt. Groß genug für ein Lucide-Zeichen, klein genug, dass die Kette
+   neben der Antwort nicht dominiert. */
 .unitedshare-schritt-punkt {
   position: absolute;
-  left: 2px;
-  top: 6px;
-  width: 10px;
-  height: 10px;
+  left: 0;
+  top: 1px;
+  width: 20px;
+  height: 20px;
   box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 50%;
-  border: 2px solid var(--text-faint);
+  border: 1.5px solid var(--text-faint);
   background: var(--background-primary);
+  color: var(--text-faint);
 }
 
-/* Die Verbindung zum nächsten Punkt. */
+.unitedshare-schritt-punkt svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Ohne Zeichen bleibt ein gefüllter Punkt -- die Kette darf nicht davon
+   abhängen, dass setIcon verfügbar ist. */
+.unitedshare-schritt-punkt:empty::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.unitedshare-schritt-rechts {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.unitedshare-schritt-ergebnis {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Die Verbindung zum nächsten Knoten. */
 .unitedshare-schritt:not(:last-child)::after {
   content: "";
   position: absolute;
-  left: 6.5px;
-  top: 17px;
-  bottom: -5px;
+  left: 9.5px;
+  top: 23px;
+  bottom: 1px;
   width: 1px;
   background: var(--background-modifier-border);
 }
@@ -801,6 +837,13 @@ body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
 .unitedshare-schritt.is-fertig .unitedshare-schritt-punkt {
   border-color: var(--interactive-accent);
   background: var(--interactive-accent);
+  /* Das Zeichen steht auf der gefüllten Fläche, braucht also die
+     Gegenfarbe -- sonst verschwindet es darin. */
+  color: var(--text-on-accent);
+}
+
+.unitedshare-schritt.is-laeuft .unitedshare-schritt-punkt {
+  color: var(--interactive-accent);
 }
 
 .unitedshare-schritt.is-fertig:not(:last-child)::after {

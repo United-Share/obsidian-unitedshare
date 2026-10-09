@@ -1388,10 +1388,50 @@ function schrittText(action) {
   return "Arbeitet im Tresor";
 }
 
-function meldeSchritt(onSchritt, zustand, action) {
+// Zeichen je Schrittart, fuer die Kette im Verlauf. Die Namen sind die von
+// Obsidian mitgelieferten Lucide-Zeichen.
+const SCHRITT_ZEICHEN = {
+  denken: "loader",
+  antwort: "sparkles",
+  read: "file-text",
+  write: "file-plus",
+  run: "play",
+  list: "folder",
+  "mesh-join": "link",
+  sync: "refresh-cw",
+};
+
+function schrittZeichen(art) {
+  return SCHRITT_ZEICHEN[String(art ?? "")] || "dot";
+}
+
+// Wieviel vom Ergebnis in die Kette darf. Sie soll zeigen, DASS etwas
+// geschah, nicht den Dateiinhalt wiederholen -- dafuer ist die Antwort da.
+const ERGEBNIS_LAENGE = 120;
+
+function ergebnisKurz(text) {
+  // executeVaultAction liefert "Ergebnis read a.md:\n<Inhalt>". Die Kopfzeile
+  // steht schon als Beschriftung daneben, hier zaehlt nur der Inhalt.
+  const roh = String(text ?? "");
+  const nachKopf = roh.includes("\n") ? roh.slice(roh.indexOf("\n") + 1) : roh;
+  const einzeilig = nachKopf.replace(/\s+/g, " ").trim();
+  if (einzeilig.length <= ERGEBNIS_LAENGE) return einzeilig;
+  return `${einzeilig.slice(0, ERGEBNIS_LAENGE - 1)}…`;
+}
+
+function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
   if (typeof onSchritt !== "function") return;
   try {
-    onSchritt({ zustand, art: action && action.action, text: schrittText(action) });
+    const meldung = {
+      zustand,
+      art: action && action.action,
+      text: schrittText(action),
+      zeichen: schrittZeichen(action && action.action),
+    };
+    // Nur die Fertig-Meldung traegt ein Ergebnis -- vorher gibt es nichts zu
+    // melden, und ein leeres Feld waere ein Versprechen ohne Deckung.
+    if (ergebnis !== undefined) meldung.ergebnis = ergebnisKurz(ergebnis);
+    onSchritt(meldung);
   } catch (_err) {
     // Die Anzeige ist Beiwerk. Stuerzt sie ab, laeuft die Arbeit weiter.
   }
@@ -1441,8 +1481,9 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchr
     const results = [];
     for (const action of actions) {
       meldeSchritt(onSchritt, "laeuft", action);
-      results.push(await executeVaultAction(action, host));
-      meldeSchritt(onSchritt, "fertig", action);
+      const ergebnis = await executeVaultAction(action, host);
+      results.push(ergebnis);
+      meldeSchritt(onSchritt, "fertig", action, ergebnis);
     }
     thread.push({ role: "assistant", content: last });
     thread.push({
@@ -2707,8 +2748,20 @@ class UnitedShareView extends ItemView {
     liste.empty();
     for (const schritt of schritte) {
       const zeile = liste.createEl("div", { cls: `unitedshare-schritt is-${schritt.zustand}` });
-      zeile.createEl("span", { cls: "unitedshare-schritt-punkt" });
-      zeile.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+      const punkt = zeile.createEl("span", { cls: "unitedshare-schritt-punkt" });
+      if (schritt.zeichen && typeof setIcon === "function") {
+        try {
+          setIcon(punkt, schritt.zeichen);
+        } catch (_err) {
+          // Ohne Zeichen bleibt der Punkt ein Punkt. Kein Grund, die Kette
+          // deswegen nicht zu zeigen.
+        }
+      }
+      const rechts = zeile.createEl("span", { cls: "unitedshare-schritt-rechts" });
+      rechts.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+      if (schritt.ergebnis) {
+        rechts.createEl("span", { cls: "unitedshare-schritt-ergebnis", text: schritt.ergebnis });
+      }
     }
   }
 
@@ -2720,13 +2773,36 @@ class UnitedShareView extends ItemView {
         const offen = draft.schritte[i];
         if (offen.zustand === "laeuft" && offen.text === schritt.text) {
           offen.zustand = "fertig";
+          if (schritt.ergebnis) offen.ergebnis = schritt.ergebnis;
           this.zeigeSchritte(draft);
           return;
         }
       }
     }
-    draft.schritte.push({ text: schritt.text, zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft" });
+    // Eine echte Taetigkeit beendet das Warten. Sonst stuenden Denken und
+    // Lesen gleichzeitig als laufend da, und das waere falsch.
+    if (schritt.art !== "denken") this.denkenAbhaken(draft);
+    const eintrag = {
+      text: schritt.text,
+      zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft",
+    };
+    if (schritt.art) eintrag.art = schritt.art;
+    if (schritt.zeichen) eintrag.zeichen = schritt.zeichen;
+    if (schritt.ergebnis) eintrag.ergebnis = schritt.ergebnis;
+    draft.schritte.push(eintrag);
     this.zeigeSchritte(draft);
+  }
+
+  denkenAnfangen(draft) {
+    // Der Zustand, nicht der Inhalt: welche Gedanken das Modell fasst, wird
+    // nicht geliefert (die Delta-Felder im Strom sind nur content und role).
+    this.merkeSchritt(draft, { text: "Denkt nach", zustand: "laeuft", art: "denken", zeichen: "loader" });
+  }
+
+  denkenAbhaken(draft) {
+    for (const eintrag of draft.schritte || []) {
+      if (eintrag.art === "denken" && eintrag.zustand === "laeuft") eintrag.zustand = "fertig";
+    }
   }
 
   zeigeSchritte(draft) {
@@ -3034,6 +3110,9 @@ class UnitedShareView extends ItemView {
       });
     const draft = { role: "assistant", content: "", streaming: true };
     tab.messages.push(draft);
+    // Vor dem ersten Zeichen passiert etwas, das niemand sieht. Bei mega
+    // sind das zwanzig Sekunden.
+    this.denkenAnfangen(draft);
     this.statusEl.setText("Antwort kommt.");
     try {
       await this.renderMessages();
@@ -3043,6 +3122,7 @@ class UnitedShareView extends ItemView {
         // Scheitert ein spaeterer Schritt, bleibt genau das hier Gezeigte
         // stehen -- deshalb muss es schon sauber sein.
         const sichtbar = visibleStreamText(text);
+        if (sichtbar) this.denkenAbhaken(draft);
         draft.content = sichtbar;
         this.answer = sichtbar;
         if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(sichtbar);
@@ -3052,6 +3132,11 @@ class UnitedShareView extends ItemView {
       }, (schritt) => this.merkeSchritt(draft, schritt));
       draft.content = answer;
       draft.streaming = false;
+      // Auch wenn kein einziges Zeichen unterwegs kam: mit der fertigen
+      // Antwort ist das Denken vorbei. Ohne das bliebe "Denkt nach" ewig
+      // laufend stehen, sobald die Gegenstelle nicht stroemt -- und dann
+      // zeigte die Kette eine Arbeit an, die längst getan ist.
+      this.denkenAbhaken(draft);
       this.answer = answer;
       this.statusEl.setText("");
       await this.renderMessages();

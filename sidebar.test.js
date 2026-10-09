@@ -1416,6 +1416,84 @@ test("auch nach einem Fehler bleibt kein Protokollblock stehen", async () => {
     "der erklärende Satz soll bleiben, nur das Protokoll nicht");
 });
 
+test("auch ohne Werkzeug zeigt die Kette, dass gearbeitet wird", async () => {
+  // Der häufigste Fall und der mit der längsten Wartezeit: eine Frage, die
+  // kein Werkzeug braucht. Bisher blieb die Kette dabei leer -- gerade dann
+  // sieht der Nutzer am längsten nichts.
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  let standBeimDenken = null;
+  plugin.completeThread = async (turns, onDelta) => {
+    // Kopie, nicht Referenz: beim Prüfen nach submit() wäre der Zustand
+    // längst "fertig", und der Test bewiese nichts.
+    standBeimDenken = ((view.activeTab().messages.find((m) => m.streaming) || {}).schritte || [])
+      .map((x) => ({ art: x.art, zustand: x.zustand }));
+    onDelta("Eine DID ist eine URI.");
+    return "Eine DID ist eine URI.";
+  };
+  await view.onOpen();
+  view.questionEl.value = "Was ist eine DID?";
+  await view.submit();
+
+  assert.ok(standBeimDenken && standBeimDenken.length,
+    "während des Wartens muss ein Schritt stehen");
+  assert.equal(standBeimDenken[0].art, "denken");
+  assert.equal(standBeimDenken[0].zustand, "laeuft");
+});
+
+test("sobald Text kommt, ist das Denken abgehakt", async () => {
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async (turns, onDelta) => {
+    onDelta("Antwort");
+    return "Antwort";
+  };
+  await view.onOpen();
+  view.questionEl.value = "Frage";
+  await view.submit();
+
+  const letzte = view.activeTab().messages[view.activeTab().messages.length - 1];
+  const denken = (letzte.schritte || []).find((s) => s.art === "denken");
+  assert.ok(denken, "der Denkschritt bleibt sichtbar");
+  assert.equal(denken.zustand, "fertig");
+});
+
+test("eine Aktion hakt das Denken ebenfalls ab", async () => {
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async (turns, onDelta, onSchritt) => {
+    onSchritt({ zustand: "laeuft", art: "read", text: 'Liest „a.md“', zeichen: "file-text" });
+    onSchritt({ zustand: "fertig", art: "read", text: 'Liest „a.md“', zeichen: "file-text", ergebnis: "Inhalt" });
+    onDelta("Da steht Inhalt.");
+    return "Da steht Inhalt.";
+  };
+  await view.onOpen();
+  view.questionEl.value = "Lies a.md";
+  await view.submit();
+
+  const letzte = view.activeTab().messages[view.activeTab().messages.length - 1];
+  const arten = (letzte.schritte || []).map((s) => `${s.art}:${s.zustand}`);
+  assert.deepEqual(arten, ["denken:fertig", "read:fertig"]);
+});
+
+test("das Ergebnis einer Aktion wird mitgeführt", async () => {
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async (turns, onDelta, onSchritt) => {
+    onSchritt({ zustand: "laeuft", art: "read", text: 'Liest „a.md“' });
+    onSchritt({ zustand: "fertig", art: "read", text: 'Liest „a.md“', ergebnis: "Zeile eins" });
+    onDelta("Fertig.");
+    return "Fertig.";
+  };
+  await view.onOpen();
+  view.questionEl.value = "Lies a.md";
+  await view.submit();
+
+  const letzte = view.activeTab().messages[view.activeTab().messages.length - 1];
+  const gelesen = (letzte.schritte || []).find((s) => s.art === "read");
+  assert.equal(gelesen.ergebnis, "Zeile eins");
+});
+
 test("ohne Adapter läuft alles weiter, nur ohne Ablage", async () => {
   // Auf einer Plattform ohne Adapter darf das Fragen nicht scheitern.
   const app = makeApp();
@@ -1465,22 +1543,36 @@ test("die Schritte erscheinen als Kette über der Antwort und schließen sich", 
     return "Erledigt.";
   });
   await pending;
-  assert.deepEqual(zwischen, ["unitedshare-schritt is-laeuft"]);
+  // Der Denkschritt steht vor der ersten Aktion und ist in dem Moment schon
+  // abgehakt -- eine Tätigkeit beendet das Warten.
+  assert.deepEqual(zwischen, [
+    "unitedshare-schritt is-fertig",
+    "unitedshare-schritt is-laeuft",
+  ]);
   const zeilen = schrittZeilen(view);
-  assert.equal(zeilen.length, 2);
+  assert.equal(zeilen.length, 3, "Denken, Lesen, Schreiben");
   assert.ok(zeilen.every((z) => z.classList.has("is-fertig")));
   const texte = zeilen.map((z) => find(z, (n) => n.classList.has("unitedshare-schritt-text")).text);
-  assert.deepEqual(texte, ["Liest „a.md“", "Schreibt „b.md“"]);
+  assert.deepEqual(texte, ["Denkt nach", "Liest „a.md“", "Schreibt „b.md“"]);
   const reihe = find(view.contentEl, (node) => node.classList.has("unitedshare-message-assistant"));
   assert.ok(find(reihe, (node) => node.classList.has("unitedshare-schritte")));
   assert.equal(view.answer, "Erledigt.");
 });
 
-test("ohne Aktionen gibt es keine Schrittkette", async () => {
+test("auch ohne Aktionen steht der Denkschritt in der Kette", async () => {
+  // Dieser Vertrag war umgekehrt: ohne Aktionen blieb die Kette leer.
+  // Geaendert auf Mikes Ansage, dass der Nutzer sehen soll, dass etwas
+  // passiert -- und gerade bei einer Frage ohne Werkzeug ist die Wartezeit
+  // am laengsten, weil das Modell denkt. Gezeigt wird nur der Zustand; der
+  // Inhalt des Denkens kommt nicht an (gemessen: die Delta-Felder im Strom
+  // sind ausschliesslich content und role).
   const { view, pending } = await sichtMitSchritten(async () => "Nur Text.");
   await pending;
-  assert.equal(schrittZeilen(view).length, 0);
-  assert.equal(find(view.contentEl, (node) => node.classList.has("unitedshare-schritte")), null);
+  const zeilen = schrittZeilen(view);
+  assert.equal(zeilen.length, 1, "genau ein Schritt, nicht mehr");
+  const letzte = view.activeTab().messages[view.activeTab().messages.length - 1];
+  assert.deepEqual((letzte.schritte || []).map((x) => `${x.art}:${x.zustand}`),
+    ["denken:fertig"]);
 });
 
 test("bricht die Antwort ab, bleibt der offene Schritt als abgebrochen stehen", async () => {
@@ -1490,8 +1582,12 @@ test("bricht die Antwort ab, bleibt der offene Schritt als abgebrochen stehen", 
   });
   await pending;
   const zeilen = schrittZeilen(view);
-  assert.equal(zeilen.length, 1);
-  assert.ok(zeilen[0].classList.has("is-abgebrochen"));
+  assert.equal(zeilen.length, 2, "Denken und der abgebrochene Start");
+  // Der Denkschritt ist abgehakt, der Start blieb offen und wird als
+  // abgebrochen markiert -- nach einem Abbruch alles als erledigt zu zeigen
+  // wäre falsch.
+  assert.ok(zeilen[0].classList.has("is-fertig"));
+  assert.ok(zeilen[1].classList.has("is-abgebrochen"));
   assert.equal(view.statusEl.text, "Der Modellaufruf ist fehlgeschlagen.");
 });
 

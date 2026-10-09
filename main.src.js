@@ -547,8 +547,20 @@ class UnitedShareView extends ItemView {
     liste.empty();
     for (const schritt of schritte) {
       const zeile = liste.createEl("div", { cls: `unitedshare-schritt is-${schritt.zustand}` });
-      zeile.createEl("span", { cls: "unitedshare-schritt-punkt" });
-      zeile.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+      const punkt = zeile.createEl("span", { cls: "unitedshare-schritt-punkt" });
+      if (schritt.zeichen && typeof setIcon === "function") {
+        try {
+          setIcon(punkt, schritt.zeichen);
+        } catch (_err) {
+          // Ohne Zeichen bleibt der Punkt ein Punkt. Kein Grund, die Kette
+          // deswegen nicht zu zeigen.
+        }
+      }
+      const rechts = zeile.createEl("span", { cls: "unitedshare-schritt-rechts" });
+      rechts.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+      if (schritt.ergebnis) {
+        rechts.createEl("span", { cls: "unitedshare-schritt-ergebnis", text: schritt.ergebnis });
+      }
     }
   }
 
@@ -560,13 +572,36 @@ class UnitedShareView extends ItemView {
         const offen = draft.schritte[i];
         if (offen.zustand === "laeuft" && offen.text === schritt.text) {
           offen.zustand = "fertig";
+          if (schritt.ergebnis) offen.ergebnis = schritt.ergebnis;
           this.zeigeSchritte(draft);
           return;
         }
       }
     }
-    draft.schritte.push({ text: schritt.text, zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft" });
+    // Eine echte Taetigkeit beendet das Warten. Sonst stuenden Denken und
+    // Lesen gleichzeitig als laufend da, und das waere falsch.
+    if (schritt.art !== "denken") this.denkenAbhaken(draft);
+    const eintrag = {
+      text: schritt.text,
+      zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft",
+    };
+    if (schritt.art) eintrag.art = schritt.art;
+    if (schritt.zeichen) eintrag.zeichen = schritt.zeichen;
+    if (schritt.ergebnis) eintrag.ergebnis = schritt.ergebnis;
+    draft.schritte.push(eintrag);
     this.zeigeSchritte(draft);
+  }
+
+  denkenAnfangen(draft) {
+    // Der Zustand, nicht der Inhalt: welche Gedanken das Modell fasst, wird
+    // nicht geliefert (die Delta-Felder im Strom sind nur content und role).
+    this.merkeSchritt(draft, { text: "Denkt nach", zustand: "laeuft", art: "denken", zeichen: "loader" });
+  }
+
+  denkenAbhaken(draft) {
+    for (const eintrag of draft.schritte || []) {
+      if (eintrag.art === "denken" && eintrag.zustand === "laeuft") eintrag.zustand = "fertig";
+    }
   }
 
   zeigeSchritte(draft) {
@@ -874,6 +909,9 @@ class UnitedShareView extends ItemView {
       });
     const draft = { role: "assistant", content: "", streaming: true };
     tab.messages.push(draft);
+    // Vor dem ersten Zeichen passiert etwas, das niemand sieht. Bei mega
+    // sind das zwanzig Sekunden.
+    this.denkenAnfangen(draft);
     this.statusEl.setText("Antwort kommt.");
     try {
       await this.renderMessages();
@@ -883,6 +921,7 @@ class UnitedShareView extends ItemView {
         // Scheitert ein spaeterer Schritt, bleibt genau das hier Gezeigte
         // stehen -- deshalb muss es schon sauber sein.
         const sichtbar = visibleStreamText(text);
+        if (sichtbar) this.denkenAbhaken(draft);
         draft.content = sichtbar;
         this.answer = sichtbar;
         if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(sichtbar);
@@ -892,6 +931,11 @@ class UnitedShareView extends ItemView {
       }, (schritt) => this.merkeSchritt(draft, schritt));
       draft.content = answer;
       draft.streaming = false;
+      // Auch wenn kein einziges Zeichen unterwegs kam: mit der fertigen
+      // Antwort ist das Denken vorbei. Ohne das bliebe "Denkt nach" ewig
+      // laufend stehen, sobald die Gegenstelle nicht stroemt -- und dann
+      // zeigte die Kette eine Arbeit an, die längst getan ist.
+      this.denkenAbhaken(draft);
       this.answer = answer;
       this.statusEl.setText("");
       await this.renderMessages();
