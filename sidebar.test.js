@@ -5,6 +5,7 @@ const path = require("node:path");
 const Module = require("node:module");
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const root = __dirname;
@@ -239,6 +240,7 @@ function installObsidianMock() {
   }
   const rendered = [];
   const requests = [];
+  let hold = null;
   const MarkdownRenderer = {
     async render(_app, markdown, el, sourcePath, component) {
       rendered.push({ markdown, el, sourcePath, component });
@@ -264,6 +266,7 @@ function installObsidianMock() {
     requestUrl: async (options) => {
       requests.push(options);
       const url = String(options.url || "");
+      if (!url.endsWith("/models") && hold) await hold;
       const authorization = options.headers && options.headers.Authorization;
       if (url.endsWith("/models")) {
         if (authorization === "Bearer rejected-key") {
@@ -309,6 +312,18 @@ function installObsidianMock() {
     rendered,
     icons,
     requests,
+    holdMessages() {
+      let release;
+      hold = new Promise((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        const done = release;
+        hold = null;
+        release = null;
+        if (done) done();
+      };
+    },
     MarkdownView,
     settings,
     restore() {
@@ -882,10 +897,41 @@ test("completeThread geht an /v1/messages ohne Werkzeuge", async () => {
   assert.equal(call.url, "https://api.unitedshare.ai/v1/messages");
   const body = JSON.parse(call.body);
   assert.equal(body.model, "rmxos-mega2026.1");
-  assert.equal(body.stream, false);
+  assert.equal(body.stream, true);
+  assert.equal(call.headers["Content-Length"], String(Buffer.byteLength(call.body)));
   assert.equal(Object.hasOwn(body, "tools"), false);
   assert.equal(body.messages[0].content[0].type, "text");
   assert.equal(text, "Antwort aus messages");
+});
+
+test("die Antwortzeile steht, bevor der Körper da ist", async () => {
+  const release = mock.holdMessages();
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  plugin.settings.apiKey = "test-key";
+  plugin.settings.model = "rmxos-mega2026.1";
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  view.questionEl.value = "Hallo";
+  const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+  const pending = askButton.listeners.click();
+  const start = Date.now();
+  let row = null;
+  while (!row) {
+    if (Date.now() - start > 2000) break;
+    const found = find(view.contentEl, (node) => node.classList.has("unitedshare-message-assistant"));
+    if (found && view.answer === "" && view.statusEl.text === "Antwort kommt.") row = found;
+    else await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(row, "die Antwortzeile fehlt, solange der Körper aussteht");
+  assert.equal(view.answer, "");
+  assert.equal(view.statusEl.text, "Antwort kommt.");
+  assert.ok(find(row, (node) => node.classList.has("is-streaming")));
+  release();
+  await pending;
+  assert.equal(view.answer, "Antwort aus messages");
+  assert.equal(view.statusEl.text, "");
 });
 
 function lastSetting(name) {
@@ -1020,6 +1066,321 @@ test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die
   assert.match(failed.desc, /abgelehnt/);
   assert.equal(failed.text.value, "rmxos-mobil2026.1");
   assert.equal(plugin.settings.model, "rmxos-mobil2026.1");
+});
+
+function nodeTexts(node, acc = []) {
+  if (node && node.text) acc.push(node.text);
+  for (const child of (node && node.children) || []) nodeTexts(child, acc);
+  return acc;
+}
+
+function meshSpawn(bodies) {
+  const seen = [];
+  const spawn = (cmd, args) => {
+    assert.equal(cmd, "reemax");
+    seen.push(args.slice());
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    const key = args.join(" ");
+    process.nextTick(() => {
+      child.stdout.emit("data", bodies[key] || "{}\n");
+      child.emit("close", 0);
+    });
+    return child;
+  };
+  spawn.seen = seen;
+  return spawn;
+}
+
+test("ein Schlüssel und reemax zeigen das direkte Netz, nicht im Modellmenü", async () => {
+  const app = makeApp();
+  app.vault = { adapter: { getBasePath: () => "/tmp/vault-mesh" } };
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.test/v1",
+    model: "rmxos-mega2026.1",
+  });
+  plugin.meshSpawn = meshSpawn({
+    "version --json": '{"ok":true,"bin":"reemax","version":"0.3.3"}\n',
+    "mesh peers --json": '{"ok":true,"peers":[{"name":"mini","address":"10.75.0.2"},{"name":"firma","address":"10.73.0.24"}]}\n',
+    "offer ls --json": '{"v":1,"offers":[{"id":"qwen","kind":"model","peer":"mini"},{"id":"schreiber","kind":"agent","peer":"mini"},{"id":"tafel","kind":"ui"}]}\n',
+    "sync pairs --json": '{"ok":true,"pairs":[{"name":"noten","peer":"10.75.0.2","local":"/Users/secret","remote":"/remote/secret"},{"name":"demo","peer":"10.73.0.26","local":"/Users/reemax/tmp/fabric-demo","remote":"coding"}]}\n',
+    "list --json": '{"backends":[{"name":"peer","url":"http://10.75.0.2:11434"},{"name":"litellm","url":"https://llm.unitedshare.ai/v1"}],"models":[{"id":"mesh-only-model","backend":"peer"},{"id":"grok-devstral","backend":"litellm"}]}\n',
+  });
+  await plugin.onload();
+  await plugin.settingTab.display();
+  const model = lastSetting("Modell");
+  assert.deepEqual(model.dropdown.order, ["", "rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"]);
+  assert.equal(model.dropdown.options["mesh-only-model"], undefined);
+  assert.equal(model.dropdown.options.qwen, undefined);
+  const settingText = nodeTexts(plugin.settingTab.containerEl).join("\n");
+  assert.match(settingText, /Direktes Netz/);
+  assert.match(settingText, /Ein eingerichteter Rechner mit reemax kann im direkten Netz ein Modell, einen Agenten oder eine Oberfläche anbieten/);
+  assert.match(settingText, /Modell: mini:qwen, mesh-only-model/);
+  assert.match(settingText, /Agent: mini:schreiber/);
+  assert.match(settingText, /Oberfläche: tafel/);
+  assert.match(settingText, /Gegenstellen: mini/);
+  assert.match(settingText, /Dateipaare im direkten Netz: noten/);
+  assert.match(settingText, /Dateipaare im Firmennetz: demo/);
+  assert.equal(settingText.includes("firma"), false);
+  assert.equal(settingText.includes("/Users"), false);
+  assert.equal(settingText.includes("grok-devstral"), false);
+  assert.equal(settingText.includes("Datenbank"), false);
+
+  const leaf = { type: VIEW_TYPE, app, view: null };
+  app.workspace.leaves.push(leaf);
+  const view = plugin.registeredViews[0].factory(leaf);
+  leaf.view = view;
+  await view.onOpen();
+  const mesh = find(view.contentEl, (node) => node.classList && node.classList.has("unitedshare-mesh"));
+  assert.ok(mesh, "die Seitenleiste zeigt das direkte Netz");
+  const sideText = nodeTexts(mesh).join("\n");
+  assert.match(sideText, /Modell: mini:qwen, mesh-only-model/);
+  assert.match(sideText, /Agent: mini:schreiber/);
+  assert.match(sideText, /Oberfläche: tafel/);
+  const select = find(view.contentEl, (node) => node.tag === "select");
+  assert.deepEqual(
+    select.children.filter((node) => node.tag === "option").map((node) => node.attrs.value),
+    ["", "rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"],
+  );
+  assert.deepEqual(plugin.meshSpawn.seen, [
+    ["version", "--json"],
+    ["mesh", "peers", "--json"],
+    ["offer", "ls", "--json"],
+    ["sync", "pairs", "--json"],
+    ["list", "--json"],
+  ]);
+});
+
+test("ohne Schlüssel fragt das direkte Netz reemax nicht", async () => {
+  const app = makeApp();
+  app.vault = { adapter: { getBasePath: () => "/tmp/vault-mesh" } };
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({ apiKey: "", model: "" });
+  let calls = 0;
+  plugin.meshSpawn = () => {
+    calls += 1;
+    throw new Error("nicht rufen");
+  };
+  await plugin.onload();
+  await plugin.settingTab.display();
+  const leaf = { type: VIEW_TYPE, app, view: null };
+  app.workspace.leaves.push(leaf);
+  const view = plugin.registeredViews[0].factory(leaf);
+  leaf.view = view;
+  await view.onOpen();
+  assert.equal(calls, 0);
+  assert.equal(nodeTexts(plugin.settingTab.containerEl).join("\n").includes("Direktes Netz"), false);
+  assert.equal(nodeTexts(view.contentEl).join("\n").includes("Direktes Netz"), false);
+});
+
+test("unter node --test startet ein fehlender meshSpawn nicht das echte reemax", async () => {
+  const app = makeApp();
+  app.vault = { adapter: { getBasePath: () => "/tmp/vault-mesh" } };
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.test/v1",
+    model: "",
+  });
+  await plugin.onload();
+  await plugin.settingTab.display();
+  const text = nodeTexts(plugin.settingTab.containerEl).join("\n");
+  assert.equal(text.includes("Direktes Netz"), false);
+  assert.equal(text.includes("0.3.3"), false);
+  assert.equal(text.includes("demo"), false);
+});
+
+// --------------------------------------------------------------------------
+// Gesprächsablage in <Tresor>/.vault/chats
+//
+// Die reinen Funktionen stehen in chat-speicher.test.js. Hier geht es um die
+// Verdrahtung, und die entscheidet im Betrieb: ein Verlauf, der geschrieben
+// wird, aber beim Start nicht zurückkommt, hilft niemandem.
+
+function chatAdapterMock(dateien = {}) {
+  const inhalt = new Map(Object.entries(dateien));
+  const ordner = [];
+  return {
+    inhalt,
+    getBasePath: () => "/tmp/vault-chats",
+    async exists(pfad) {
+      return inhalt.has(pfad) || ordner.includes(pfad);
+    },
+    async mkdir(pfad) {
+      ordner.push(pfad);
+    },
+    async write(pfad, daten) {
+      inhalt.set(pfad, daten);
+    },
+    async read(pfad) {
+      if (!inhalt.has(pfad)) throw new Error(`nicht da: ${pfad}`);
+      return inhalt.get(pfad);
+    },
+    async list(pfad) {
+      const praefix = pfad ? `${pfad}/` : "";
+      const files = [];
+      for (const schluessel of inhalt.keys()) {
+        if (schluessel.startsWith(praefix) && !schluessel.slice(praefix.length).includes("/")) {
+          files.push(schluessel);
+        }
+      }
+      return { files, folders: [] };
+    },
+  };
+}
+
+function abgelegtesGespraech({ id, offen, frage = "Was ist DIDNS?" }) {
+  return JSON.stringify({
+    id,
+    titel: frage,
+    erstellt: "2026-10-09T10:00:00.000Z",
+    geaendert: "2026-10-09T10:05:00.000Z",
+    offen,
+    messages: [
+      { role: "user", content: frage },
+      { role: "assistant", content: "Eine DID ist eine URI." },
+    ],
+  });
+}
+
+async function ansichtMitAdapter(adapter) {
+  const app = makeApp();
+  app.vault = { adapter };
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({
+    apiKey: "test-key",
+    baseUrl: "https://api.example.test/v1",
+    model: "",
+  });
+  await plugin.onload();
+  const view = plugin.registeredViews[0].factory({ app });
+  return { app, plugin, view };
+}
+
+test("ein offenes Gespräch kommt nach dem Neustart in den Reiter zurück", async () => {
+  // Das ist die eigentliche Anforderung: nach dem Schliessen von Obsidian
+  // soll sich einfach weiterschreiben lassen. Es genuegt nicht, das Gespräch
+  // ins Verlaufsmenue zu legen -- dann muesste man es jedes Mal heraussuchen.
+  const adapter = chatAdapterMock({
+    ".vault/chats/2026-10-09-1000-offen1.json": abgelegtesGespraech({ id: "offen1", offen: true }),
+  });
+  const { view } = await ansichtMitAdapter(adapter);
+  await view.onOpen();
+
+  assert.equal(view.tabs.length, 1);
+  assert.equal(view.tabs[0].chatId, "offen1");
+  assert.equal(view.tabs[0].messages.length, 2);
+  assert.equal(view.tabs[0].messages[0].content, "Was ist DIDNS?");
+  assert.equal(view.history.length, 0);
+});
+
+test("ein abgeschlossenes Gespräch landet im Verlauf, nicht im Reiter", async () => {
+  const adapter = chatAdapterMock({
+    ".vault/chats/2026-10-09-1000-zu1.json": abgelegtesGespraech({ id: "zu1", offen: false }),
+  });
+  const { view } = await ansichtMitAdapter(adapter);
+  await view.onOpen();
+
+  assert.equal(view.history.length, 1);
+  assert.equal(view.history[0].chatId, "zu1");
+  assert.equal(view.tabs.length, 1);
+  assert.equal(view.tabs[0].messages.length, 0, "der Reiter bleibt leer");
+});
+
+test("der weitergeführte Verlauf geht beim nächsten Fragen mit", async () => {
+  // Weiterschreiben heisst: das Modell kennt das bisherige Gespräch. Sonst
+  // waere der wiederhergestellte Reiter nur Zierde.
+  const adapter = chatAdapterMock({
+    ".vault/chats/2026-10-09-1000-offen1.json": abgelegtesGespraech({ id: "offen1", offen: true }),
+  });
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  const gesendet = [];
+  plugin.completeThread = async (turns) => {
+    gesendet.push(turns);
+    return "Weiter geht es.";
+  };
+  await view.onOpen();
+  view.questionEl.value = "Und was ist mit DNS?";
+  await view.submit();
+
+  assert.equal(gesendet.length, 1);
+  const rollen = gesendet[0].map((turn) => turn.role);
+  assert.deepEqual(rollen, ["user", "assistant", "user"],
+    "der alte Verlauf muss vor der neuen Frage stehen");
+  assert.equal(gesendet[0][0].content, "Was ist DIDNS?");
+});
+
+test("nach einer Antwort liegt das Gespräch in .vault/chats", async () => {
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async () => "Es ist 14:23 Uhr.";
+  await view.onOpen();
+  view.questionEl.value = "Wie spät ist es?";
+  await view.submit();
+
+  const pfade = [...adapter.inhalt.keys()].filter((p) => p.startsWith(".vault/chats/"));
+  assert.equal(pfade.length, 1, `geschrieben: ${JSON.stringify(pfade)}`);
+  const abgelegt = JSON.parse(adapter.inhalt.get(pfade[0]));
+  assert.equal(abgelegt.offen, true);
+  assert.deepEqual(abgelegt.messages.map((m) => m.role), ["user", "assistant"]);
+  assert.equal(abgelegt.messages[1].content, "Es ist 14:23 Uhr.");
+});
+
+test("ein zweites Gespräch schreibt in dieselbe Datei", async () => {
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async () => "Antwort.";
+  await view.onOpen();
+  view.questionEl.value = "Erste Frage";
+  await view.submit();
+  view.questionEl.value = "Zweite Frage";
+  await view.submit();
+
+  const pfade = [...adapter.inhalt.keys()].filter((p) => p.startsWith(".vault/chats/"));
+  assert.equal(pfade.length, 1, "derselbe Reiter, dieselbe Datei");
+  assert.equal(JSON.parse(adapter.inhalt.get(pfade[0])).messages.length, 4);
+});
+
+test("ein abgeschlossenes Gespräch wird mit seinen Nachrichten abgelegt", async () => {
+  // newConversation leert den Reiter unmittelbar nach dem Ablegen. Das geht
+  // heute gut, weil der Eintrag entsteht, bevor der erste await faellt --
+  // eine Abhaengigkeit, die beim naechsten Umbau still bricht. Hier steht
+  // sie als Vertrag.
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async () => "Antwort.";
+  await view.onOpen();
+  view.questionEl.value = "Eine Frage";
+  await view.submit();
+
+  view.newConversation();
+  await new Promise((fertig) => setImmediate(fertig));
+
+  const pfade = [...adapter.inhalt.keys()].filter((p) => p.startsWith(".vault/chats/"));
+  assert.equal(pfade.length, 1);
+  const abgelegt = JSON.parse(adapter.inhalt.get(pfade[0]));
+  assert.equal(abgelegt.offen, false, "abgeschlossen, also nicht mehr offen");
+  assert.equal(abgelegt.messages.length, 2, "die Nachrichten dürfen nicht weggeleert sein");
+});
+
+test("ohne Adapter läuft alles weiter, nur ohne Ablage", async () => {
+  // Auf einer Plattform ohne Adapter darf das Fragen nicht scheitern.
+  const app = makeApp();
+  app.vault = {};
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({ apiKey: "k", baseUrl: "https://api.example.test/v1", model: "" });
+  await plugin.onload();
+  const view = plugin.registeredViews[0].factory({ app });
+  plugin.completeThread = async () => "Antwort ohne Ablage.";
+  await view.onOpen();
+  view.questionEl.value = "Frage";
+  await view.submit();
+
+  assert.equal(view.activeTab().messages.length, 2);
 });
 
 test.after(() => {

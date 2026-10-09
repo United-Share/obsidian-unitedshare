@@ -142,7 +142,7 @@ function buildAnthropicBody({ model, system, turns, maxTokens = 1200 }) {
   return {
     model,
     max_tokens: maxTokens,
-    stream: false,
+    stream: true,
     system: typeof system === "string" ? system : "",
     messages,
   };
@@ -221,6 +221,236 @@ function messageForStatus(status) {
   return `Modellaufruf fehlgeschlagen, Status ${status}.`;
 }
 
+function utf8ByteLength(text) {
+  if (typeof Buffer !== "undefined" && typeof Buffer.byteLength === "function") {
+    return Buffer.byteLength(text, "utf8");
+  }
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
+  return text.length;
+}
+
+function jsonPostHeaders(apiKey, payload) {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+    "Content-Length": String(utf8ByteLength(payload)),
+  };
+}
+
+function textPiece(event) {
+  if (!event || typeof event !== "object") return "";
+  if (event.type === "content_block_delta") {
+    const delta = event.delta;
+    if (delta && delta.type === "text_delta" && typeof delta.text === "string") return delta.text;
+    return "";
+  }
+  const choice = Array.isArray(event.choices) ? event.choices[0] : null;
+  if (choice && choice.delta && typeof choice.delta.content === "string") return choice.delta.content;
+  return "";
+}
+
+function takeSse(buffer, emit) {
+  const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const parts = normalized.split("\n\n");
+  const rest = parts.pop() ?? "";
+  for (const part of parts) {
+    const lines = [];
+    for (const line of part.split("\n")) {
+      if (line.startsWith("data:")) lines.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (!lines.length) continue;
+    const data = lines.join("\n");
+    if (!data || data === "[DONE]") continue;
+    try {
+      emit(textPiece(JSON.parse(data)));
+    } catch (_err) {
+      /* Ein unlesbares Stück überspringt der nächste Block. */
+    }
+  }
+  return rest;
+}
+
+function finishRaw(raw, onDelta) {
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (_err) {
+    throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
+  }
+  const text = parseAnthropicContent(data);
+  if (typeof onDelta === "function") onDelta(text);
+  return text;
+}
+
+async function readChunks(onDelta, pump) {
+  let raw = "";
+  let pending = "";
+  let visible = "";
+  let saw = false;
+  const emit = (piece) => {
+    if (!piece) return;
+    saw = true;
+    visible += piece;
+    if (typeof onDelta === "function") onDelta(visible);
+  };
+  const push = (piece) => {
+    if (!piece) return;
+    raw += piece;
+    pending += piece;
+    pending = takeSse(pending, emit);
+  };
+  await pump(push);
+  if (pending.trim()) takeSse(`${pending}\n\n`, emit);
+  if (!saw) return finishRaw(raw, onDelta);
+  const text = visible.trim();
+  if (!text) throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
+  return text;
+}
+
+async function readVisible(response, onDelta) {
+  const body = response && response.body;
+  if (body && typeof body.getReader === "function") {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    return readChunks(onDelta, async (push) => {
+      while (true) {
+        const step = await reader.read();
+        if (step.done) break;
+        push(decoder.decode(step.value, { stream: true }));
+      }
+      push(decoder.decode());
+    });
+  }
+  if (body && typeof body[Symbol.asyncIterator] === "function") {
+    const decoder = new TextDecoder();
+    return readChunks(onDelta, async (push) => {
+      for await (const chunk of body) {
+        if (typeof chunk === "string") push(chunk);
+        else push(decoder.decode(chunk, { stream: true }));
+      }
+      push(decoder.decode());
+    });
+  }
+  if (response && typeof response.json === "function") {
+    const text = parseAnthropicContent(await response.json());
+    if (typeof onDelta === "function") onDelta(text);
+    return text;
+  }
+  const raw = response && typeof response.text === "function" ? await response.text() : "";
+  return finishRaw(String(raw ?? ""), onDelta);
+}
+
+function readNodeBody(res) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    res.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    res.on("error", reject);
+  });
+}
+
+// requestUrl liefert den Körper erst am Ende. Auf dem Desktop liest node:http jedes Stück sofort.
+function nodeStreamFetch() {
+  const http = require("node:http");
+  const https = require("node:https");
+  return (url, init) => new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const lib = parsed.protocol === "https:" ? https : http;
+    const headers = {};
+    const given = (init && init.headers) || {};
+    for (const key of Object.keys(given)) headers[key] = given[key];
+    const payload = init && init.body != null ? String(init.body) : "";
+    const signal = init && init.signal;
+    const req = lib.request({
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: (init && init.method) || "GET",
+      headers,
+    }, (res) => {
+      const response = {
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        status: res.statusCode || 0,
+        body: res,
+        text() {
+          return readNodeBody(res);
+        },
+        async json() {
+          return JSON.parse(await response.text());
+        },
+      };
+      resolve(response);
+    });
+    const fail = (error) => {
+      if (signal && signal.aborted) {
+        const abortError = new Error("aborted");
+        abortError.name = "AbortError";
+        reject(abortError);
+        return;
+      }
+      reject(error);
+    };
+    req.on("error", fail);
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy();
+        return;
+      }
+      signal.addEventListener("abort", () => req.destroy(), { once: true });
+    }
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function selectTransport(live, fetchImpl) {
+  if (live) return nodeStreamFetch();
+  if (typeof fetchImpl === "function") return fetchImpl;
+  return globalThis.fetch;
+}
+
+function raceAbort(work, timeoutMs, abort) {
+  work.catch(() => {});
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (typeof abort === "function") abort();
+      const error = new Error("timeout");
+      error.name = "AbortError";
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+function mapTransportError(error) {
+  if (error instanceof UnitedShareError) throw error;
+  if (error && error.name === "AbortError") {
+    throw new UnitedShareError("Das Modell hat nicht rechtzeitig geantwortet.", 0);
+  }
+  throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
+}
+
+async function drainError(response) {
+  const status = response && response.status ? response.status : 0;
+  if (response && typeof response.text === "function") {
+    try {
+      await response.text();
+    } catch (_err) {
+      /* Rohtext bleibt ungelesen. */
+    }
+  }
+  throw new UnitedShareError(messageForStatus(status), status);
+}
+
 async function postJson({
   url,
   apiKey,
@@ -232,6 +462,7 @@ async function postJson({
   if (typeof fetchImpl !== "function") {
     throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
   }
+  const payload = JSON.stringify(body);
 
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -250,8 +481,12 @@ async function postJson({
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          // requestUrl sets no length, so Electron chunk-encodes the POST.
+          // Caddy forwards that as chunked HTTP/1.1 and the gateway used to
+          // drop the body. The length must be UTF-8 bytes, not string length.
+          "Content-Length": String(utf8ByteLength(payload)),
         },
-        body: JSON.stringify(body),
+        body: payload,
       }),
       timeout,
     ]);
@@ -398,16 +633,33 @@ async function completeMessages({
   turns,
   timeoutMs = 90000,
   fetchImpl = globalThis.fetch,
+  onDelta,
+  live = false,
 }) {
   if (!model) throw new UnitedShareError("Die Modell-Kennung fehlt.", 0);
-  const data = await postJson({
-    url: messagesUrl(baseUrl),
-    apiKey,
-    timeoutMs,
-    fetchImpl,
-    body: buildAnthropicBody({ model, system, turns }),
+  if (!apiKey) throw new UnitedShareError("Der UnitedShare-API-Key fehlt.", 0);
+  const transport = selectTransport(live, fetchImpl);
+  if (typeof transport !== "function") {
+    throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
+  }
+  const payload = JSON.stringify(buildAnthropicBody({ model, system, turns }));
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const work = transport(messagesUrl(baseUrl), {
+    method: "POST",
+    headers: jsonPostHeaders(apiKey, payload),
+    body: payload,
+    signal: controller ? controller.signal : undefined,
+  }).then(async (response) => {
+    if (!response || !response.ok) await drainError(response);
+    return readVisible(response, onDelta);
   });
-  return parseAnthropicContent(data);
+  try {
+    return await raceAbort(work, timeoutMs, () => {
+      if (controller) controller.abort();
+    });
+  } catch (error) {
+    mapTransportError(error);
+  }
 }
 
 const READ_LIMIT = 100000;
@@ -416,6 +668,7 @@ const RUN_OUTPUT_LIMIT = 16000;
 const LIST_LIMIT = 80;
 const RUN_TIMEOUT_MS = 15000;
 const VAULT_PATH_ERROR = "Der Pfad bleibt im Tresor.";
+const BLOCKED_VAULT_PARTS = new Set([".obsidian", ".git", ".trash"]);
 const RUNNERS = {
   ".py": ["/usr/bin/python3", "/opt/homebrew/bin/python3"],
   ".js": ["/opt/homebrew/bin/node", "/usr/local/bin/node"],
@@ -455,7 +708,7 @@ function assertVaultRelative(input) {
   const parts = [];
   for (const part of raw.split("/")) {
     if (!part || part === ".") continue;
-    if (part === "..") throw new UnitedShareError(VAULT_PATH_ERROR, 0);
+    if (part === ".." || BLOCKED_VAULT_PARTS.has(part)) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
     parts.push(part);
   }
   if (!parts.length) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
@@ -466,6 +719,12 @@ function outsideVault(path, rootReal, target) {
   const fromRoot = path.relative(rootReal, target);
   if (!fromRoot) return false;
   return fromRoot.startsWith("..") || path.isAbsolute(fromRoot);
+}
+
+function realPathBlocked(path, rootReal, target) {
+  const fromRoot = path.relative(rootReal, target);
+  if (!fromRoot || fromRoot.startsWith("..") || path.isAbsolute(fromRoot)) return false;
+  return fromRoot.split(path.sep).some((part) => BLOCKED_VAULT_PARTS.has(part));
 }
 
 function resolveInsideVault(root, rel) {
@@ -490,11 +749,15 @@ function resolveInsideVault(root, rel) {
       } catch (_err) {
         throw new UnitedShareError(VAULT_PATH_ERROR, 0);
       }
-      if (outsideVault(path, rootReal, real)) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
+      if (outsideVault(path, rootReal, real) || realPathBlocked(path, rootReal, real)) {
+        throw new UnitedShareError(VAULT_PATH_ERROR, 0);
+      }
       current = real;
     } else {
       const rest = path.join(current, ...parts.slice(i));
-      if (outsideVault(path, rootReal, rest)) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
+      if (outsideVault(path, rootReal, rest) || realPathBlocked(path, rootReal, rest)) {
+        throw new UnitedShareError(VAULT_PATH_ERROR, 0);
+      }
       return { abs: rest, rel: safe, root: rootReal };
     }
   }
@@ -702,6 +965,7 @@ async function executeVaultAction(action, host) {
       if (typeof host.list !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const names = await host.list(rel);
       const shown = (Array.isArray(names) ? names : [])
+        .filter((name) => !blockedVaultName(name))
         .slice(0, LIST_LIMIT)
         .map((name) => String(name).slice(0, 200));
       return `Ergebnis list ${rel || "."}:\n${shown.join("\n")}`;
@@ -823,6 +1087,34 @@ function assertSyncRequest(peer, direction) {
   return { peer: name, direction };
 }
 
+function locateReemax(env) {
+  const fs = nodeFs();
+  const path = nodePath();
+  if (!fs || !path) return "reemax";
+  const source = env && typeof env === "object" ? env : {};
+  const dirs = [];
+  if (typeof source.PATH === "string") {
+    for (const dir of source.PATH.split(path.delimiter)) {
+      if (dir) dirs.push(dir);
+    }
+  }
+  if (typeof source.HOME === "string" && source.HOME) {
+    dirs.push(path.join(source.HOME, "bin"));
+    dirs.push(path.join(source.HOME, ".local", "bin"));
+  }
+  dirs.push("/opt/homebrew/bin", "/usr/local/bin");
+  const seen = new Set();
+  for (const dir of dirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    try {
+      if (fs.statSync(path.join(dir, "reemax")).isFile()) return path.join(dir, "reemax");
+    } catch (_err) {
+    }
+  }
+  return "reemax";
+}
+
 function runReemax(args, {
   cwd,
   timeoutMs = RUN_TIMEOUT_MS,
@@ -831,11 +1123,13 @@ function runReemax(args, {
 } = {}) {
   const spawn = spawnImpl || nodeSpawn();
   if (typeof spawn !== "function") throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
-  const childEnv = cleanProcessEnv(env || (typeof process !== "undefined" ? process.env : {}));
+  const sourceEnv = env || (typeof process !== "undefined" ? process.env : {});
+  const childEnv = cleanProcessEnv(sourceEnv);
+  const command = spawnImpl ? "reemax" : locateReemax(sourceEnv);
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn("reemax", args, {
+      child = spawn(command, args, {
         cwd,
         shell: false,
         env: childEnv,
@@ -1157,6 +1451,263 @@ function composerPrompt(instruction, selection) {
   ].join("\n");
 }
 
+const MESH_VERSION = /^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$/;
+const MESH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
+const MESH_CAP = 12;
+
+function blankMesh() {
+  return {
+    installed: false,
+    version: "",
+    ready: false,
+    peers: [],
+    kinds: [
+      { id: "model", name: "Modell", items: [] },
+      { id: "agent", name: "Agent", items: [] },
+      { id: "ui", name: "Oberfläche", items: [] },
+    ],
+    pairs: { direkt: [], firma: [], andere: [] },
+  };
+}
+
+function balancedJson(raw, start) {
+  const open = raw[start];
+  if (open !== "{" && open !== "[") return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{" || ch === "[") {
+      depth += 1;
+    } else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return raw.slice(start, i + 1);
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+function parseCliJson(text) {
+  const raw = String(text ?? "");
+  for (let start = 0; start < raw.length; start += 1) {
+    const ch = raw[start];
+    if (ch !== "{" && ch !== "[") continue;
+    const slice = balancedJson(raw, start);
+    if (slice == null) continue;
+    try {
+      return JSON.parse(slice);
+    } catch (_err) {
+      // A log line can contain brackets before the JSON payload.
+    }
+  }
+  return null;
+}
+
+function meshToken(value, pattern) {
+  const text = String(value ?? "").trim();
+  return pattern.test(text) ? text : "";
+}
+
+function meshRows(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object" && Array.isArray(raw.offers)) return raw.offers;
+  return [];
+}
+
+function offerLabels(raw, kind, seen) {
+  const labels = [];
+  for (const item of meshRows(raw)) {
+    if (!item || typeof item !== "object" || item.kind !== kind) continue;
+    const id = meshToken(item.id, MESH_ID);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const peer = meshToken(item.peer, SYNC_PEER);
+    labels.push(peer ? `${peer}:${id}` : id);
+    if (labels.length >= MESH_CAP) break;
+  }
+  return labels;
+}
+
+function meshUrl(url) {
+  try {
+    return new URL(String(url)).hostname.startsWith("10.75.");
+  } catch (_err) {
+    return false;
+  }
+}
+
+function listMeshModels(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const names = new Set();
+  for (const backend of Array.isArray(raw.backends) ? raw.backends : []) {
+    if (!backend || typeof backend !== "object") continue;
+    if (!meshUrl(backend.url || backend.address || "")) continue;
+    const name = String(backend.name || "");
+    if (name) names.add(name);
+  }
+  const ids = [];
+  for (const model of Array.isArray(raw.models) ? raw.models : []) {
+    if (!model || typeof model !== "object") continue;
+    const backend = model.backend != null ? String(model.backend) : "";
+    if (backend) {
+      if (!names.has(backend)) continue;
+    } else if (!meshUrl(model.url || "")) {
+      continue;
+    }
+    const id = meshToken(model.id, MESH_ID);
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+function meshPeers(raw) {
+  const list = Array.isArray(raw) ? raw : (raw && typeof raw === "object" && Array.isArray(raw.peers) ? raw.peers : null);
+  if (!list) return null;
+  const names = [];
+  const seen = new Set();
+  for (const peer of list) {
+    if (!peer || typeof peer !== "object") continue;
+    const name = meshToken(peer.name, SYNC_PEER);
+    if (!name || seen.has(name)) continue;
+    const address = String((peer.address != null ? peer.address : peer.ip) ?? "").trim();
+    if (address.startsWith("10.73.")) continue;
+    if (address && !address.startsWith("10.75.")) continue;
+    seen.add(name);
+    names.push(name);
+    if (names.length >= MESH_CAP) break;
+  }
+  return names;
+}
+
+function meshPairs(raw) {
+  const buckets = { direkt: [], firma: [], andere: [] };
+  const list = Array.isArray(raw) ? raw : (raw && typeof raw === "object" && Array.isArray(raw.pairs) ? raw.pairs : []);
+  const seen = new Set();
+  for (const pair of list) {
+    if (!pair || typeof pair !== "object") continue;
+    const name = meshToken(pair.name, SYNC_PEER);
+    if (!name || seen.has(name)) continue;
+    const peer = String(pair.peer ?? "");
+    let bucket = "andere";
+    if (peer.startsWith("10.75.")) bucket = "direkt";
+    else if (peer.startsWith("10.73.")) bucket = "firma";
+    if (buckets[bucket].length >= MESH_CAP) continue;
+    seen.add(name);
+    buckets[bucket].push(name);
+  }
+  return buckets;
+}
+
+function meshPossibilities(report) {
+  const blank = blankMesh();
+  if (!report || report.installed !== true) return blank;
+  const version = meshToken(report.version, MESH_VERSION);
+  if (!version) return blank;
+  const peers = meshPeers(report.peers);
+  const seen = new Set();
+  const models = offerLabels(report.offers, "model", seen);
+  for (const id of listMeshModels(report.list)) {
+    if (seen.has(id) || models.length >= MESH_CAP) continue;
+    seen.add(id);
+    models.push(id);
+  }
+  return {
+    installed: true,
+    version,
+    ready: peers !== null,
+    peers: peers || [],
+    kinds: [
+      { id: "model", name: "Modell", items: models },
+      { id: "agent", name: "Agent", items: offerLabels(report.offers, "agent", new Set()) },
+      { id: "ui", name: "Oberfläche", items: offerLabels(report.offers, "ui", new Set()) },
+    ],
+    pairs: meshPairs(report.pairs),
+  };
+}
+
+function meshKindLine(view, id, name) {
+  const kind = (view.kinds || []).find((item) => item && item.id === id);
+  const items = kind && Array.isArray(kind.items) ? kind.items : [];
+  const label = kind && kind.name ? kind.name : name;
+  return `${label}: ${items.length ? items.join(", ") : "keins"}`;
+}
+
+function meshOptionLines(view) {
+  if (!view || view.installed !== true) return [];
+  const lines = [
+    `reemax ${view.version}`,
+    meshKindLine(view, "model", "Modell"),
+    meshKindLine(view, "agent", "Agent"),
+    meshKindLine(view, "ui", "Oberfläche"),
+  ];
+  const peers = Array.isArray(view.peers) ? view.peers : [];
+  lines.push(view.ready
+    ? `Gegenstellen: ${peers.length ? peers.join(", ") : "keine"}`
+    : "Gegenstellen: noch nicht eingerichtet");
+  const pairs = view.pairs || {};
+  if (Array.isArray(pairs.direkt) && pairs.direkt.length) {
+    lines.push(`Dateipaare im direkten Netz: ${pairs.direkt.join(", ")}`);
+  }
+  if (Array.isArray(pairs.firma) && pairs.firma.length) {
+    lines.push(`Dateipaare im Firmennetz: ${pairs.firma.join(", ")}`);
+  }
+  return lines;
+}
+
+function cliSucceeded(text) {
+  return /^code 0(\n|$)/.test(String(text ?? ""));
+}
+
+async function readMeshInventory({ spawnImpl, timeoutMs = 8000, cwd } = {}) {
+  const opts = { timeoutMs };
+  if (spawnImpl) opts.spawnImpl = spawnImpl;
+  if (cwd) opts.cwd = cwd;
+  let versionText = "";
+  try {
+    versionText = await runReemax(["version", "--json"], opts);
+  } catch (_err) {
+    return meshPossibilities({ installed: false });
+  }
+  const version = cliSucceeded(versionText) ? parseCliJson(versionText) : null;
+  if (!version || version.ok !== true || typeof version.bin !== "string" || !version.bin.trim() || !meshToken(version.version, MESH_VERSION)) {
+    return meshPossibilities({ installed: false });
+  }
+  const report = {
+    installed: true,
+    version: meshToken(version.version, MESH_VERSION),
+    peers: null,
+    offers: null,
+    pairs: null,
+    list: null,
+  };
+  const reads = [
+    ["peers", ["mesh", "peers", "--json"]],
+    ["offers", ["offer", "ls", "--json"]],
+    ["pairs", ["sync", "pairs", "--json"]],
+    ["list", ["list", "--json"]],
+  ];
+  for (const [key, args] of reads) {
+    try {
+      const text = await runReemax(args, opts);
+      if (!cliSucceeded(text)) continue;
+      report[key] = parseCliJson(text);
+    } catch (_err) {
+      report[key] = null;
+    }
+  }
+  return meshPossibilities(report);
+}
+
 function applyComposerAnswer(editor, answer) {
   const text = String(answer ?? "").trim();
   if (!text) return "empty";
@@ -1167,6 +1718,260 @@ function applyComposerAnswer(editor, answer) {
   }
   editor.replaceRange(text, editor.getCursor());
   return "insert";
+}
+
+// Obsidian indexiert Ordner mit führendem Punkt nicht. Liegt der Text
+// nicht im Index, liest der Desktop-Host dieselbe relative Datei vom Datenträger.
+function blockedVaultName(name) {
+  return BLOCKED_VAULT_PARTS.has(String(name ?? "").split("/").pop());
+}
+
+async function readIndexedOrHidden(rel, indexed, diskHost) {
+  if (blockedVaultName(rel) || String(rel ?? "").split("/").some((part) => BLOCKED_VAULT_PARTS.has(part))) return null;
+  if (typeof indexed === "string") return indexed;
+  if (!diskHost || typeof diskHost.read !== "function") return null;
+  return diskHost.read(rel);
+}
+
+async function listIndexedOrHidden(indexedNames, diskHost, rel) {
+  const visible = (names) => (Array.isArray(names) ? names : []).filter((name) => !blockedVaultName(name));
+  if (!Array.isArray(indexedNames)) {
+    if (!diskHost || typeof diskHost.list !== "function") {
+      throw new UnitedShareError("Der Ordner liegt nicht im Tresor.", 0);
+    }
+    return visible(await diskHost.list(rel || ""));
+  }
+  const base = visible(indexedNames);
+  if (!diskHost || typeof diskHost.list !== "function") return base;
+  let disk = [];
+  try {
+    disk = await diskHost.list(rel || "");
+  } catch (_err) {
+    return base;
+  }
+  const seen = new Set(base);
+  const extra = [];
+  for (const name of disk) {
+    const text = String(name);
+    if (!text.startsWith(".") || blockedVaultName(text) || seen.has(text)) continue;
+    seen.add(text);
+    extra.push(text);
+  }
+  return extra.concat(base);
+}
+
+// --------------------------------------------------------------------------
+// Tresor-Zugriff über die Obsidian-Adapter-API
+//
+// Die Plugin-Prüfung meldet: "Direct Filesystem Access: Uses the Node.js fs
+// module to access the filesystem outside of the Obsidian vault API. Can read
+// and write any file on the system."
+//
+// Der Vorwurf trifft zu, und für Dateien im Tresor ist node:fs unnötig. Die
+// Adapter-API leistet dasselbe und kann den Tresor nicht verlassen — sie
+// kennt keine absoluten Pfade. Nach der Umstellung bleibt node:fs nur noch
+// dort, wo ohnehin eine Shell startet: beim Ausführen einer Quelldatei und
+// beim Suchen des reemax-Programms. Diese Warnung lässt sich nicht wegbauen,
+// ohne die Funktion aufzugeben; der Dateizugriff schon.
+//
+// Gleiche Form wie fsVaultHost, damit die Aufrufer unverändert bleiben —
+// insbesondere liefert list() NAMEN, nicht Pfade: readdirSync tat das, die
+// Adapter-API liefert dagegen volle Pfade in {files, folders}.
+
+function adapterVaultHost(adapter) {
+  if (!adapter) return null;
+  const pfadPruefen = (rel) => {
+    const roh = String(rel ?? "");
+    // Der leere Pfad ist die Tresorwurzel und für list() gültig.
+    return roh ? assertVaultRelative(roh) : "";
+  };
+  const nurName = (pfad) => String(pfad ?? "").split("/").filter(Boolean).pop() || "";
+  return {
+    async read(rel) {
+      const safe = pfadPruefen(rel);
+      if (!safe) return null;
+      try {
+        if (typeof adapter.exists === "function" && !(await adapter.exists(safe))) return null;
+        const text = await adapter.read(safe);
+        return typeof text === "string" ? text : null;
+      } catch (_err) {
+        // Die fs-Fassung gab null zurück, wenn nichts da war. Ein Wurf würde
+        // die Aufrufer anders laufen lassen.
+        return null;
+      }
+    },
+    async list(rel) {
+      const safe = pfadPruefen(rel);
+      let verzeichnis = null;
+      try {
+        verzeichnis = await adapter.list(safe);
+      } catch (_err) {
+        throw new UnitedShareError("Der Ordner liegt nicht im Tresor.", 0);
+      }
+      if (!verzeichnis) throw new UnitedShareError("Der Ordner liegt nicht im Tresor.", 0);
+      const dateien = Array.isArray(verzeichnis.files) ? verzeichnis.files : [];
+      const ordner = Array.isArray(verzeichnis.folders) ? verzeichnis.folders : [];
+      return dateien.concat(ordner).map(nurName).filter(Boolean);
+    },
+    async write(rel, content) {
+      const safe = pfadPruefen(rel);
+      if (!safe) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
+      const teile = safe.split("/");
+      let pfad = "";
+      for (let i = 0; i < teile.length - 1; i += 1) {
+        pfad = pfad ? `${pfad}/${teile[i]}` : teile[i];
+        let vorhanden = false;
+        try {
+          vorhanden = typeof adapter.exists === "function" ? await adapter.exists(pfad) : false;
+        } catch (_err) {
+          vorhanden = false;
+        }
+        if (vorhanden || typeof adapter.mkdir !== "function") continue;
+        try {
+          await adapter.mkdir(pfad);
+        } catch (_err) {
+          // Kann zwischenzeitlich angelegt worden sein. Scheitert das
+          // Schreiben wirklich, meldet write() es.
+        }
+      }
+      await adapter.write(safe, String(content ?? ""));
+    },
+  };
+}
+
+// --------------------------------------------------------------------------
+// Gesprächsablage in <Tresor>/.vault/chats
+//
+// Der Verlauf lebte bisher nur im Arbeitsspeicher. Beim Schließen von
+// Obsidian war er weg, und ein angefangenes Gespräch ließ sich nicht
+// weiterführen.
+//
+// Der Ordner ist versteckt. Das bedeutet zweierlei: die Gespräche reisen mit
+// dem Tresor (Sync, Sicherung, Git), tauchen aber in Obsidians Suche und im
+// Graphen nicht auf. Und: auf versteckte Ordner kommt man ausschließlich über
+// die Adapter-API — die Vault-API sieht nur, was die App anzeigt. So steht es
+// in der Obsidian-Dokumentation, und darum nehmen alle Funktionen hier einen
+// Adapter entgegen statt eines Vault.
+//
+// Das Format ist JSON, nicht Markdown. Eine Antwort kann selbst Frontmatter
+// und verschachtelte Codeblöcke enthalten — in der Notiz zu DIDNS stand
+// "---\ntitle: DIDNS" innerhalb eines ```-Blocks. Jeder Markdown-Trenner wäre
+// damit mehrdeutig, und ein Verlauf, der sich nicht verlustfrei zurücklesen
+// lässt, ist wertlos.
+
+const CHAT_ORDNER = ".vault/chats";
+const CHAT_GRENZE = 50;
+
+function chatKennung(id) {
+  // Die Kennung landet im Dateinamen. Alles außer Buchstaben, Ziffern,
+  // Strich und Unterstrich fliegt raus — damit kann kein Pfad den Ordner
+  // verlassen, auch wenn die Kennung einmal aus fremder Hand kommt.
+  const roh = String(id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+  return roh || "ohne-kennung";
+}
+
+function chatDateiname(eintrag) {
+  // Nach ERSTELLT benannt, nicht nach geändert: der Name muss über alle
+  // Speichervorgänge derselbe bleiben, sonst wächst der Ordner bei jeder
+  // Antwort um eine Datei.
+  const roh = eintrag && eintrag.erstellt ? String(eintrag.erstellt) : "";
+  const zeitpunkt = new Date(roh);
+  const iso = Number.isNaN(zeitpunkt.getTime())
+    ? "1970-01-01T00:00:00.000Z"
+    : zeitpunkt.toISOString();
+  // UTC, nicht Ortszeit: sonst bekäme dasselbe Gespräch nach einem Flug
+  // einen anderen Namen.
+  return `${iso.slice(0, 10)}-${iso.slice(11, 16).replace(":", "")}-${chatKennung(eintrag && eintrag.id)}.json`;
+}
+
+function chatAlsText(eintrag) {
+  return `${JSON.stringify(eintrag, null, 2)}\n`;
+}
+
+function chatAusText(text) {
+  let daten = null;
+  try {
+    daten = JSON.parse(String(text ?? ""));
+  } catch (_err) {
+    return null;
+  }
+  if (!daten || typeof daten !== "object" || Array.isArray(daten)) return null;
+  if (!Array.isArray(daten.messages)) return null;
+  return daten;
+}
+
+function chatZeit(eintrag) {
+  const wert = Date.parse(eintrag && eintrag.geaendert ? eintrag.geaendert : "");
+  return Number.isNaN(wert) ? 0 : wert;
+}
+
+async function chatOrdnerSichern(adapter) {
+  let pfad = "";
+  for (const teil of CHAT_ORDNER.split("/")) {
+    pfad = pfad ? `${pfad}/${teil}` : teil;
+    let vorhanden = false;
+    try {
+      vorhanden = await adapter.exists(pfad);
+    } catch (_err) {
+      vorhanden = false;
+    }
+    if (vorhanden) continue;
+    try {
+      await adapter.mkdir(pfad);
+    } catch (_err) {
+      // Ein zweiter Aufruf kann den Ordner zwischenzeitlich angelegt haben.
+      // Das ist kein Fehler; scheitert das Schreiben danach wirklich, meldet
+      // write() es.
+    }
+  }
+}
+
+async function chatSpeichern(adapter, eintrag) {
+  if (!adapter || typeof adapter.write !== "function" || !eintrag) return null;
+  const nachrichten = Array.isArray(eintrag.messages) ? eintrag.messages : [];
+  if (!nachrichten.length) return null;
+  await chatOrdnerSichern(adapter);
+  const pfad = `${CHAT_ORDNER}/${chatDateiname(eintrag)}`;
+  await adapter.write(pfad, chatAlsText(eintrag));
+  return pfad;
+}
+
+async function chatsLaden(adapter, grenze = CHAT_GRENZE) {
+  const liste = [];
+  liste.uebergangen = 0;
+  if (!adapter || typeof adapter.list !== "function") return liste;
+  let verzeichnis = null;
+  try {
+    verzeichnis = await adapter.list(CHAT_ORDNER);
+  } catch (_err) {
+    // Beim ersten Start gibt es den Ordner noch nicht. Das ist der Normalfall
+    // und kein Fehler.
+    return liste;
+  }
+  // list() liefert {files, folders}, kein Array -- so steht es in der
+  // Obsidian-Dokumentation (ListedFiles).
+  const dateien = verzeichnis && Array.isArray(verzeichnis.files) ? verzeichnis.files : [];
+  const gefunden = [];
+  for (const pfad of dateien) {
+    if (!/\.json$/i.test(pfad)) continue;
+    let text = null;
+    try {
+      text = await adapter.read(pfad);
+    } catch (_err) {
+      continue;
+    }
+    const eintrag = chatAusText(text);
+    // Eine kaputte Datei darf die übrigen nicht mitnehmen.
+    if (eintrag) gefunden.push(eintrag);
+  }
+  gefunden.sort((a, b) => chatZeit(b) - chatZeit(a));
+  const obergrenze = Math.max(0, Number(grenze) || 0);
+  const sichtbar = obergrenze ? gefunden.slice(0, obergrenze) : gefunden;
+  const ergebnis = sichtbar.slice();
+  // Wie viele Gespräche auf der Platte liegen, aber nicht im Menü erscheinen.
+  // Eine stille Kappung verschweigt dem Nutzer, dass es mehr gibt.
+  ergebnis.uebergangen = gefunden.length - sichtbar.length;
+  return ergebnis;
 }
 
 const VIEW_TYPE = "unitedshare-sidebar";
@@ -1182,6 +1987,25 @@ function markInner() {
 
 function markSvg() {
   return `<svg class="unitedshare-mark" viewBox="0 0 68 70" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="${MARK_D}" fill="currentColor"/></svg>`;
+}
+
+const MESH_INTRO = "Ein eingerichteter Rechner mit reemax kann im direkten Netz ein Modell, einen Agenten oder eine Oberfläche anbieten.";
+
+function paintMesh(host, view, intro) {
+  if (!host || typeof host.empty !== "function") return;
+  host.empty();
+  const lines = meshOptionLines(view);
+  if (!lines.length) return;
+  host.createEl("h3", { text: "Direktes Netz" });
+  if (intro) host.createEl("p", { text: MESH_INTRO });
+  const list = host.createEl("ul", { cls: "unitedshare-mesh-options" });
+  for (const line of lines) list.createEl("li", { text: line });
+}
+
+function runningNodeTest() {
+  if (typeof process === "undefined") return false;
+  const flags = [].concat(process.execArgv || [], process.argv || []);
+  return flags.includes("--test");
 }
 
 function nativeKeyboardHeight() {
@@ -1259,6 +2083,14 @@ function requestUrlAsFetch() {
       json: async () => res.json,
     };
   };
+}
+
+function desktopCanStream() {
+  try {
+    return Boolean(typeof process !== "undefined" && process.versions && process.versions.electron);
+  } catch (_err) {
+    return false;
+  }
 }
 
 class AskModal extends Modal {
@@ -1388,7 +2220,13 @@ class UnitedShareView extends ItemView {
       text: "Datenschutz",
       attr: { href: "https://unitedshare.ai/privacy" },
     });
+    this.meshEl = panel.createEl("div", { cls: "unitedshare-mesh" });
 
+    // Vor dem Zeichnen: die abgelegten Gespräche bestimmen, was in den
+    // Reitern und im Verlauf steht. Der Adapter liest unabhängig vom Index,
+    // deshalb ist hier kein onLayoutReady nötig -- das gilt für die
+    // Vault-API und für vault.on("create"), nicht für den Adapter.
+    await this.chatsWiederherstellen();
     this.renderTabs();
     await this.renderMessages();
     this.renderHistory();
@@ -1557,7 +2395,10 @@ class UnitedShareView extends ItemView {
 
   async refreshModelSelect() {
     const select = this.modelSelectEl;
-    if (!select || !this.plugin || typeof this.plugin.ensureModels !== "function") return;
+    if (!select || !this.plugin || typeof this.plugin.ensureModels !== "function") {
+      await this.renderMeshOptions();
+      return;
+    }
     const saved = String((this.plugin.settings && this.plugin.settings.model) || "").trim();
     let ids = [];
     if (this.plugin.modelError) {
@@ -1569,7 +2410,10 @@ class UnitedShareView extends ItemView {
         ids = [];
       }
     }
-    if (this.modelSelectEl !== select) return;
+    if (this.modelSelectEl !== select) {
+      await this.renderMeshOptions();
+      return;
+    }
     const known = Array.isArray(ids) ? ids.filter((id) => isObsidianModel(id)) : [];
     const choices = [];
     if (saved && isObsidianModel(saved) && !known.includes(saved)) choices.push(saved);
@@ -1582,6 +2426,23 @@ class UnitedShareView extends ItemView {
     });
     for (const id of choices) select.createEl("option", { text: id, attr: { value: id } });
     select.value = choices.includes(saved) ? saved : "";
+    await this.renderMeshOptions();
+  }
+
+  async renderMeshOptions() {
+    const host = this.meshEl;
+    if (!host) return;
+    const generation = (this.meshGeneration = (this.meshGeneration || 0) + 1);
+    let view = null;
+    try {
+      if (this.plugin && typeof this.plugin.ensureMesh === "function") {
+        view = await this.plugin.ensureMesh();
+      }
+    } catch (_err) {
+      view = null;
+    }
+    if (generation !== this.meshGeneration || this.meshEl !== host) return;
+    paintMesh(host, view, false);
   }
 
   setAskControls(disabled) {
@@ -1638,6 +2499,7 @@ class UnitedShareView extends ItemView {
   }
 
   async renderMessages() {
+    this.streamEl = null;
     this.messagesEl.empty();
     const messages = this.activeTab().messages;
     if (!messages.length) {
@@ -1655,7 +2517,13 @@ class UnitedShareView extends ItemView {
       });
       if (message.role === "assistant") {
         const content = row.createEl("div", { cls: "unitedshare-message-content markdown-rendered" });
-        pending.push(this.renderAssistant(content, message.content));
+        if (message.streaming) {
+          content.setText(message.content || "");
+          if (typeof content.addClass === "function") content.addClass("is-streaming");
+          this.streamEl = content;
+        } else {
+          pending.push(this.renderAssistant(content, message.content));
+        }
         lastAssistant = {
           text: message.content,
           setText(text) {
@@ -1733,13 +2601,102 @@ class UnitedShareView extends ItemView {
           return stored;
         }),
       });
+      void this.chatSichern(tab, false);
       tab.messages = [];
+      tab.chatId = null;
+      tab.erstellt = null;
     }
     this.askedQuestion = "";
     this.answer = "";
     this.historyMenu.removeClass("is-open");
     this.renderHistory();
     void this.renderMessages();
+  }
+
+  chatAdapter() {
+    const app = this.app || (this.plugin && this.plugin.app);
+    return (app && app.vault && app.vault.adapter) || null;
+  }
+
+  tabAlsEintrag(tab, offen = true) {
+    if (!tab) return null;
+    const nachrichten = (tab.messages || [])
+      .filter((message) => !message.streaming && String(message.content || "").trim())
+      .map((message) => {
+        const gespeichert = { role: message.role, content: message.content };
+        if (message.files && message.files.length) gespeichert.files = message.files;
+        return gespeichert;
+      });
+    if (!nachrichten.length) return null;
+    if (!tab.chatId) {
+      // Erst beim ersten Speichern vergeben, damit leere Tabs keine Kennung
+      // verbrauchen. Ab dann bleibt sie -- der Dateiname haengt daran.
+      tab.chatId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      tab.erstellt = new Date().toISOString();
+    }
+    const erste = nachrichten.find((message) => message.role === "user");
+    return {
+      id: tab.chatId,
+      titel: erste ? String(erste.content).slice(0, 120) : "Gespräch",
+      erstellt: tab.erstellt,
+      geaendert: new Date().toISOString(),
+      offen,
+      messages: nachrichten,
+    };
+  }
+
+  async chatSichern(tab, offen = true) {
+    const adapter = this.chatAdapter();
+    if (!adapter) return;
+    const eintrag = this.tabAlsEintrag(tab || this.activeTab(), offen);
+    if (!eintrag) return;
+    try {
+      await chatSpeichern(adapter, eintrag);
+    } catch (error) {
+      // Ein misslungenes Speichern darf die Antwort nicht verschlucken. Es
+      // bleibt aber sichtbar: ein stilles Scheitern waere genau das Problem,
+      // das diese Ablage loesen soll.
+      console.error("UnitedShare: das Gespräch ließ sich nicht ablegen.", error);
+    }
+  }
+
+  async chatsWiederherstellen() {
+    const adapter = this.chatAdapter();
+    if (!adapter) return;
+    let geladen = [];
+    try {
+      geladen = await chatsLaden(adapter);
+    } catch (error) {
+      console.error("UnitedShare: die abgelegten Gespräche ließen sich nicht lesen.", error);
+      return;
+    }
+    if (!geladen.length) return;
+    if (geladen.uebergangen) {
+      console.info(
+        `UnitedShare: ${geladen.uebergangen} ältere Gespräche liegen in .vault/chats, `
+        + "erscheinen aber nicht im Verlauf.",
+      );
+    }
+    // Offene Gespräche kommen zurück in die Reiter, damit nach einem Neustart
+    // einfach weitergeschrieben werden kann. Abgeschlossene bleiben im
+    // Verlaufsmenü.
+    const offene = geladen.filter((eintrag) => eintrag.offen);
+    const abgeschlossene = geladen.filter((eintrag) => !eintrag.offen);
+    if (offene.length) {
+      this.tabs = offene.map((eintrag) => ({
+        messages: eintrag.messages.map((message) => Object.assign({}, message)),
+        chatId: eintrag.id,
+        erstellt: eintrag.erstellt,
+      }));
+      this.activeIndex = 0;
+      this.syncPairFromActive();
+    }
+    this.history = abgeschlossene.map((eintrag) => ({
+      title: eintrag.titel,
+      messages: eintrag.messages,
+      chatId: eintrag.id,
+      erstellt: eintrag.erstellt,
+    }));
   }
 
   restoreHistory(entry) {
@@ -1819,27 +2776,53 @@ class UnitedShareView extends ItemView {
     this.answer = "";
     this.busy = true;
     this.setAskControls(true);
-    this.statusEl.setText("");
+    const turns = tab.messages
+      .filter((message) => !message.streaming)
+      .map((message) => {
+        const turn = { role: message.role, content: message.content };
+        if (message.files && message.files.length) turn.files = message.files;
+        return turn;
+      });
+    const draft = { role: "assistant", content: "", streaming: true };
+    tab.messages.push(draft);
+    this.statusEl.setText("Antwort kommt.");
     try {
       await this.renderMessages();
-      const answer = await this.plugin.completeThread(
-        tab.messages.map((message) => {
-          const turn = { role: message.role, content: message.content };
-          if (message.files && message.files.length) turn.files = message.files;
-          return turn;
-        }),
-      );
-      tab.messages.push({ role: "assistant", content: answer });
+      const answer = await this.plugin.completeThread(turns, (text) => {
+        draft.content = text;
+        this.answer = text;
+        if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(text);
+        if (this.statusEl) this.statusEl.setText("");
+        const box = this.messagesEl;
+        if (box && typeof box.scrollHeight === "number") box.scrollTop = box.scrollHeight;
+      });
+      draft.content = answer;
+      draft.streaming = false;
       this.answer = answer;
       this.statusEl.setText("");
       await this.renderMessages();
     } catch (error) {
       const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+      if (!String(draft.content || "")) {
+        const index = tab.messages.indexOf(draft);
+        if (index >= 0) tab.messages.splice(index, 1);
+      } else {
+        draft.streaming = false;
+      }
       this.statusEl.setText(text);
       new Notice(text);
+      await this.renderMessages();
     } finally {
       this.busy = false;
       this.setAskControls(false);
+      // Auch nach einem Fehler: eine Teilantwort ist mehr wert als nichts,
+      // und genau der Absturz mittendrin war der Grund fuer die Ablage.
+      //
+      // Mit await, nicht nebenher: ein nicht abgewartetes Schreiben kann
+      // verloren gehen, wenn Obsidian gleich danach schliesst -- und dann
+      // waere die Ablage genau in dem Fall nutzlos, fuer den sie da ist. Es
+      // geht um eine kleine Datei; chatSichern faengt eigene Fehler ab.
+      await this.chatSichern(tab);
     }
   }
 
@@ -1869,6 +2852,8 @@ class UnitedShareSettingTab extends PluginSettingTab {
     this.modelGeneration = 0;
     this.modelDropdown = null;
     this.modelHost = null;
+    this.meshHost = null;
+    this.meshGeneration = 0;
   }
 
   display() {
@@ -1922,6 +2907,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
       });
 
     this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
+    this.meshHost = containerEl.createEl("div", { cls: "unitedshare-mesh" });
     return this.renderModelControl();
   }
 
@@ -1950,6 +2936,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
           this.modelDropdown = dropdown;
         });
       this.refreshSidebarSelects();
+      await this.renderMesh();
       return;
     }
     new Setting(host)
@@ -1978,6 +2965,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
           });
         });
       this.refreshSidebarSelects();
+      await this.renderMesh();
       return;
     }
     const known = Array.isArray(ids) ? ids.filter((id) => isObsidianModel(id)) : [];
@@ -1997,6 +2985,21 @@ class UnitedShareSettingTab extends PluginSettingTab {
         this.modelDropdown = dropdown;
       });
     this.refreshSidebarSelects();
+    await this.renderMesh();
+  }
+
+  async renderMesh() {
+    const host = this.meshHost;
+    if (!host) return;
+    const generation = (this.meshGeneration += 1);
+    let view = null;
+    try {
+      view = await this.plugin.ensureMesh();
+    } catch (_err) {
+      view = null;
+    }
+    if (generation !== this.meshGeneration || this.meshHost !== host) return;
+    paintMesh(host, view, true);
   }
 
   refreshSidebarSelects() {
@@ -2232,7 +3235,10 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.cursorBusy = true;
     this.setCursorBusy(true);
     try {
-      const answer = await this.completeThread([{ role: "user", content: prompt }]);
+      const answer = await this.completeThread([{ role: "user", content: prompt }], (text) => {
+        if (input) input.value = text;
+      });
+      if (input) input.value = "";
       if (applyComposerAnswer(target.editor, answer) === "empty") input.value = draft;
     } catch (error) {
       input.value = draft;
@@ -2283,6 +3289,50 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.modelIds = null;
     this.modelError = "";
     this.modelFlightStamp = "";
+    this.meshStamp = "";
+    this.meshView = null;
+    this.meshFlightStamp = "";
+  }
+
+  async ensureMesh() {
+    const apiKey = String((this.settings && this.settings.apiKey) || "").trim();
+    if (!apiKey) {
+      this.meshView = null;
+      this.meshStamp = "";
+      this.meshFlight = null;
+      this.meshFlightStamp = "";
+      return null;
+    }
+    if (!this.vaultAdapterRoot()) return { installed: false };
+    const stamp = apiKey;
+    if (this.meshStamp === stamp && this.meshView) return this.meshView;
+    if (this.meshFlight && this.meshFlightStamp === stamp) return this.meshFlight;
+    this.meshFlightStamp = stamp;
+    const flight = this.probeMesh().then((view) => {
+      if (this.meshFlightStamp !== stamp) return view;
+      this.meshView = view;
+      this.meshStamp = stamp;
+      return view;
+    }).catch(() => {
+      const view = { installed: false };
+      if (this.meshFlightStamp === stamp) {
+        this.meshView = view;
+        this.meshStamp = stamp;
+      }
+      return view;
+    }).finally(() => {
+      if (this.meshFlight === flight) this.meshFlight = null;
+    });
+    this.meshFlight = flight;
+    return flight;
+  }
+
+  probeMesh() {
+    if (typeof this.meshSpawn === "function") {
+      return readMeshInventory({ spawnImpl: this.meshSpawn, cwd: this.vaultAdapterRoot() });
+    }
+    if (runningNodeTest()) return Promise.resolve({ installed: false });
+    return readMeshInventory({ cwd: this.vaultAdapterRoot() });
   }
 
   async ensureModels() {
@@ -2353,6 +3403,10 @@ module.exports = class UnitedSharePlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  vaultAdapter() {
+    return (this.app && this.app.vault && this.app.vault.adapter) || null;
+  }
+
   vaultAdapterRoot() {
     const adapter = this.app && this.app.vault && this.app.vault.adapter;
     return adapter && typeof adapter.getBasePath === "function" ? adapter.getBasePath() : "";
@@ -2393,12 +3447,18 @@ module.exports = class UnitedSharePlugin extends Plugin {
       return null;
     }
     const vault = this.app && this.app.vault;
-    if (!vault || typeof vault.getAbstractFileByPath !== "function") return null;
-    const file = vault.getAbstractFileByPath(safe);
-    if (!file || Array.isArray(file.children)) return null;
-    if (typeof vault.cachedRead !== "function") return null;
-    const text = await vault.cachedRead(file);
-    return typeof text === "string" ? text : null;
+    let indexed = null;
+    if (vault && typeof vault.getAbstractFileByPath === "function") {
+      const file = vault.getAbstractFileByPath(safe);
+      if (file && !Array.isArray(file.children) && typeof vault.cachedRead === "function") {
+        const text = await vault.cachedRead(file);
+        if (typeof text === "string") indexed = text;
+      }
+    }
+    // Versteckte Ordner sieht nur die Adapter-API -- so steht es in der
+    // Obsidian-Dokumentation. node:fs waere hier zusaetzlich unnoetig und
+    // wird von der Plugin-Pruefung beanstandet.
+    return readIndexedOrHidden(safe, indexed, adapterVaultHost(this.vaultAdapter()));
   }
 
   async listVaultDir(rel) {
@@ -2408,16 +3468,19 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
     const safe = rel ? assertVaultRelative(rel) : "";
     if (safe) this.ensureInsideVault(safe);
-    const folder = safe
-      ? vault.getAbstractFileByPath(safe)
-      : (typeof vault.getRoot === "function" ? vault.getRoot() : null);
-    if (!folder || !Array.isArray(folder.children)) {
-      throw new UnitedShareError("Der Ordner liegt nicht im Tresor.");
+    let indexed = null;
+    if (vault && typeof vault.getAbstractFileByPath === "function") {
+      const folder = safe
+        ? vault.getAbstractFileByPath(safe)
+        : (typeof vault.getRoot === "function" ? vault.getRoot() : null);
+      if (folder && Array.isArray(folder.children)) {
+        indexed = folder.children
+          .slice(0, 80)
+          .map((child) => String((child && (child.name || child.path)) || ""))
+          .filter(Boolean);
+      }
     }
-    return folder.children
-      .slice(0, 80)
-      .map((child) => String((child && (child.name || child.path)) || ""))
-      .filter(Boolean);
+    return listIndexedOrHidden(indexed, adapterVaultHost(this.vaultAdapter()), safe);
   }
 
   async writeVaultFile(rel, content) {
@@ -2458,7 +3521,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return runVaultFile({ root, relPath: safe });
   }
 
-  async completeThread(turns) {
+  async completeThread(turns, onDelta) {
+    const live = desktopCanStream();
     return runVaultInstruction({
       turns,
       host: this.vaultHost(),
@@ -2468,6 +3532,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
         model: this.settings.model,
         timeoutMs: Number(this.settings.timeoutMs) || 90000,
         fetchImpl: requestUrlAsFetch(),
+        live,
+        onDelta,
         system: SYSTEM_PROMPT,
         turns: next,
       }),

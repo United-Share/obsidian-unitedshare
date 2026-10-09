@@ -23,7 +23,17 @@ test("öffentliche Herkunft nennt die Organisation United-Share und den Anbieter
   assert.equal(readme.includes(PROVIDER), true, "README nennt den Anbieter");
   assert.equal(manifest.author, PROVIDER);
   assert.equal(manifest.authorUrl, "https://unitedshare.ai");
-  assert.equal(manifest.version, "1.1.7");
-  assert.equal(readme.includes("Release-Tag `1.1.7`"), true);
+  // Keine feste Zahl: geprueft wird, dass Anleitung, Manifest und
+  // versions.json dieselbe Fassung nennen. Fehlt der Eintrag in
+  // versions.json, findet der Community-Installer sie nicht -- und das
+  // faellt erst nach der Veroeffentlichung auf.
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+  assert.ok(readme.includes(`Release-Tag \`${manifest.version}\``),
+    `die Anleitung nennt nicht ${manifest.version}`);
+  const versionen = JSON.parse(fs.readFileSync(path.join(root, "versions.json"), "utf8"));
+  assert.ok(Object.hasOwn(versionen, manifest.version),
+    `versions.json kennt ${manifest.version} nicht`);
+  assert.equal(versionen[manifest.version], manifest.minAppVersion,
+    "versions.json und minAppVersion weichen ab");
   assert.equal(license.includes(`Copyright (c) 2026 ${PROVIDER}`), true);
 });

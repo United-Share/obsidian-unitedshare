@@ -12,7 +12,9 @@ const {
   cleanProcessEnv,
   executeVaultAction,
   fsVaultHost,
+  listIndexedOrHidden,
   parseVaultActions,
+  readIndexedOrHidden,
   runVaultFile,
   runVaultInstruction,
 } = require("./unitedshare-core");
@@ -72,6 +74,92 @@ test("ein Block im Dateiinhalt wird nicht als Aktion gelesen, wenn die Antwort k
   assert.equal(answer, "Fertig, die Notiz ist gelesen.");
   assert.equal(calls.length, 2);
   assert.equal(written, false);
+});
+
+test("eine Datei mit führendem Punkt wird gelesen, wenn der Index sie nicht hat", async () => {
+  const { parent, root } = tempVault();
+  try {
+    fs.mkdirSync(path.join(root, ".cortex"));
+    fs.writeFileSync(path.join(root, ".cortex", "endpoints.md"), "GET /v1/health\n");
+    const disk = fsVaultHost(root);
+    const text = await readIndexedOrHidden(".cortex/endpoints.md", null, disk);
+    assert.equal(text, "GET /v1/health\n");
+    const fromIndex = await readIndexedOrHidden(".cortex/endpoints.md", "aus dem Index\n", disk);
+    assert.equal(fromIndex, "aus dem Index\n");
+    const names = await listIndexedOrHidden(null, disk, ".cortex");
+    assert.equal(names.includes("endpoints.md"), true);
+    const listed = await listIndexedOrHidden(["sichtbar.md"], disk, ".cortex");
+    assert.deepEqual(listed, ["sichtbar.md"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("versteckte Projektordner erscheinen, der Schlüsselordner nicht", async () => {
+  const { parent, root } = tempVault();
+  try {
+    fs.mkdirSync(path.join(root, ".cortex"));
+    fs.writeFileSync(path.join(root, ".cortex", "endpoints.md"), "GET /v1/health\n");
+    fs.mkdirSync(path.join(root, ".obsidian", "plugins", "unitedshare"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, ".obsidian", "plugins", "unitedshare", "data.json"),
+      '{"apiKey":"GEHEIM"}\n',
+    );
+    fs.mkdirSync(path.join(root, ".git"));
+    fs.writeFileSync(path.join(root, ".git", "config"), "[core]\n");
+    fs.writeFileSync(path.join(root, "Notiz.md"), "sichtbar\n");
+    const disk = fsVaultHost(root);
+    assert.throws(() => assertVaultRelative(".obsidian/plugins/unitedshare/data.json"), /Tresor/);
+    assert.throws(() => assertVaultRelative(".git/config"), /Tresor/);
+    assert.throws(() => assertVaultRelative(".trash/alt.md"), /Tresor/);
+    const hidden = await readIndexedOrHidden(".obsidian/plugins/unitedshare/data.json", null, disk);
+    assert.equal(hidden, null);
+    const read = await executeVaultAction({
+      action: "read",
+      path: ".obsidian/plugins/unitedshare/data.json",
+    }, disk);
+    assert.equal(read.includes("GEHEIM"), false);
+    assert.match(read, /Tresor/);
+    const names = await listIndexedOrHidden(["Notiz.md"], disk, "");
+    assert.equal(names.includes(".cortex"), true);
+    assert.equal(names.includes("Notiz.md"), true);
+    assert.equal(names.includes(".obsidian"), false);
+    assert.equal(names.includes(".git"), false);
+    const many = Array.from({ length: 80 }, (_, i) => `n${i}.md`);
+    const capped = (await listIndexedOrHidden(many, disk, "")).slice(0, 80);
+    assert.equal(capped.includes(".cortex"), true);
+    assert.equal(capped.includes(".obsidian"), false);
+    assert.equal(capped.includes(".git"), false);
+    const secretFile = path.join(root, ".obsidian", "plugins", "unitedshare", "data.json");
+    const wrote = await executeVaultAction({
+      action: "write",
+      path: ".obsidian/plugins/unitedshare/data.json",
+      content: "NEU",
+    }, disk);
+    assert.match(wrote, /Tresor/);
+    assert.equal(fs.readFileSync(secretFile, "utf8").includes("GEHEIM"), true);
+    const listed = await executeVaultAction({ action: "list", path: ".obsidian" }, disk);
+    assert.match(listed, /Tresor/);
+    assert.equal(listed.includes("data.json"), false);
+    const rootList = await executeVaultAction({ action: "list", path: "" }, disk);
+    assert.equal(rootList.includes(".cortex"), true);
+    assert.equal(rootList.includes(".obsidian"), false);
+    assert.equal(rootList.includes(".git"), false);
+    assert.match(rootList, /Notiz\.md/);
+    fs.symlinkSync(secretFile, path.join(root, "alias.json"));
+    const viaWrite = await executeVaultAction({
+      action: "write",
+      path: "alias.json",
+      content: "NEU",
+    }, disk);
+    assert.match(viaWrite, /Tresor/);
+    assert.equal(fs.readFileSync(secretFile, "utf8").includes("GEHEIM"), true);
+    const viaRead = await executeVaultAction({ action: "read", path: "alias.json" }, disk);
+    assert.equal(viaRead.includes("GEHEIM"), false);
+    assert.match(viaRead, /Tresor/);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("Pfade mit .. oder einem absoluten Pfad bleiben draußen", async () => {
@@ -422,7 +510,9 @@ test("Prompt und Readme nennen Beitritt und Abgleich und lassen den Einstellungs
   assert.equal(src.includes("reemax mesh sync kopiert keine Dateien und ist keine Aktion."), true);
   assert.match(readme, /\*\*Beitreten\*\*/);
   assert.match(readme, /\*\*Abgleich\*\*/);
-  assert.equal(readme.includes("Release-Tag `1.1.7`"), true);
+  const manifestVersion = JSON.parse(fs.readFileSync(path.join(__dirname, "manifest.json"), "utf8")).version;
+  assert.ok(readme.includes(`Release-Tag \`${manifestVersion}\``),
+    `die Anleitung nennt nicht ${manifestVersion}`);
   assert.equal(readme.includes("Das Plugin legt kein Paar an."), true);
 });
 

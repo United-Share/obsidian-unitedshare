@@ -1,9 +1,10 @@
 {
   "id": "unitedshare",
   "name": "UnitedShare",
-  "version": "1.1.7",
+  "version": "1.2.0",
   "minAppVersion": "1.5.0",
-  "description": "Fragt das Modell hinter api.unitedshare.ai aus der Seitenleiste und der Notiz.",
+  "description": "Fragen aus Seitenleiste und Notiz an die Modelle, die ihr mit UnitedShare selbst betreibt.",
+  "helpUrl": "https://unitedshare.ai/docs/",
   "author": "United Share GmbH",
   "authorUrl": "https://unitedshare.ai",
   "isDesktopOnly": false

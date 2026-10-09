@@ -227,6 +227,10 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   white-space: normal;
 }
 
+.unitedshare-message-assistant > .unitedshare-message-content.is-streaming {
+  white-space: pre-wrap;
+}
+
 .unitedshare-message-assistant > .unitedshare-message-content p {
   margin: 0 0 0.65em;
 }
@@ -298,7 +302,14 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   gap: 4px;
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: none;
+}
+
+/* Die Leiste rollt, zeigt aber keinen Balken. Nicht ueber scrollbar-width:
+   das kam erst mit Chrome 121, und Obsidian 1.4.5 laeuft auf aelterem
+   Electron -- die Pruefung meldet es als nur teilweise unterstuetzt.
+   ::-webkit-scrollbar wirkt in jeder Chromium-Fassung. */
+.unitedshare-tab-badges::-webkit-scrollbar {
+  display: none;
 }
 
 .unitedshare-tab-badge {
@@ -565,6 +576,22 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   margin: 6px 2px 0;
 }
 
+.unitedshare-mesh h3 {
+  margin: 12px 2px 4px;
+  font-size: var(--font-ui-medium);
+}
+
+.unitedshare-mesh p,
+.unitedshare-mesh-options {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin: 0 2px 6px;
+}
+
+.unitedshare-mesh-options {
+  padding-left: 1.1em;
+}
+
 body.is-mobile .unitedshare-chat-panel {
   padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px) + var(--unitedshare-keyboard-inset, 0px));
 }
@@ -593,7 +620,8 @@ body.is-mobile .unitedshare-welcome,
   overflow-y: auto;
 }
 
-.unitedshare-sidebar.is-keyboard-open .unitedshare-hint {
+.unitedshare-sidebar.is-keyboard-open .unitedshare-hint,
+.unitedshare-sidebar.is-keyboard-open .unitedshare-mesh {
   display: none;
 }
 

@@ -644,7 +644,9 @@ test("die Anleitung beschreibt die Eingabe unten im Fenster", () => {
   assert.match(readme, /unten im Fenster/);
   assert.match(readme, /UnitedShareAI/);
   assert.match(readme, /nur durch die Antwort ersetzt/);
-  assert.match(readme, /Release-Tag `1\.1\.7`/);
+  const manifestVersion = JSON.parse(fs.readFileSync(path.join(__dirname, "manifest.json"), "utf8")).version;
+  assert.ok(readme.includes(`Release-Tag \`${manifestVersion}\``),
+    `die Anleitung nennt nicht ${manifestVersion}`);
   assert.doesNotMatch(readme, /schwebendes Feld an der Cursor-Stelle/);
 });
 

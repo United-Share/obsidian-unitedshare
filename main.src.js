@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { applyComposerAnswer, assertVaultRelative, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, listModels, loadMentionedNotes, localObsidianCommand, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
+const { adapterVaultHost, applyComposerAnswer, assertVaultRelative, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, listIndexedOrHidden, listModels, loadMentionedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, viewSitsUnderKeyboard } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
@@ -16,6 +16,25 @@ function markInner() {
 
 function markSvg() {
   return `<svg class="unitedshare-mark" viewBox="0 0 68 70" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="${MARK_D}" fill="currentColor"/></svg>`;
+}
+
+const MESH_INTRO = "Ein eingerichteter Rechner mit reemax kann im direkten Netz ein Modell, einen Agenten oder eine Oberfläche anbieten.";
+
+function paintMesh(host, view, intro) {
+  if (!host || typeof host.empty !== "function") return;
+  host.empty();
+  const lines = meshOptionLines(view);
+  if (!lines.length) return;
+  host.createEl("h3", { text: "Direktes Netz" });
+  if (intro) host.createEl("p", { text: MESH_INTRO });
+  const list = host.createEl("ul", { cls: "unitedshare-mesh-options" });
+  for (const line of lines) list.createEl("li", { text: line });
+}
+
+function runningNodeTest() {
+  if (typeof process === "undefined") return false;
+  const flags = [].concat(process.execArgv || [], process.argv || []);
+  return flags.includes("--test");
 }
 
 function nativeKeyboardHeight() {
@@ -93,6 +112,14 @@ function requestUrlAsFetch() {
       json: async () => res.json,
     };
   };
+}
+
+function desktopCanStream() {
+  try {
+    return Boolean(typeof process !== "undefined" && process.versions && process.versions.electron);
+  } catch (_err) {
+    return false;
+  }
 }
 
 class AskModal extends Modal {
@@ -222,7 +249,13 @@ class UnitedShareView extends ItemView {
       text: "Datenschutz",
       attr: { href: "https://unitedshare.ai/privacy" },
     });
+    this.meshEl = panel.createEl("div", { cls: "unitedshare-mesh" });
 
+    // Vor dem Zeichnen: die abgelegten Gespräche bestimmen, was in den
+    // Reitern und im Verlauf steht. Der Adapter liest unabhängig vom Index,
+    // deshalb ist hier kein onLayoutReady nötig -- das gilt für die
+    // Vault-API und für vault.on("create"), nicht für den Adapter.
+    await this.chatsWiederherstellen();
     this.renderTabs();
     await this.renderMessages();
     this.renderHistory();
@@ -391,7 +424,10 @@ class UnitedShareView extends ItemView {
 
   async refreshModelSelect() {
     const select = this.modelSelectEl;
-    if (!select || !this.plugin || typeof this.plugin.ensureModels !== "function") return;
+    if (!select || !this.plugin || typeof this.plugin.ensureModels !== "function") {
+      await this.renderMeshOptions();
+      return;
+    }
     const saved = String((this.plugin.settings && this.plugin.settings.model) || "").trim();
     let ids = [];
     if (this.plugin.modelError) {
@@ -403,7 +439,10 @@ class UnitedShareView extends ItemView {
         ids = [];
       }
     }
-    if (this.modelSelectEl !== select) return;
+    if (this.modelSelectEl !== select) {
+      await this.renderMeshOptions();
+      return;
+    }
     const known = Array.isArray(ids) ? ids.filter((id) => isObsidianModel(id)) : [];
     const choices = [];
     if (saved && isObsidianModel(saved) && !known.includes(saved)) choices.push(saved);
@@ -416,6 +455,23 @@ class UnitedShareView extends ItemView {
     });
     for (const id of choices) select.createEl("option", { text: id, attr: { value: id } });
     select.value = choices.includes(saved) ? saved : "";
+    await this.renderMeshOptions();
+  }
+
+  async renderMeshOptions() {
+    const host = this.meshEl;
+    if (!host) return;
+    const generation = (this.meshGeneration = (this.meshGeneration || 0) + 1);
+    let view = null;
+    try {
+      if (this.plugin && typeof this.plugin.ensureMesh === "function") {
+        view = await this.plugin.ensureMesh();
+      }
+    } catch (_err) {
+      view = null;
+    }
+    if (generation !== this.meshGeneration || this.meshEl !== host) return;
+    paintMesh(host, view, false);
   }
 
   setAskControls(disabled) {
@@ -472,6 +528,7 @@ class UnitedShareView extends ItemView {
   }
 
   async renderMessages() {
+    this.streamEl = null;
     this.messagesEl.empty();
     const messages = this.activeTab().messages;
     if (!messages.length) {
@@ -489,7 +546,13 @@ class UnitedShareView extends ItemView {
       });
       if (message.role === "assistant") {
         const content = row.createEl("div", { cls: "unitedshare-message-content markdown-rendered" });
-        pending.push(this.renderAssistant(content, message.content));
+        if (message.streaming) {
+          content.setText(message.content || "");
+          if (typeof content.addClass === "function") content.addClass("is-streaming");
+          this.streamEl = content;
+        } else {
+          pending.push(this.renderAssistant(content, message.content));
+        }
         lastAssistant = {
           text: message.content,
           setText(text) {
@@ -567,13 +630,102 @@ class UnitedShareView extends ItemView {
           return stored;
         }),
       });
+      void this.chatSichern(tab, false);
       tab.messages = [];
+      tab.chatId = null;
+      tab.erstellt = null;
     }
     this.askedQuestion = "";
     this.answer = "";
     this.historyMenu.removeClass("is-open");
     this.renderHistory();
     void this.renderMessages();
+  }
+
+  chatAdapter() {
+    const app = this.app || (this.plugin && this.plugin.app);
+    return (app && app.vault && app.vault.adapter) || null;
+  }
+
+  tabAlsEintrag(tab, offen = true) {
+    if (!tab) return null;
+    const nachrichten = (tab.messages || [])
+      .filter((message) => !message.streaming && String(message.content || "").trim())
+      .map((message) => {
+        const gespeichert = { role: message.role, content: message.content };
+        if (message.files && message.files.length) gespeichert.files = message.files;
+        return gespeichert;
+      });
+    if (!nachrichten.length) return null;
+    if (!tab.chatId) {
+      // Erst beim ersten Speichern vergeben, damit leere Tabs keine Kennung
+      // verbrauchen. Ab dann bleibt sie -- der Dateiname haengt daran.
+      tab.chatId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      tab.erstellt = new Date().toISOString();
+    }
+    const erste = nachrichten.find((message) => message.role === "user");
+    return {
+      id: tab.chatId,
+      titel: erste ? String(erste.content).slice(0, 120) : "Gespräch",
+      erstellt: tab.erstellt,
+      geaendert: new Date().toISOString(),
+      offen,
+      messages: nachrichten,
+    };
+  }
+
+  async chatSichern(tab, offen = true) {
+    const adapter = this.chatAdapter();
+    if (!adapter) return;
+    const eintrag = this.tabAlsEintrag(tab || this.activeTab(), offen);
+    if (!eintrag) return;
+    try {
+      await chatSpeichern(adapter, eintrag);
+    } catch (error) {
+      // Ein misslungenes Speichern darf die Antwort nicht verschlucken. Es
+      // bleibt aber sichtbar: ein stilles Scheitern waere genau das Problem,
+      // das diese Ablage loesen soll.
+      console.error("UnitedShare: das Gespräch ließ sich nicht ablegen.", error);
+    }
+  }
+
+  async chatsWiederherstellen() {
+    const adapter = this.chatAdapter();
+    if (!adapter) return;
+    let geladen = [];
+    try {
+      geladen = await chatsLaden(adapter);
+    } catch (error) {
+      console.error("UnitedShare: die abgelegten Gespräche ließen sich nicht lesen.", error);
+      return;
+    }
+    if (!geladen.length) return;
+    if (geladen.uebergangen) {
+      console.info(
+        `UnitedShare: ${geladen.uebergangen} ältere Gespräche liegen in .vault/chats, `
+        + "erscheinen aber nicht im Verlauf.",
+      );
+    }
+    // Offene Gespräche kommen zurück in die Reiter, damit nach einem Neustart
+    // einfach weitergeschrieben werden kann. Abgeschlossene bleiben im
+    // Verlaufsmenü.
+    const offene = geladen.filter((eintrag) => eintrag.offen);
+    const abgeschlossene = geladen.filter((eintrag) => !eintrag.offen);
+    if (offene.length) {
+      this.tabs = offene.map((eintrag) => ({
+        messages: eintrag.messages.map((message) => Object.assign({}, message)),
+        chatId: eintrag.id,
+        erstellt: eintrag.erstellt,
+      }));
+      this.activeIndex = 0;
+      this.syncPairFromActive();
+    }
+    this.history = abgeschlossene.map((eintrag) => ({
+      title: eintrag.titel,
+      messages: eintrag.messages,
+      chatId: eintrag.id,
+      erstellt: eintrag.erstellt,
+    }));
   }
 
   restoreHistory(entry) {
@@ -653,27 +805,53 @@ class UnitedShareView extends ItemView {
     this.answer = "";
     this.busy = true;
     this.setAskControls(true);
-    this.statusEl.setText("");
+    const turns = tab.messages
+      .filter((message) => !message.streaming)
+      .map((message) => {
+        const turn = { role: message.role, content: message.content };
+        if (message.files && message.files.length) turn.files = message.files;
+        return turn;
+      });
+    const draft = { role: "assistant", content: "", streaming: true };
+    tab.messages.push(draft);
+    this.statusEl.setText("Antwort kommt.");
     try {
       await this.renderMessages();
-      const answer = await this.plugin.completeThread(
-        tab.messages.map((message) => {
-          const turn = { role: message.role, content: message.content };
-          if (message.files && message.files.length) turn.files = message.files;
-          return turn;
-        }),
-      );
-      tab.messages.push({ role: "assistant", content: answer });
+      const answer = await this.plugin.completeThread(turns, (text) => {
+        draft.content = text;
+        this.answer = text;
+        if (this.streamEl && typeof this.streamEl.setText === "function") this.streamEl.setText(text);
+        if (this.statusEl) this.statusEl.setText("");
+        const box = this.messagesEl;
+        if (box && typeof box.scrollHeight === "number") box.scrollTop = box.scrollHeight;
+      });
+      draft.content = answer;
+      draft.streaming = false;
       this.answer = answer;
       this.statusEl.setText("");
       await this.renderMessages();
     } catch (error) {
       const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+      if (!String(draft.content || "")) {
+        const index = tab.messages.indexOf(draft);
+        if (index >= 0) tab.messages.splice(index, 1);
+      } else {
+        draft.streaming = false;
+      }
       this.statusEl.setText(text);
       new Notice(text);
+      await this.renderMessages();
     } finally {
       this.busy = false;
       this.setAskControls(false);
+      // Auch nach einem Fehler: eine Teilantwort ist mehr wert als nichts,
+      // und genau der Absturz mittendrin war der Grund fuer die Ablage.
+      //
+      // Mit await, nicht nebenher: ein nicht abgewartetes Schreiben kann
+      // verloren gehen, wenn Obsidian gleich danach schliesst -- und dann
+      // waere die Ablage genau in dem Fall nutzlos, fuer den sie da ist. Es
+      // geht um eine kleine Datei; chatSichern faengt eigene Fehler ab.
+      await this.chatSichern(tab);
     }
   }
 
@@ -703,6 +881,8 @@ class UnitedShareSettingTab extends PluginSettingTab {
     this.modelGeneration = 0;
     this.modelDropdown = null;
     this.modelHost = null;
+    this.meshHost = null;
+    this.meshGeneration = 0;
   }
 
   display() {
@@ -756,6 +936,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
       });
 
     this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
+    this.meshHost = containerEl.createEl("div", { cls: "unitedshare-mesh" });
     return this.renderModelControl();
   }
 
@@ -784,6 +965,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
           this.modelDropdown = dropdown;
         });
       this.refreshSidebarSelects();
+      await this.renderMesh();
       return;
     }
     new Setting(host)
@@ -812,6 +994,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
           });
         });
       this.refreshSidebarSelects();
+      await this.renderMesh();
       return;
     }
     const known = Array.isArray(ids) ? ids.filter((id) => isObsidianModel(id)) : [];
@@ -831,6 +1014,21 @@ class UnitedShareSettingTab extends PluginSettingTab {
         this.modelDropdown = dropdown;
       });
     this.refreshSidebarSelects();
+    await this.renderMesh();
+  }
+
+  async renderMesh() {
+    const host = this.meshHost;
+    if (!host) return;
+    const generation = (this.meshGeneration += 1);
+    let view = null;
+    try {
+      view = await this.plugin.ensureMesh();
+    } catch (_err) {
+      view = null;
+    }
+    if (generation !== this.meshGeneration || this.meshHost !== host) return;
+    paintMesh(host, view, true);
   }
 
   refreshSidebarSelects() {
@@ -1066,7 +1264,10 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.cursorBusy = true;
     this.setCursorBusy(true);
     try {
-      const answer = await this.completeThread([{ role: "user", content: prompt }]);
+      const answer = await this.completeThread([{ role: "user", content: prompt }], (text) => {
+        if (input) input.value = text;
+      });
+      if (input) input.value = "";
       if (applyComposerAnswer(target.editor, answer) === "empty") input.value = draft;
     } catch (error) {
       input.value = draft;
@@ -1117,6 +1318,50 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.modelIds = null;
     this.modelError = "";
     this.modelFlightStamp = "";
+    this.meshStamp = "";
+    this.meshView = null;
+    this.meshFlightStamp = "";
+  }
+
+  async ensureMesh() {
+    const apiKey = String((this.settings && this.settings.apiKey) || "").trim();
+    if (!apiKey) {
+      this.meshView = null;
+      this.meshStamp = "";
+      this.meshFlight = null;
+      this.meshFlightStamp = "";
+      return null;
+    }
+    if (!this.vaultAdapterRoot()) return { installed: false };
+    const stamp = apiKey;
+    if (this.meshStamp === stamp && this.meshView) return this.meshView;
+    if (this.meshFlight && this.meshFlightStamp === stamp) return this.meshFlight;
+    this.meshFlightStamp = stamp;
+    const flight = this.probeMesh().then((view) => {
+      if (this.meshFlightStamp !== stamp) return view;
+      this.meshView = view;
+      this.meshStamp = stamp;
+      return view;
+    }).catch(() => {
+      const view = { installed: false };
+      if (this.meshFlightStamp === stamp) {
+        this.meshView = view;
+        this.meshStamp = stamp;
+      }
+      return view;
+    }).finally(() => {
+      if (this.meshFlight === flight) this.meshFlight = null;
+    });
+    this.meshFlight = flight;
+    return flight;
+  }
+
+  probeMesh() {
+    if (typeof this.meshSpawn === "function") {
+      return readMeshInventory({ spawnImpl: this.meshSpawn, cwd: this.vaultAdapterRoot() });
+    }
+    if (runningNodeTest()) return Promise.resolve({ installed: false });
+    return readMeshInventory({ cwd: this.vaultAdapterRoot() });
   }
 
   async ensureModels() {
@@ -1187,6 +1432,10 @@ module.exports = class UnitedSharePlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  vaultAdapter() {
+    return (this.app && this.app.vault && this.app.vault.adapter) || null;
+  }
+
   vaultAdapterRoot() {
     const adapter = this.app && this.app.vault && this.app.vault.adapter;
     return adapter && typeof adapter.getBasePath === "function" ? adapter.getBasePath() : "";
@@ -1227,12 +1476,18 @@ module.exports = class UnitedSharePlugin extends Plugin {
       return null;
     }
     const vault = this.app && this.app.vault;
-    if (!vault || typeof vault.getAbstractFileByPath !== "function") return null;
-    const file = vault.getAbstractFileByPath(safe);
-    if (!file || Array.isArray(file.children)) return null;
-    if (typeof vault.cachedRead !== "function") return null;
-    const text = await vault.cachedRead(file);
-    return typeof text === "string" ? text : null;
+    let indexed = null;
+    if (vault && typeof vault.getAbstractFileByPath === "function") {
+      const file = vault.getAbstractFileByPath(safe);
+      if (file && !Array.isArray(file.children) && typeof vault.cachedRead === "function") {
+        const text = await vault.cachedRead(file);
+        if (typeof text === "string") indexed = text;
+      }
+    }
+    // Versteckte Ordner sieht nur die Adapter-API -- so steht es in der
+    // Obsidian-Dokumentation. node:fs waere hier zusaetzlich unnoetig und
+    // wird von der Plugin-Pruefung beanstandet.
+    return readIndexedOrHidden(safe, indexed, adapterVaultHost(this.vaultAdapter()));
   }
 
   async listVaultDir(rel) {
@@ -1242,16 +1497,19 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
     const safe = rel ? assertVaultRelative(rel) : "";
     if (safe) this.ensureInsideVault(safe);
-    const folder = safe
-      ? vault.getAbstractFileByPath(safe)
-      : (typeof vault.getRoot === "function" ? vault.getRoot() : null);
-    if (!folder || !Array.isArray(folder.children)) {
-      throw new UnitedShareError("Der Ordner liegt nicht im Tresor.");
+    let indexed = null;
+    if (vault && typeof vault.getAbstractFileByPath === "function") {
+      const folder = safe
+        ? vault.getAbstractFileByPath(safe)
+        : (typeof vault.getRoot === "function" ? vault.getRoot() : null);
+      if (folder && Array.isArray(folder.children)) {
+        indexed = folder.children
+          .slice(0, 80)
+          .map((child) => String((child && (child.name || child.path)) || ""))
+          .filter(Boolean);
+      }
     }
-    return folder.children
-      .slice(0, 80)
-      .map((child) => String((child && (child.name || child.path)) || ""))
-      .filter(Boolean);
+    return listIndexedOrHidden(indexed, adapterVaultHost(this.vaultAdapter()), safe);
   }
 
   async writeVaultFile(rel, content) {
@@ -1292,7 +1550,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return runVaultFile({ root, relPath: safe });
   }
 
-  async completeThread(turns) {
+  async completeThread(turns, onDelta) {
+    const live = desktopCanStream();
     return runVaultInstruction({
       turns,
       host: this.vaultHost(),
@@ -1302,6 +1561,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
         model: this.settings.model,
         timeoutMs: Number(this.settings.timeoutMs) || 90000,
         fetchImpl: requestUrlAsFetch(),
+        live,
+        onDelta,
         system: SYSTEM_PROMPT,
         turns: next,
       }),
