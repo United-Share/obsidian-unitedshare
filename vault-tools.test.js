@@ -248,7 +248,11 @@ test("write legt Quelltext an und run startet ihn ohne Shell-Zeichenkette", asyn
     }, host);
     assert.match(wrote, /geschrieben/);
     assert.equal(fs.readFileSync(path.join(root, "src", "hallo.py"), "utf8"), "print('vault-ok')\n");
-    const ran = await executeVaultAction({ action: "run", path: "src/hallo.py", command: "rm -rf /" }, host);
+    const ran = await executeVaultAction(
+      { action: "run", path: "src/hallo.py", command: "rm -rf /" },
+      host,
+      { confirm: async () => true },
+    );
     assert.match(ran, /vault-ok/);
     assert.equal(ran.includes("sekret"), false);
     assert.equal(ran.includes("rm -rf"), false);
@@ -293,6 +297,7 @@ test("die Schleife schreibt die Datei und liefert danach den Satz ohne Block", a
     const answer = await runVaultInstruction({
       turns: [{ role: "user", content: "Erzeuge hallo.py und starte sie." }],
       host,
+      confirm: async () => true,
       complete: async () => {
         step += 1;
         if (step === 1) {
@@ -329,7 +334,11 @@ test("run bricht nach der Frist ab und eine Textdatei startet nicht", async () =
       () => runVaultFile({ root, relPath: "hang.py", timeoutMs: 30, spawnImpl }),
       /Frist/,
     );
-    const skipped = await executeVaultAction({ action: "run", path: "notiz.txt" }, fsVaultHost(root));
+    const skipped = await executeVaultAction(
+      { action: "run", path: "notiz.txt" },
+      fsVaultHost(root),
+      { confirm: async () => true },
+    );
     assert.match(skipped, /py|js|sh|Tresor/);
     assert.equal(skipped.includes("text"), false);
   } finally {
@@ -369,7 +378,7 @@ test("mesh-join startet reemax mesh join mit der Datei im Tresor", async () => {
       action: "mesh-join",
       path: "peers/linux-b.reemax.json",
       command: "rm -rf /",
-    }, host);
+    }, host, { confirm: async () => true });
     assert.match(joined, /mesh-join peers\/linux-b\.reemax\.json/);
     assert.match(joined, /receipt/);
     assert.equal(joined.includes("NICHT-LESEN"), false);
@@ -394,13 +403,14 @@ test("sync pull startet reemax sync pull und nie mesh sync", async () => {
   };
   try {
     const host = fsVaultHost(root, { spawnImpl, env: { PATH: "/usr/bin", HOME: "/tmp", UNITEDSHARE_API_KEY: "sekret" } });
+    const confirm = async () => true;
     const pulled = await executeVaultAction({
       action: "sync",
       peer: "demo",
       direction: "pull",
       command: "rm -rf /",
       path: "../outside",
-    }, host);
+    }, host, { confirm });
     assert.match(pulled, /sync pull demo/);
     assert.equal(pulled.includes("sekret"), false);
     assert.equal(seen.length, 1);
@@ -408,7 +418,7 @@ test("sync pull startet reemax sync pull und nie mesh sync", async () => {
     assert.deepEqual(seen[0].args, ["sync", "pull", "demo"]);
     assert.equal(seen[0].args.includes("mesh"), false);
     assert.equal(seen[0].opts.shell, false);
-    const pushed = await executeVaultAction({ action: "sync", peer: "demo", direction: "push" }, host);
+    const pushed = await executeVaultAction({ action: "sync", peer: "demo", direction: "push" }, host, { confirm });
     assert.match(pushed, /sync push demo/);
     assert.deepEqual(seen[1].args, ["sync", "push", "demo"]);
     for (const bad of [
@@ -418,7 +428,7 @@ test("sync pull startet reemax sync pull und nie mesh sync", async () => {
       { peer: "demo", direction: "mesh" },
       { peer: "", direction: "pull" },
     ]) {
-      const refused = await executeVaultAction({ action: "sync", ...bad }, host);
+      const refused = await executeVaultAction({ action: "sync", ...bad }, host, { confirm });
       assert.equal(refused.includes("ok"), false);
     }
     assert.equal(seen.length, 2);
@@ -454,10 +464,11 @@ test("mesh-join lässt Wege außerhalb des Tresors und fehlende Dateien stehen",
     fs.mkdirSync(path.join(root, "peers"));
     fs.symlinkSync(outside, path.join(root, "peers", "leak.json"));
     const host = fsVaultHost(root, { spawnImpl });
-    const escaped = await executeVaultAction({ action: "mesh-join", path: "../secret.json" }, host);
-    const absolute = await executeVaultAction({ action: "mesh-join", path: "/etc/passwd" }, host);
-    const missing = await executeVaultAction({ action: "mesh-join", path: "peers/fehlt.json" }, host);
-    const linked = await executeVaultAction({ action: "mesh-join", path: "peers/leak.json" }, host);
+    const confirm = async () => true;
+    const escaped = await executeVaultAction({ action: "mesh-join", path: "../secret.json" }, host, { confirm });
+    const absolute = await executeVaultAction({ action: "mesh-join", path: "/etc/passwd" }, host, { confirm });
+    const missing = await executeVaultAction({ action: "mesh-join", path: "peers/fehlt.json" }, host, { confirm });
+    const linked = await executeVaultAction({ action: "mesh-join", path: "peers/leak.json" }, host, { confirm });
     assert.match(escaped, /Pfad bleibt im Tresor/);
     assert.match(absolute, /Pfad bleibt im Tresor/);
     assert.match(missing, /Einladung liegt nicht im Tresor/);
@@ -489,7 +500,11 @@ test("mesh-join gibt einen Fehlercode des CLI als Text zurück", async () => {
   };
   try {
     const host = fsVaultHost(root, { spawnImpl });
-    const result = await executeVaultAction({ action: "mesh-join", path: "peers/b.json" }, host);
+    const result = await executeVaultAction(
+      { action: "mesh-join", path: "peers/b.json" },
+      host,
+      { confirm: async () => true },
+    );
     assert.match(result, /code 2/);
     assert.match(result, /mesh_id passt nicht/);
   } finally {
@@ -511,6 +526,7 @@ test("eine mesh-join-Antwort startet nur den lokalen Beitritt", async () => {
     const answer = await runVaultInstruction({
       turns: [{ role: "user", content: "nimm die Einladung an" }],
       host,
+      confirm: async () => true,
       complete(thread) {
         if (thread.length === 1) {
           return fence({ action: "mesh-join", path: "peers/linux-b.reemax.json", command: "rm -rf /" });
@@ -544,6 +560,51 @@ test("Prompt und Readme nennen Beitritt und Abgleich und lassen den Einstellungs
   assert.ok(readme.includes(`Release-Tag \`${manifestVersion}\``),
     `die Anleitung nennt nicht ${manifestVersion}`);
   assert.equal(readme.includes("Das Plugin legt kein Paar an."), true);
+});
+
+// ANLASS (2026-10-18): Die Bestätigungsabfrage fiel ohne options.confirm auf
+// "immer erlaubt" zurück (fail-open) statt auf "immer abgelehnt". Eine
+// Sicherheitsabfrage, die ohne Gegenstück stillschweigend durchwinkt, ist
+// keine -- und runVaultInstruction rief executeVaultAction bislang ganz ohne
+// options auf, also traf das jeden echten Aufruf.
+test("ohne options.confirm wird abgelehnt, nicht erlaubt (fail-closed)", async () => {
+  const { parent, root } = tempVault();
+  try {
+    fs.writeFileSync(path.join(root, "lauf.py"), "print(1)\n");
+    const host = fsVaultHost(root);
+    const run = await executeVaultAction({ action: "run", path: "lauf.py" }, host);
+    assert.match(run, /vom Nutzer abgelehnt/);
+    const meshJoin = await executeVaultAction({ action: "mesh-join", path: "peers/a.json" }, host);
+    assert.match(meshJoin, /vom Nutzer abgelehnt/);
+    const sync = await executeVaultAction({ action: "sync", peer: "demo", direction: "pull" }, host);
+    assert.match(sync, /vom Nutzer abgelehnt/);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("runVaultInstruction gibt confirm und requireWriteConfirm bis zum echten Aufruf durch", async () => {
+  const { parent, root } = tempVault();
+  try {
+    const host = fsVaultHost(root);
+    const confirmCalls = [];
+    const antwort = await runVaultInstruction({
+      turns: [{ role: "user", content: "Bitte erledige das." }],
+      host,
+      confirm: async (action) => {
+        confirmCalls.push(action.action);
+        return false;
+      },
+      complete(thread) {
+        if (thread.length === 1) return fence({ action: "run", path: "lauf.py" });
+        return "Fertig.";
+      },
+    });
+    assert.equal(antwort, "Fertig.");
+    assert.deepEqual(confirmCalls, ["run"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("run, mesh-join und sync fragen vor der Ausführung nach Bestätigung", async () => {

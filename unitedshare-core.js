@@ -1555,20 +1555,19 @@ function ohneErwaehnung(rel) {
 // write ist haeufiger und bekommt die gleiche Nachfrage nur, wenn der Aufrufer
 // options.requireWriteConfirm setzt (vom Einstellungs-Schalter, Standard aus).
 //
-// Ohne options.confirm bleibt das Verhalten wie vor dieser Nachfrage -- so
-// bleiben bestehende Aufrufer (z. B. Tests, die keinen Dialog simulieren)
-// unveraendert; die eigentliche Durchsetzung passiert an der Stelle, die den
-// echten Dialog verdrahtet.
+// Fail-closed: ohne options.confirm wird abgelehnt, nicht erlaubt. Ein Aufrufer
+// muss Zustimmung ausdruecklich herstellen -- eine "Bestaetigung", die ohne
+// Gegenstueck immer durchwinkt, waere keine.
 const BESTAETIGUNG_ABGELEHNT = "vom Nutzer abgelehnt";
 
-async function autoBestaetigen() {
-  return true;
+async function keineBestaetigung() {
+  return false;
 }
 
 async function executeVaultAction(action, host, options) {
   const kind = action && action.action;
   const rawPath = action && typeof action.path === "string" ? action.path : "";
-  const confirm = options && typeof options.confirm === "function" ? options.confirm : autoBestaetigen;
+  const confirm = options && typeof options.confirm === "function" ? options.confirm : keineBestaetigung;
   const requireWriteConfirm = Boolean(options && options.requireWriteConfirm);
   try {
     if (!host) throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
@@ -1995,7 +1994,9 @@ function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
   }
 }
 
-async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchritt = null }) {
+async function runVaultInstruction({
+  turns, complete, host, maxSteps = 6, onSchritt = null, confirm = null, requireWriteConfirm = false,
+}) {
   const thread = [];
   for (const turn of turns || []) {
     if (!turn || (turn.role !== "user" && turn.role !== "assistant")) continue;
@@ -2039,7 +2040,7 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchr
     const results = [];
     for (const action of actions) {
       meldeSchritt(onSchritt, "laeuft", action);
-      const ergebnis = await executeVaultAction(action, host);
+      const ergebnis = await executeVaultAction(action, host, { confirm, requireWriteConfirm });
       results.push(ergebnis);
       meldeSchritt(onSchritt, "fertig", action, ergebnis);
     }

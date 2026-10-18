@@ -344,12 +344,13 @@ test("Beitritt und Abgleich laufen über den Desktop-Tresor und starten reemax e
   const root = tempRoot();
   try {
     const plugin = new UnitedSharePlugin(makeApp(root));
-    const missing = await plugin.executeInstruction({ action: "mesh-join", path: "peers/fehlt.json" });
+    const confirm = async () => true;
+    const missing = await plugin.executeInstruction({ action: "mesh-join", path: "peers/fehlt.json" }, { confirm });
     assert.match(missing, /Einladung liegt nicht im Tresor/);
-    const bad = await plugin.executeInstruction({ action: "sync", peer: "demo;rm", direction: "pull" });
+    const bad = await plugin.executeInstruction({ action: "sync", peer: "demo;rm", direction: "pull" }, { confirm });
     assert.match(bad, /Buchstaben, Ziffern, Bindestrich oder Unterstrich/);
     plugin.app.vault.adapter.getBasePath = () => "";
-    const mobile = await plugin.executeInstruction({ action: "sync", peer: "demo", direction: "pull" });
+    const mobile = await plugin.executeInstruction({ action: "sync", peer: "demo", direction: "pull" }, { confirm });
     assert.match(mobile, /reemax läuft nur in der Desktop-App/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

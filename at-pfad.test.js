@@ -90,6 +90,7 @@ test("auch beim Starten greift die Nachsicht", async () => {
   const ergebnis = await executeVaultAction(
     { action: "run", path: "@skript.py", content: "" },
     host,
+    { confirm: async () => true },
   );
   assert.match(ergebnis, /gelaufen/);
 });

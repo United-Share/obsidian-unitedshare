@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { adapterVaultHost, applyComposerAnswer, assertLoopbackEmbedUrl, assertVaultRelative, aufladenAdresse, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, prepareContextFiles, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
+const { adapterVaultHost, applyComposerAnswer, assertLoopbackEmbedUrl, assertVaultRelative, aufladenAdresse, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, prepareContextFiles, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
 
 // Ein 400 oder eine leere Antwort tritt "ab und zu" auf -- meist ohne offene
 // Entwicklerkonsole. console.error bleibt das Erste, aber das Fehlerprotokoll
@@ -122,6 +122,7 @@ const DEFAULT_SETTINGS = {
   timeoutMs: 90000,
   embedUrl: "http://127.0.0.1:11434",
   embedModel: "",
+  requireWriteConfirm: false,
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
@@ -390,6 +391,46 @@ class AttachmentModal extends Modal {
 
   onClose() {
     this.contentEl.empty();
+  }
+}
+
+// Fail-closed: schließt der Nutzer das Fenster, ohne zu entscheiden (Escape,
+// Klick daneben), zählt das als Ablehnung -- onClose entscheidet nur, wenn
+// vorher noch nichts entschieden wurde.
+class BestaetigungsModal extends Modal {
+  constructor(app, action) {
+    super(app);
+    this.action = action;
+    this.entschieden = false;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("unitedshare-modal");
+    contentEl.createEl("h2", { text: "Aktion bestätigen" });
+    contentEl.createEl("p", { text: schrittText(this.action) });
+    const pfad = this.action && typeof this.action.path === "string" ? this.action.path : "";
+    if (pfad) contentEl.createEl("p", { cls: "unitedshare-bestaetigung-pfad", text: pfad });
+    const reihe = contentEl.createEl("div", { cls: "unitedshare-bestaetigung-knoepfe" });
+    const ablehnen = reihe.createEl("button", { text: "Ablehnen", attr: { type: "button" } });
+    ablehnen.addEventListener("click", () => this.entscheide(false));
+    const erlauben = reihe.createEl("button", {
+      cls: "mod-cta",
+      text: "Erlauben",
+      attr: { type: "button" },
+    });
+    erlauben.addEventListener("click", () => this.entscheide(true));
+  }
+
+  entscheide(erlaubt) {
+    this.entschieden = true;
+    this.close();
+    if (typeof this.onEntscheidung === "function") this.onEntscheidung(erlaubt);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.entschieden && typeof this.onEntscheidung === "function") this.onEntscheidung(false);
   }
 }
 
@@ -1832,6 +1873,17 @@ class UnitedShareSettingTab extends PluginSettingTab {
         });
       });
 
+    new Setting(containerEl)
+      .setName("Schreiben ebenfalls bestätigen")
+      .setDesc("Lesen, Starten, Beitreten und Abgleich fragen immer nach. Mit diesem Schalter fragt auch Schreiben nach, bevor eine Datei angelegt oder geändert wird.")
+      .addToggle((toggle) => {
+        toggle.setValue(Boolean(this.plugin.settings.requireWriteConfirm));
+        toggle.onChange(async (value) => {
+          this.plugin.settings.requireWriteConfirm = Boolean(value);
+          await this.plugin.saveSettings();
+        });
+      });
+
     this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
     containerEl.createEl("h3", { text: "Dieser Rechner" });
 
@@ -2514,8 +2566,16 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return fsVaultHost(root, { onAktiv: (text) => this.meldeLauf(text) });
   }
 
-  async executeInstruction(action) {
-    return executeVaultAction(action, this.vaultHost());
+  async executeInstruction(action, options) {
+    return executeVaultAction(action, this.vaultHost(), options);
+  }
+
+  async bestaetigeAktion(action) {
+    return new Promise((resolve) => {
+      const modal = new BestaetigungsModal(this.app, action);
+      modal.onEntscheidung = resolve;
+      modal.open();
+    });
   }
 
   async readVaultNote(notePath) {
@@ -2708,6 +2768,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
       turns,
       host: this.vaultHost(),
       onSchritt,
+      confirm: (action) => this.bestaetigeAktion(action),
+      requireWriteConfirm: Boolean(this.settings.requireWriteConfirm),
       complete: (next) => completeMessages({
         baseUrl: this.settings.baseUrl,
         apiKey: this.settings.apiKey,

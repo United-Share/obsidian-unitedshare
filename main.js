@@ -1556,20 +1556,19 @@ function ohneErwaehnung(rel) {
 // write ist haeufiger und bekommt die gleiche Nachfrage nur, wenn der Aufrufer
 // options.requireWriteConfirm setzt (vom Einstellungs-Schalter, Standard aus).
 //
-// Ohne options.confirm bleibt das Verhalten wie vor dieser Nachfrage -- so
-// bleiben bestehende Aufrufer (z. B. Tests, die keinen Dialog simulieren)
-// unveraendert; die eigentliche Durchsetzung passiert an der Stelle, die den
-// echten Dialog verdrahtet.
+// Fail-closed: ohne options.confirm wird abgelehnt, nicht erlaubt. Ein Aufrufer
+// muss Zustimmung ausdruecklich herstellen -- eine "Bestaetigung", die ohne
+// Gegenstueck immer durchwinkt, waere keine.
 const BESTAETIGUNG_ABGELEHNT = "vom Nutzer abgelehnt";
 
-async function autoBestaetigen() {
-  return true;
+async function keineBestaetigung() {
+  return false;
 }
 
 async function executeVaultAction(action, host, options) {
   const kind = action && action.action;
   const rawPath = action && typeof action.path === "string" ? action.path : "";
-  const confirm = options && typeof options.confirm === "function" ? options.confirm : autoBestaetigen;
+  const confirm = options && typeof options.confirm === "function" ? options.confirm : keineBestaetigung;
   const requireWriteConfirm = Boolean(options && options.requireWriteConfirm);
   try {
     if (!host) throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
@@ -1996,7 +1995,9 @@ function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
   }
 }
 
-async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchritt = null }) {
+async function runVaultInstruction({
+  turns, complete, host, maxSteps = 6, onSchritt = null, confirm = null, requireWriteConfirm = false,
+}) {
   const thread = [];
   for (const turn of turns || []) {
     if (!turn || (turn.role !== "user" && turn.role !== "assistant")) continue;
@@ -2040,7 +2041,7 @@ async function runVaultInstruction({ turns, complete, host, maxSteps = 6, onSchr
     const results = [];
     for (const action of actions) {
       meldeSchritt(onSchritt, "laeuft", action);
-      const ergebnis = await executeVaultAction(action, host);
+      const ergebnis = await executeVaultAction(action, host, { confirm, requireWriteConfirm });
       results.push(ergebnis);
       meldeSchritt(onSchritt, "fertig", action, ergebnis);
     }
@@ -3478,6 +3479,7 @@ const DEFAULT_SETTINGS = {
   timeoutMs: 90000,
   embedUrl: "http://127.0.0.1:11434",
   embedModel: "",
+  requireWriteConfirm: false,
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
@@ -3746,6 +3748,46 @@ class AttachmentModal extends Modal {
 
   onClose() {
     this.contentEl.empty();
+  }
+}
+
+// Fail-closed: schließt der Nutzer das Fenster, ohne zu entscheiden (Escape,
+// Klick daneben), zählt das als Ablehnung -- onClose entscheidet nur, wenn
+// vorher noch nichts entschieden wurde.
+class BestaetigungsModal extends Modal {
+  constructor(app, action) {
+    super(app);
+    this.action = action;
+    this.entschieden = false;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("unitedshare-modal");
+    contentEl.createEl("h2", { text: "Aktion bestätigen" });
+    contentEl.createEl("p", { text: schrittText(this.action) });
+    const pfad = this.action && typeof this.action.path === "string" ? this.action.path : "";
+    if (pfad) contentEl.createEl("p", { cls: "unitedshare-bestaetigung-pfad", text: pfad });
+    const reihe = contentEl.createEl("div", { cls: "unitedshare-bestaetigung-knoepfe" });
+    const ablehnen = reihe.createEl("button", { text: "Ablehnen", attr: { type: "button" } });
+    ablehnen.addEventListener("click", () => this.entscheide(false));
+    const erlauben = reihe.createEl("button", {
+      cls: "mod-cta",
+      text: "Erlauben",
+      attr: { type: "button" },
+    });
+    erlauben.addEventListener("click", () => this.entscheide(true));
+  }
+
+  entscheide(erlaubt) {
+    this.entschieden = true;
+    this.close();
+    if (typeof this.onEntscheidung === "function") this.onEntscheidung(erlaubt);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.entschieden && typeof this.onEntscheidung === "function") this.onEntscheidung(false);
   }
 }
 
@@ -5188,6 +5230,17 @@ class UnitedShareSettingTab extends PluginSettingTab {
         });
       });
 
+    new Setting(containerEl)
+      .setName("Schreiben ebenfalls bestätigen")
+      .setDesc("Lesen, Starten, Beitreten und Abgleich fragen immer nach. Mit diesem Schalter fragt auch Schreiben nach, bevor eine Datei angelegt oder geändert wird.")
+      .addToggle((toggle) => {
+        toggle.setValue(Boolean(this.plugin.settings.requireWriteConfirm));
+        toggle.onChange(async (value) => {
+          this.plugin.settings.requireWriteConfirm = Boolean(value);
+          await this.plugin.saveSettings();
+        });
+      });
+
     this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
     containerEl.createEl("h3", { text: "Dieser Rechner" });
 
@@ -5870,8 +5923,16 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return fsVaultHost(root, { onAktiv: (text) => this.meldeLauf(text) });
   }
 
-  async executeInstruction(action) {
-    return executeVaultAction(action, this.vaultHost());
+  async executeInstruction(action, options) {
+    return executeVaultAction(action, this.vaultHost(), options);
+  }
+
+  async bestaetigeAktion(action) {
+    return new Promise((resolve) => {
+      const modal = new BestaetigungsModal(this.app, action);
+      modal.onEntscheidung = resolve;
+      modal.open();
+    });
   }
 
   async readVaultNote(notePath) {
@@ -6064,6 +6125,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
       turns,
       host: this.vaultHost(),
       onSchritt,
+      confirm: (action) => this.bestaetigeAktion(action),
+      requireWriteConfirm: Boolean(this.settings.requireWriteConfirm),
       complete: (next) => completeMessages({
         baseUrl: this.settings.baseUrl,
         apiKey: this.settings.apiKey,

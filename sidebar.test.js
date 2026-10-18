@@ -240,6 +240,29 @@ function installObsidianMock() {
       if (build) build(dropdown);
       return this;
     }
+    addToggle(build) {
+      const toggle = {
+        value: false,
+        setValue(value) {
+          this.value = Boolean(value);
+          return this;
+        },
+        getValue() {
+          return this.value;
+        },
+        onChange(fn) {
+          this.onChangeFn = fn;
+          return this;
+        },
+        async change(value) {
+          this.value = Boolean(value);
+          if (this.onChangeFn) await this.onChangeFn(this.value);
+        },
+      };
+      this.toggle = toggle;
+      if (build) build(toggle);
+      return this;
+    }
     addButton() {
       return this;
     }
@@ -2357,6 +2380,50 @@ test("ohne Verbrauchsdaten bleibt die Statusleiste leer", async () => {
   plugin.meldeBudget(null, null);
 
   assert.equal(plugin.statusBarItem.children.length, 0, "ein früherer Stand darf nicht stehen bleiben");
+});
+
+test("bestaetigeAktion öffnet eine Modal und löst nach dem Klick auf", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+
+  const erlaubtPromise = plugin.bestaetigeAktion({ action: "run", path: "lauf.py" });
+  const erlaubtModal = mock.modals[mock.modals.length - 1];
+  assert.equal(erlaubtModal.opened, true);
+  assert.equal(find(erlaubtModal.contentEl, (n) => n.tag === "h2").text, "Aktion bestätigen");
+  const erlaubenKnopf = find(erlaubtModal.contentEl, (n) => n.tag === "button" && n.text === "Erlauben");
+  erlaubenKnopf.listeners.click();
+  assert.equal(await erlaubtPromise, true);
+
+  const abgelehntPromise = plugin.bestaetigeAktion({ action: "mesh-join", path: "peers/a.json" });
+  const abgelehntModal = mock.modals[mock.modals.length - 1];
+  const ablehnenKnopf = find(abgelehntModal.contentEl, (n) => n.tag === "button" && n.text === "Ablehnen");
+  ablehnenKnopf.listeners.click();
+  assert.equal(await abgelehntPromise, false);
+});
+
+test("schließt die Modal ohne Entscheidung, zählt das als Ablehnung", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+
+  const promise = plugin.bestaetigeAktion({ action: "sync", peer: "demo", direction: "pull" });
+  const modal = mock.modals[mock.modals.length - 1];
+  modal.onClose();
+  assert.equal(await promise, false);
+});
+
+test("der Schalter für Schreiben-Bestätigung ist aus, bis er eingeschaltet wird", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  assert.equal(plugin.settings.requireWriteConfirm, false);
+
+  plugin.settingTab.display();
+  const setting = lastSetting("Schreiben ebenfalls bestätigen");
+  assert.ok(setting, "Schalter fehlt in den Einstellungen");
+  await setting.toggle.change(true);
+  assert.equal(plugin.settings.requireWriteConfirm, true);
 });
 
 test.after(() => {
