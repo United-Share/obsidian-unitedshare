@@ -1,7 +1,7 @@
 "use strict";
 
 const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { adapterVaultHost, applyComposerAnswer, assertLoopbackEmbedUrl, assertVaultRelative, aufladenAdresse, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, prepareContextFiles, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
+const { adapterVaultHost, applyComposerAnswer, assertLoopbackEmbedUrl, assertVaultRelative, aufladenAdresse, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, prepareContextFiles, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, sidebarPromptOpen, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
 
 // Ein 400 oder eine leere Antwort tritt "ab und zu" auf -- meist ohne offene
 // Entwicklerkonsole. console.error bleibt das Erste, aber das Fehlerprotokoll
@@ -2123,6 +2123,8 @@ function cursorKeyboardCover() {
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    this.statusBarItem = this.addStatusBarItem();
+    this.statusBarItem.addClass("unitedshare-statusbar");
     this.addSettingTab(new UnitedShareSettingTab(this.app, this));
     this.registerView(VIEW_TYPE, (leaf) => new UnitedShareView(leaf, this));
     addIcon(UNITEDSHARE_ICON, markInner());
@@ -2741,7 +2743,22 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
   }
 
+  aktualisiereStatusleiste(limits) {
+    if (!this.statusBarItem) return;
+    this.statusBarItem.empty();
+    const prozent = verbrauchProzent(limits);
+    if (prozent === null) return;
+    this.statusBarItem.createEl("span", {
+      cls: "unitedshare-statusbar-text",
+      text: verbrauchKompakt(limits),
+    });
+    const balken = this.statusBarItem.createEl("div", { cls: "unitedshare-statusbar-bar" });
+    const fuellung = balken.createEl("div", { cls: "unitedshare-statusbar-fill" });
+    fuellung.style.width = `${prozent}%`;
+  }
+
   meldeBudget(limits, usage) {
+    this.aktualisiereStatusleiste(limits);
     const workspace = this.app && this.app.workspace;
     if (!workspace || typeof workspace.getLeavesOfType !== "function") return;
     let leaves = [];

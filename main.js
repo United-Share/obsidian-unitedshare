@@ -413,6 +413,45 @@ function verbrauchZeile(limits, usage) {
   return parts.length ? parts.join(" · ") : "";
 }
 
+// Kurzschreibweise fürs schmale Feld der Obsidian-Statusleiste -- volle
+// Tausenderpunkte wie in verbrauchZeile passen dort nicht hin.
+function kompakteZahl(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  const mitEinheit = (grenze, kuerzel) => {
+    const gerundet = Math.round((abs / grenze) * 10) / 10;
+    const text = gerundet % 1 === 0 ? String(gerundet) : String(gerundet).replace(".", ",");
+    return `${sign}${text}${kuerzel}`;
+  };
+  if (abs >= 1_000_000_000) return mitEinheit(1_000_000_000, "Mrd");
+  if (abs >= 1_000_000) return mitEinheit(1_000_000, "M");
+  if (abs >= 1_000) return mitEinheit(1_000, "K");
+  return `${sign}${Math.round(abs)}`;
+}
+
+// "25M/100M" -- nur wenn beide Seiten bekannt sind. Ohne Limit gibt es
+// nichts, das man neben einem Verbrauch zeigen könnte.
+function verbrauchKompakt(limits) {
+  const source = limits && typeof limits === "object" ? limits : null;
+  if (!source) return "";
+  const verbraucht = finiteZahl(source.verbraucht_tag);
+  const limit = finiteZahl(source.limit_tag);
+  if (verbraucht === null || limit === null) return "";
+  return `${kompakteZahl(verbraucht)}/${kompakteZahl(limit)}`;
+}
+
+// Anteil in Prozent für den Füllstand des Balkens, gekappt auf 0-100.
+function verbrauchProzent(limits) {
+  const source = limits && typeof limits === "object" ? limits : null;
+  if (!source) return null;
+  const verbraucht = finiteZahl(source.verbraucht_tag);
+  const limit = finiteZahl(source.limit_tag);
+  if (verbraucht === null || limit === null || limit <= 0) return null;
+  return Math.min(100, Math.max(0, Math.round((verbraucht / limit) * 100)));
+}
+
 function usageFromMessage(data) {
   const usage = data && data.usage;
   if (!usage || typeof usage !== "object") return null;
@@ -1315,15 +1354,69 @@ async function attachRequestedReads(thread, host) {
   }
 }
 
+// Findet das Ende eines JSON-Objekts, das bei "start" beginnt (nach
+// fuehrendem Leerraum ein "{"). Zaehlt Klammern und erkennt JSON-Strings
+// samt Escape-Zeichen, damit ein Zeichen wie ``` INNERHALB eines Strings
+// nicht als Ende zaehlt. -1, wenn kein vollstaendiges Objekt gefunden wird.
+function jsonObjektEnde(text, start) {
+  let i = start;
+  while (i < text.length && /\s/.test(text[i])) i += 1;
+  if (text[i] !== "{") return -1;
+  let tiefe = 0;
+  let inString = false;
+  let escaped = false;
+  for (; i < text.length; i += 1) {
+    const zeichen = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (zeichen === "\\") escaped = true;
+      else if (zeichen === '"') inString = false;
+      continue;
+    }
+    if (zeichen === '"') inString = true;
+    else if (zeichen === "{") tiefe += 1;
+    else if (zeichen === "}") {
+      tiefe -= 1;
+      if (tiefe === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+// Findet jeden ```unitedshare-Block anhand des wirklichen Endes seines
+// JSON-Objekts statt anhand des naechsten ``` -- ein content-Feld, das
+// selbst einen Codeblock enthaelt (z. B. ein Mermaid-Diagramm in einer
+// geschriebenen Notiz), darf den aeusseren Block nicht vorzeitig schliessen.
+function vaultActionBloecke(text) {
+  const bloecke = [];
+  const oeffnung = /```unitedshare[^\n]*\n/g;
+  let match = oeffnung.exec(text);
+  while (match) {
+    const jsonStart = match.index + match[0].length;
+    const jsonEnde = jsonObjektEnde(text, jsonStart);
+    if (jsonEnde !== -1) {
+      let nach = jsonEnde;
+      while (nach < text.length && /\s/.test(text[nach])) nach += 1;
+      if (text.startsWith("```", nach)) {
+        const ende = nach + 3;
+        bloecke.push({ start: match.index, ende, json: text.slice(jsonStart, jsonEnde) });
+        oeffnung.lastIndex = ende;
+        match = oeffnung.exec(text);
+        continue;
+      }
+    }
+    match = oeffnung.exec(text);
+  }
+  return bloecke;
+}
+
 function parseVaultActions(text) {
   const actions = [];
-  const re = /```unitedshare[^\n]*\n([\s\S]*?)```/g;
   const source = String(text ?? "");
-  let match = re.exec(source);
-  while (match) {
+  for (const block of vaultActionBloecke(source)) {
     let data = null;
     try {
-      data = JSON.parse(match[1].trim());
+      data = JSON.parse(block.json.trim());
     } catch (_err) {
       data = null;
     }
@@ -1349,7 +1442,6 @@ function parseVaultActions(text) {
         content: typeof data.content === "string" ? data.content : "",
       });
     }
-    match = re.exec(source);
   }
   return actions;
 }
@@ -1357,10 +1449,16 @@ function parseVaultActions(text) {
 function stripVaultActions(text) {
   const source = String(text ?? "");
   if (!source.includes("```unitedshare")) return source;
-  return source
-    .replace(/```unitedshare[^\n]*\n[\s\S]*?```/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  const bloecke = vaultActionBloecke(source);
+  if (!bloecke.length) return source;
+  let out = "";
+  let cursor = 0;
+  for (const block of bloecke) {
+    out += source.slice(cursor, block.start);
+    cursor = block.ende;
+  }
+  out += source.slice(cursor);
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // Was der Nutzer waehrend einer Antwort sehen darf.
@@ -1448,9 +1546,31 @@ function ohneErwaehnung(rel) {
   }
 }
 
-async function executeVaultAction(action, host) {
+// Bestaetigung vor gefaehrlichen Aktionen.
+//
+// run, mesh-join und sync loesen auf diesem Rechner einen Prozessstart bzw.
+// einen Dateischreibvorgang ausserhalb des Tresors aus -- und die Aktion
+// selbst kommt aus der Modellantwort, also potenziell aus einer Prompt-
+// Injection. Deshalb fragen alle drei vor der Ausfuehrung ueber options.confirm
+// nach, mit der vollen Aktion als Argument (Pfad, Inhalt, Ziel-Peer, Richtung).
+// write ist haeufiger und bekommt die gleiche Nachfrage nur, wenn der Aufrufer
+// options.requireWriteConfirm setzt (vom Einstellungs-Schalter, Standard aus).
+//
+// Ohne options.confirm bleibt das Verhalten wie vor dieser Nachfrage -- so
+// bleiben bestehende Aufrufer (z. B. Tests, die keinen Dialog simulieren)
+// unveraendert; die eigentliche Durchsetzung passiert an der Stelle, die den
+// echten Dialog verdrahtet.
+const BESTAETIGUNG_ABGELEHNT = "vom Nutzer abgelehnt";
+
+async function autoBestaetigen() {
+  return true;
+}
+
+async function executeVaultAction(action, host, options) {
   const kind = action && action.action;
   const rawPath = action && typeof action.path === "string" ? action.path : "";
+  const confirm = options && typeof options.confirm === "function" ? options.confirm : autoBestaetigen;
+  const requireWriteConfirm = Boolean(options && options.requireWriteConfirm);
   try {
     if (!host) throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
     if (kind === "list") {
@@ -1466,6 +1586,7 @@ async function executeVaultAction(action, host) {
     if (kind === "mesh-join") {
       const rel = assertVaultRelative(rawPath);
       if (typeof host.meshJoin !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
+      if (!(await confirm(action))) return `Ergebnis mesh-join ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
       const output = await host.meshJoin(rel);
       return `Ergebnis mesh-join ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
@@ -1473,6 +1594,7 @@ async function executeVaultAction(action, host) {
       if (typeof host.sync !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const peer = action && typeof action.peer === "string" ? action.peer : "";
       const direction = action && typeof action.direction === "string" ? action.direction : "";
+      if (!(await confirm(action))) return `Ergebnis sync ${direction} ${peer}:\n${BESTAETIGUNG_ABGELEHNT}`;
       const output = await host.sync({ peer, direction });
       return `Ergebnis sync ${direction} ${peer}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
@@ -1501,10 +1623,14 @@ async function executeVaultAction(action, host) {
       if (typeof host.write !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const content = typeof action.content === "string" ? action.content : "";
       if (content.length > WRITE_LIMIT) return `Ergebnis write ${rel}:\nDer Inhalt ist zu lang.`;
+      if (requireWriteConfirm && !(await confirm(action))) {
+        return `Ergebnis write ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
+      }
       await host.write(rel, content);
       return `Ergebnis write ${rel}:\ngeschrieben, ${content.length} Zeichen.`;
     }
     if (typeof host.run !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
+    if (!(await confirm(action))) return `Ergebnis run ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
     const ohneAt = ohneErwaehnung(rel);
     if (!ohneAt) {
       const output = await host.run(rel);
@@ -5353,6 +5479,8 @@ function cursorKeyboardCover() {
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    this.statusBarItem = this.addStatusBarItem();
+    this.statusBarItem.addClass("unitedshare-statusbar");
     this.addSettingTab(new UnitedShareSettingTab(this.app, this));
     this.registerView(VIEW_TYPE, (leaf) => new UnitedShareView(leaf, this));
     addIcon(UNITEDSHARE_ICON, markInner());
@@ -5971,7 +6099,22 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
   }
 
+  aktualisiereStatusleiste(limits) {
+    if (!this.statusBarItem) return;
+    this.statusBarItem.empty();
+    const prozent = verbrauchProzent(limits);
+    if (prozent === null) return;
+    this.statusBarItem.createEl("span", {
+      cls: "unitedshare-statusbar-text",
+      text: verbrauchKompakt(limits),
+    });
+    const balken = this.statusBarItem.createEl("div", { cls: "unitedshare-statusbar-bar" });
+    const fuellung = balken.createEl("div", { cls: "unitedshare-statusbar-fill" });
+    fuellung.style.width = `${prozent}%`;
+  }
+
   meldeBudget(limits, usage) {
+    this.aktualisiereStatusleiste(limits);
     const workspace = this.app && this.app.workspace;
     if (!workspace || typeof workspace.getLeavesOfType !== "function") return;
     let leaves = [];

@@ -92,6 +92,9 @@ function installObsidianMock() {
       this.commands.push(command);
     }
     addSettingTab() {}
+    addStatusBarItem() {
+      return createNode("div");
+    }
     async loadData() {
       return {};
     }

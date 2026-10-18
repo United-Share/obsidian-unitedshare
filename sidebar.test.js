@@ -134,6 +134,9 @@ function installObsidianMock() {
     addSettingTab(tab) {
       this.settingTab = tab;
     }
+    addStatusBarItem() {
+      return createNode("div");
+    }
     async loadData() {
       return {};
     }
@@ -2328,6 +2331,32 @@ test("ein leeres eigenes Format speichert nichts und lässt das Feld stehen", as
   assert.equal(calls, 0);
   assert.equal(plugin.settings.bildBreite, vorher);
   assert.equal(view.questionEl.value, "   ");
+});
+
+test("meldeBudget zeigt Verbrauch und Limit als Text und Balken in der Statusleiste", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+
+  plugin.meldeBudget({ verbraucht_tag: 25000000, limit_tag: 100000000 }, null);
+
+  const text = find(plugin.statusBarItem, (n) => n.classList.has("unitedshare-statusbar-text"));
+  const fuellung = find(plugin.statusBarItem, (n) => n.classList.has("unitedshare-statusbar-fill"));
+  assert.ok(text, "Text im Statusleisten-Element fehlt");
+  assert.equal(text.text, "25M/100M");
+  assert.ok(fuellung, "Balken im Statusleisten-Element fehlt");
+  assert.equal(fuellung.style.width, "25%");
+});
+
+test("ohne Verbrauchsdaten bleibt die Statusleiste leer", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+
+  plugin.meldeBudget({ verbraucht_tag: 25000000, limit_tag: 100000000 }, null);
+  plugin.meldeBudget(null, null);
+
+  assert.equal(plugin.statusBarItem.children.length, 0, "ein früherer Stand darf nicht stehen bleiben");
 });
 
 test.after(() => {

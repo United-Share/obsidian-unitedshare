@@ -17,6 +17,7 @@ const {
   readIndexedOrHidden,
   runVaultFile,
   runVaultInstruction,
+  stripVaultActions,
 } = require("./unitedshare-core");
 
 function fence(action) {
@@ -43,6 +44,35 @@ test("parseVaultActions liest nur Blöcke der Antwort", () => {
   ]);
   assert.deepEqual(parseVaultActions("Nur ein Satz."), []);
   assert.deepEqual(parseVaultActions(fence({ action: "bash", path: "x", command: "rm -rf /" })), []);
+});
+
+// ANLASS (2026-10-18): Eine Notiz mit einem eigenen Mermaid-Block im
+// content-Feld schlug fehl. Die alte Regex suchte nicht-gierig den naechsten
+// ``` nach der Oeffnung -- traf also den inneren Zaun des Mermaid-Blocks
+// statt des echten Endes, das JSON brach mittendrin ab, geschrieben wurden
+// nur drei Zeichen.
+test("ein Schreib-Inhalt mit eigenem Codeblock bricht den äußeren Block nicht ab", () => {
+  const inhalt = [
+    "```mermaid",
+    "graph TD",
+    "A[Notiz] -->|read| B(Aktion)",
+    "```",
+    "",
+    "![[image_description]]",
+    "",
+    "## Titel",
+    "Text danach.",
+  ].join("\n");
+  const text = fence({ action: "write", path: "x.md", content: inhalt });
+  assert.deepEqual(parseVaultActions(text), [
+    { action: "write", path: "x.md", content: inhalt },
+  ]);
+});
+
+test("stripVaultActions entfernt den ganzen Block, auch wenn der Inhalt eigene Zäune trägt", () => {
+  const inhalt = "```mermaid\ngraph TD\nA-->B\n```\n\n![[bild]]";
+  const text = `Vorher.\n${fence({ action: "write", path: "x.md", content: inhalt })}\nNachher.`;
+  assert.equal(stripVaultActions(text), "Vorher.\n\nNachher.");
 });
 
 test("ein Block im Dateiinhalt wird nicht als Aktion gelesen, wenn die Antwort keinen Block hat", async () => {
@@ -514,6 +544,117 @@ test("Prompt und Readme nennen Beitritt und Abgleich und lassen den Einstellungs
   assert.ok(readme.includes(`Release-Tag \`${manifestVersion}\``),
     `die Anleitung nennt nicht ${manifestVersion}`);
   assert.equal(readme.includes("Das Plugin legt kein Paar an."), true);
+});
+
+test("run, mesh-join und sync fragen vor der Ausführung nach Bestätigung", async () => {
+  const { parent, root } = tempVault();
+  try {
+    fs.writeFileSync(path.join(root, "lauf.py"), "print('lief')\n");
+    const confirmCalls = [];
+    const host = {
+      async run() {
+        throw new Error("run darf nach Ablehnung nicht starten");
+      },
+      async meshJoin() {
+        throw new Error("meshJoin darf nach Ablehnung nicht starten");
+      },
+      async sync() {
+        throw new Error("sync darf nach Ablehnung nicht starten");
+      },
+    };
+    const confirm = async (action) => {
+      confirmCalls.push(action);
+      return false;
+    };
+
+    const run = await executeVaultAction({ action: "run", path: "lauf.py" }, host, { confirm });
+    assert.match(run, /vom Nutzer abgelehnt/);
+
+    const meshJoin = await executeVaultAction(
+      { action: "mesh-join", path: "peers/a.json" },
+      host,
+      { confirm },
+    );
+    assert.match(meshJoin, /vom Nutzer abgelehnt/);
+
+    const sync = await executeVaultAction(
+      { action: "sync", peer: "demo", direction: "pull" },
+      host,
+      { confirm },
+    );
+    assert.match(sync, /vom Nutzer abgelehnt/);
+
+    assert.equal(confirmCalls.length, 3);
+    assert.equal(confirmCalls[0].action, "run");
+    assert.equal(confirmCalls[0].path, "lauf.py");
+    assert.equal(confirmCalls[1].action, "mesh-join");
+    assert.equal(confirmCalls[1].path, "peers/a.json");
+    assert.equal(confirmCalls[2].action, "sync");
+    assert.equal(confirmCalls[2].peer, "demo");
+    assert.equal(confirmCalls[2].direction, "pull");
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("run, mesh-join und sync laufen nach Zustimmung ganz normal weiter", async () => {
+  const { parent, root } = tempVault();
+  const seen = [];
+  const spawnImpl = (cmd, args) => {
+    seen.push({ cmd, args });
+    return spawnOk("code 0\nlief\n")();
+  };
+  try {
+    fs.writeFileSync(path.join(root, "lauf.py"), "print('lief')\n");
+    const host = fsVaultHost(root, { spawnImpl });
+    const confirm = async () => true;
+    const run = await executeVaultAction({ action: "run", path: "lauf.py" }, host, { confirm });
+    assert.match(run, /lief/);
+    assert.equal(seen.length, 1);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("write bleibt ohne Einstellungs-Schalter unbestätigt, mit Schalter braucht es Zustimmung", async () => {
+  const { parent, root } = tempVault();
+  try {
+    const host = fsVaultHost(root);
+    let confirmCalls = 0;
+    const confirmTrue = async () => {
+      confirmCalls += 1;
+      return true;
+    };
+
+    const ohneSchalter = await executeVaultAction(
+      { action: "write", path: "ohne.txt", content: "A" },
+      host,
+      { confirm: confirmTrue },
+    );
+    assert.match(ohneSchalter, /geschrieben/);
+    assert.equal(confirmCalls, 0, "ohne requireWriteConfirm darf confirm nicht laufen");
+    assert.equal(fs.readFileSync(path.join(root, "ohne.txt"), "utf8"), "A");
+
+    const confirmFalse = async () => false;
+    const abgelehnt = await executeVaultAction(
+      { action: "write", path: "mit.txt", content: "B" },
+      host,
+      { confirm: confirmFalse, requireWriteConfirm: true },
+    );
+    assert.match(abgelehnt, /vom Nutzer abgelehnt/);
+    assert.equal(fs.existsSync(path.join(root, "mit.txt")), false);
+
+    const zugestimmt = await executeVaultAction(
+      { action: "write", path: "mit.txt", content: "B" },
+      host,
+      { confirm: confirmTrue, requireWriteConfirm: true },
+    );
+    assert.match(zugestimmt, /geschrieben/);
+    assert.equal(confirmCalls, 1);
+    assert.equal(fs.readFileSync(path.join(root, "mit.txt"), "utf8"), "B");
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("cleanProcessEnv lässt Schlüssel weg", () => {

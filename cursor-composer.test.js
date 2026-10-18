@@ -253,6 +253,9 @@ function installComposerObsidian() {
     addRibbonIcon() {}
     addCommand() {}
     addSettingTab() {}
+    addStatusBarItem() {
+      return composerNode("div");
+    }
     registerEvent(ref) {
       this.events = this.events || [];
       this.events.push(ref);

@@ -551,6 +551,31 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   display: none;
 }
 
+.unitedshare-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.unitedshare-statusbar-text {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.unitedshare-statusbar-bar {
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.unitedshare-statusbar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+}
+
 .unitedshare-loader {
   display: none;
   align-items: center;
