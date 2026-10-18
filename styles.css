@@ -345,6 +345,24 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
 
 .unitedshare-toolbar-actions {
   gap: 4px;
+  flex-wrap: wrap;
+  flex-shrink: 1;
+  max-width: 100%;
+  justify-content: flex-end;
+}
+
+.unitedshare-sidebar button.unitedshare-nav-btn.is-labeled {
+  width: auto;
+  height: auto;
+  min-width: 0;
+  padding: 2px 6px;
+  gap: 4px;
+}
+
+.unitedshare-sidebar .unitedshare-nav-caption {
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .unitedshare-sidebar button.unitedshare-nav-btn {
@@ -518,6 +536,21 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   display: none;
 }
 
+.unitedshare-budget {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  padding: 0 2px 4px;
+}
+
+.unitedshare-budget.is-leer {
+  color: var(--text-error);
+}
+
+.unitedshare-budget.is-ruhend {
+  display: none;
+}
+
 .unitedshare-loader {
   display: none;
   align-items: center;
@@ -576,6 +609,138 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   margin: 6px 2px 0;
 }
 
+.unitedshare-statusleiste {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 2px 0;
+}
+
+.unitedshare-statusleiste .unitedshare-mesh {
+  display: contents;
+}
+
+.unitedshare-statusleiste .unitedshare-pill {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.unitedshare-statusleiste a.unitedshare-pill:hover {
+  color: var(--text-normal);
+}
+
+.unitedshare-bild {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0 0;
+  align-items: flex-start;
+}
+
+.unitedshare-bild img {
+  max-width: min(100%, 360px);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.unitedshare-bild-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+.unitedshare-bild-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.unitedshare-bild.is-laden {
+  width: min(100%, 360px);
+  aspect-ratio: var(--unitedshare-bild-ratio, 1);
+}
+
+.unitedshare-bild-platz {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 48px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+
+.unitedshare-mehr-wrap {
+  position: relative;
+}
+
+.unitedshare-bild-anchor {
+  position: relative;
+  flex: 0 0 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+}
+
+.unitedshare-mehr-menu,
+.unitedshare-bild-menu {
+  display: none;
+  position: absolute;
+  bottom: 28px;
+  inset-inline-end: 0;
+  z-index: 20;
+  min-width: 180px;
+  max-width: 280px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+}
+
+.unitedshare-mehr-menu.is-open,
+.unitedshare-bild-menu.is-open {
+  display: block;
+}
+
+.unitedshare-mehr-menu .unitedshare-nav-btn {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.unitedshare-bild-formate,
+.unitedshare-bild-eigen {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.unitedshare-bild-eigen {
+  margin-top: 6px;
+}
+
+.unitedshare-bild-format,
+.unitedshare-bild-eigen input {
+  min-width: 0;
+}
+
 .unitedshare-mesh h3 {
   margin: 12px 2px 4px;
   font-size: var(--font-ui-medium);
@@ -621,6 +786,7 @@ body.is-mobile .unitedshare-welcome,
 }
 
 .unitedshare-sidebar.is-keyboard-open .unitedshare-hint,
+.unitedshare-sidebar.is-keyboard-open .unitedshare-statusleiste,
 .unitedshare-sidebar.is-keyboard-open .unitedshare-mesh {
   display: none;
 }
@@ -856,8 +1022,75 @@ body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
 }
 
 .unitedshare-schritt.is-abgebrochen .unitedshare-schritt-text {
-  text-decoration: line-through;
-  text-decoration-color: var(--text-error);
+  /* Eine Shorthand statt der separaten text-decoration-color-Zeile: die
+     Plugin-Pruefung meldet "text-decoration" sonst als von Obsidian 1.4.5
+     nur teilweise unterstuetzt (text-decoration-color als eigene
+     Deklaration ist die weniger kompatible Form). */
+  text-decoration: line-through var(--text-error);
+}
+
+.unitedshare-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px 0;
+}
+
+.unitedshare-attachments:empty {
+  display: none;
+}
+
+.unitedshare-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+}
+
+.unitedshare-attachment-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unitedshare-attachment-remove {
+  margin: 0;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.unitedshare-message-files {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.unitedshare-attach-filter {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.unitedshare-attach-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.unitedshare-attach-item {
+  text-align: left;
 }
 
 @keyframes unitedshare-schritt-puls {

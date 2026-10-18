@@ -9,7 +9,9 @@ Selbst betreiben, in dieser Reihenfolge:
 3. [Console](https://console.unitedshare.io/)
 4. Dieses Plugin aus den Community-Plugins, danach den Schlüssel über [Zugang für Obsidian](https://unitedshare.ai/app/?q=obsidian)
 
-Der Auftrag geht an `https://api.unitedshare.ai/v1/messages` und enthält nur Textblöcke. Datenschutz: https://unitedshare.ai/privacy. Bedingungen: https://unitedshare.ai/terms.
+Der Auftrag aus der Seitenleiste geht an `https://api.unitedshare.ai/v1/chat/completions` und enthält nur Textblöcke. Datenschutz: https://unitedshare.ai/privacy. Bedingungen: https://unitedshare.ai/terms.
+
+Ein Bild ist ein eigener Auftrag, `POST /v1/images/generations`, Modell `reemax-image`.
 
 Die rechte Spalte übernimmt die Chat-Interaktion von [Claudian](https://github.com/YishenTu/claudian) (Yishen Tu, MIT): Gespräch, Tabs und `@`-Erwähnung einer Tresor-Datei. Die erwähnte Notiz wird gelesen und als Textblock `<linked_content>` mitgeschickt. Der Auftrag bittet um einen Strom. Jedes Textstück schreibt die Seitenleiste sofort. Kommt die Antwort in einem JSON-Körper, erscheint der Text in dem Moment, in dem der Körper da ist. Das Gateway führt für das Hausmodell keine Werkzeuge aus. Das Plugin liest eine benannte Datei auf diesem Rechner und schickt den Text mit. Legt die Antwort zu einer Anlagebitte den Inhalt in einen Codeblock `python`, `javascript` oder `bash`, schreibt das Plugin die Datei in den offenen Tresor. Eine Startbitte startet `.py`, `.js`, `.mjs` und `.sh` dort. Ein Block `unitedshare` bleibt für Lesen, Listen, Schreiben und Starten, wenn der Pfad nur in der Antwort steht. Der Pfad bleibt relativ im Tresor. Claudians Agent-SDK und MCP gehören nicht zu diesem Plugin.
 
@@ -43,13 +45,18 @@ Andere Kennungen aus dem Katalog bleiben in Obsidian unsichtbar, auch wenn der Z
 
 Nach dem Einschalten öffnet UnitedShare eine Ansicht in der rechten Seitenleiste. Das Symbol **UnitedShare** in der linken Leiste und der Befehl **UnitedShare in der Seitenleiste** holen dieselbe Ansicht nach vorn. Die Ansicht ist eine Chat-Spalte: die Gesprächsnummer und die Symbole für neuen Tab, neues Gespräch und Verlauf stehen über dem Eingabefeld, der Verlauf darüber, der Willkommenstext **UnitedShare** solange das Gespräch leer ist.
 
+Am Eingabefeld stehen das Modell, **Fragen** und **...**. Notiz, Einfügen, Mermaid, Link, Antwort und Bild liegen hinter den drei Punkten. In den Einstellungen lässt sich jedes Werkzeug in die Leiste oder ins Menü legen.
+
 Die Werkzeuge laufen auf diesem Rechner, mit den Funktionen des offenen Tresors. Das Gateway führt sie nicht aus.
 
-- **Aktive Notiz** setzt den Pfad der offenen Notiz als `@"Pfad"` in das Feld.
-- `@Pfad` und `@"Pfad mit Leerzeichen"` lesen die Notiz und schicken den Text mit.
+- **Notiz** hängt die offene Markdown-Notiz an das Gespräch. Liegt keine offene Notiz, hängt sie schon an, oder liegt der Pfad außerhalb des Tresors, öffnet sich die Auswahl. Frage und Notiz werden auf diesem Rechner eingebettet. An das Modell gehen die ausgewählten Stellen, nicht die ganze Datei. Fehlt das Embedding oder liegt kein passendes Modell, geht die Frage nicht hinaus.
+- **Einfügen** setzt den Text aus der Zwischenablage an den Cursor der offenen Notiz. Ohne offene Notiz landet er im Eingabefeld.
+- **Mermaid** setzt einen Mermaid-Block an den Cursor. Ein Block in der Zwischenablage hat Vorrang, danach einer in der letzten Antwort, sonst ein kleines Startbild.
+- **Link** verknüpft die offene Notiz und die erste angehängte Notiz in beide Richtungen. In der offenen Notiz steht der Wikilink am Cursor. In der anderen Notiz wird er nur angehängt, wenn er dort noch fehlt.
+- `@Pfad` und `@"Pfad mit Leerzeichen"` lesen die Notiz und schicken den Text mit. Sie werden nicht eingebettet.
 - **Lesen** und **Listen** nutzen den Tresor. Der Pfad bleibt relativ, ohne `..`. Dateien und Ordner mit führendem Punkt, die Obsidian aus dem Index lässt, liest und listet die Desktop-App vom Datenträger im selben Tresor. Ein Beispiel ist `.cortex/endpoints.md`. `.obsidian`, `.git` und `.trash` bleiben zu.
 - **Schreiben** legt eine Datei an oder ändert sie. Eine Anlagebitte mit einem Codeblock `python`, `javascript` oder `bash` speichert diesen Inhalt unter dem genannten Pfad.
-- **Starten** führt auf dem Desktop `.py`, `.js`, `.mjs` und `.sh` im Tresor aus.
+- **Starten** führt auf dem Desktop `.py`, `.js`, `.mjs` und `.sh` im Tresor aus. Eine Aufgabe, die noch läuft und nichts ausgibt, bleibt bis zur langen Frist offen. Eine ausdrücklich kurze Frist beendet sie trotzdem.
 - Ein Block `unitedshare` mit `read`, `list`, `write` oder `run` tut dasselbe, wenn der Pfad in der Antwort steht.
 - Über der Antwort steht eine Kette verbundener Punkte: was das Modell gerade tut, welche Dateien es liest oder schreibt und was dabei herauskam. Der erste Punkt ist immer das Nachdenken — gerade bei einer Frage ohne Werkzeug dauert das am längsten. Gezeigt wird nur der Zustand, nicht der Gedankengang: den liefert das Modell nicht mit.
 - Der Block selbst erscheint nie im Gespräch, auch nicht während die Antwort läuft oder wenn ein Schritt fehlschlägt. Er ist Maschinenkommunikation.
@@ -58,7 +65,10 @@ Die Werkzeuge laufen auf diesem Rechner, mit den Funktionen des offenen Tresors.
 - **Beitreten** nimmt eine Einladungs- oder Empfangsdatei im Tresor an. Das Plugin startet dafür nur `reemax mesh join` mit diesem relativen Pfad.
 - **Abgleich** startet `reemax sync push` oder `reemax sync pull` für einen Namen, der mit `reemax sync pair` schon eingerichtet ist. Beide Richtungen zugleich gibt es nicht. `reemax mesh sync` prüft den Tunnel und kopiert keine Dateien. Das Plugin legt kein Paar an.
 - **Direktes Netz** erscheint, wenn der Schlüssel gespeichert ist und reemax auf diesem Rechner liegt. Es nennt Modell, Agent und Oberfläche und die Gegenstellen, die schon eingerichtet sind. Fehlt die Einrichtung, steht das dort. Das Firmennetz bleibt getrennt.
-- **In die Notiz** schreibt die letzte Frage und Antwort an die Cursor-Position der aktiven Notiz.
+- **Antwort** schreibt die letzte Frage und Antwort an die Cursor-Position der aktiven Notiz.
+- **Bild** öffnet ein Fenster mit den Formaten 1:1, 4:3, 3:2, 16:9, 9:16 und 21:9. Ein eigenes Format nimmt png, jpg oder gif mit Breite und Höhe. Solange das Bild entsteht, steht ein Platzhalter im gewählten Seitenverhältnis. Ein kleines Symbol „In die Notiz“ schreibt die Datei aus `UnitedShare/bilder` als Einbettung in die offene Notiz.
+- In den Einstellungen steht **Token aufladen**. Tag und Monat kommen vom Dienst. Nachkauf und Planwechsel stehen auf der Verbrauchsseite.
+- Unter dem Eingabefeld steht das Kontextfenster als verbrauchte Token / Tageslimit, sobald der Dienst beide Zahlen schickt. Ein Konto ohne Tageslimit zeigt nur den Verbrauch. Fehlen die Zahlen, bleibt die Zeile leer. Ist das Tageslimit oder das Monatslimit aufgebraucht, erscheint eine Meldung. Eine Woche zeigt das Plugin nur, wenn der Dienst sie mitliefert. Ein erfolgreicher Aufruf nennt die Token dieses Aufrufs nur, wenn der Dienst eine volle Zählung schickt.
 - `zeige die Graphansicht` oder `öffne den Graphen` öffnet die Graphansicht auf diesem Gerät. `zeige die lokale Graphansicht` und `Graphansicht der Notiz` öffnen den Graphen der offenen Notiz. Diese Sätze gehen nicht ans Modell.
 - Ist die Seitenleiste zugeklappt, steht unten im Fenster die UnitedShare-Eingabe. Ein Rechtsklick bietet UnitedShareAI. Enter schickt den Auftrag. Eine Markierung wird nur durch die Antwort ersetzt. Ohne Markierung wird nur die Antwort am Cursor eingefügt.
 
@@ -68,7 +78,7 @@ Befehl: **UnitedShare fragen**. Eine Markierung wird zur Frage und durch Frage p
 
 ### Gespräche
 
-Jedes Gespräch liegt als Datei in `.vault/chats` im Tresor, eine Datei je Gespräch, im JSON-Format. Geschrieben wird nach jeder Antwort, nicht erst beim Abschließen — ein Absturz mittendrin kostet damit nichts.
+Jedes Gespräch liegt als Datei in `.vault/chats` im Tresor, eine Datei je Gespräch, im JSON-Format. Geschrieben wird nach jeder Antwort und nach jedem Bild, nicht erst beim Abschließen. Die Bilddatei liegt im Bildordner, voreingestellt `UnitedShare/bilder`. Die Gesprächsdatei speichert den Pfad im Tresor, und nach einem Neuladen liest das Plugin die Datei wieder ein. Ein Absturz mittendrin kostet damit nichts.
 
 Beim Öffnen der Ansicht kommen die Gespräche zurück: offene in die Reiter, abgeschlossene ins Verlaufsmenü. Nach einem Neustart von Obsidian lässt sich einfach weiterschreiben, und das Modell bekommt den bisherigen Verlauf mit.
 
@@ -95,7 +105,10 @@ Den Pfad wählt dabei das Modell. Nennt die Frage keinen, schlägt die Antwort e
 
 Eine Ausnahme ist der Weg ohne Protokollblock: Erkennt das Plugin eine Anlagebitte an der Frage selbst, nimmt es ausschließlich Pfade, die in der Frage stehen, und nur `.py`, `.js`, `.mjs` und `.sh`.
 
-**Netz.** Ein Ziel: der Endpunkt aus den Einstellungen, voreingestellt `api.unitedshare.ai`. Dorthin geht die Frage als Text. Keine Telemetrie, keine zweite Adresse.
+**Netz.** Zwei Ziele, beide hier genannt. Keine Telemetrie, keine weitere Adresse.
+
+1. Der Endpunkt aus den Einstellungen, voreingestellt `api.unitedshare.ai`. Dorthin geht die Frage als Text, zusammen mit den Stellen, die das lokale Embedding ausgewählt hat.
+2. Das lokale Embedding auf diesem Rechner, voreingestellt `http://127.0.0.1:11434`, Pfade `/api/tags` und `/api/embed`. Erlaubt sind nur `127.0.0.1`, `localhost` und `::1`. Der API-Schlüssel geht dorthin nicht. Liegt keines von `bge-m3`, `embeddinggemma`, `nomic-embed-text` oder `mxbai-embed-large`, oder antwortet der Dienst nicht, geht die Frage nicht an das Modell.
 
 ## Prüfen
 
@@ -117,4 +130,4 @@ Ein Tag `1.2.3` ohne `v`, gleich der Version in `manifest.json`, startet `.githu
 
 ## Stand
 
-Anbieter: United Share GmbH. Lizenz: MIT. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.2.5`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare
+Anbieter: United Share GmbH. Lizenz: MIT. Öffentliches Repo: https://github.com/United-Share/obsidian-unitedshare. Release-Tag `1.2.12`, ohne `v`. Community-Seite: https://community.obsidian.md/plugins/unitedshare

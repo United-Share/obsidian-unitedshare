@@ -5,6 +5,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   buildAnthropicBody,
+  buildChatBody,
   completeMessages,
   parseAnthropicContent,
   coveredByKeyboard,
@@ -171,6 +172,51 @@ test("der Körper bleibt ein Textauftrag ohne Werkzeuge und bittet um einen Stro
   assert.match(blocks[1].text, /linked_content path="Notizen\/Heute.md"/);
   assert.match(blocks[1].text, /Stand: grün/);
   assert.equal(blocks.some((block) => block.type === "image" || block.type === "tool_use"), false);
+});
+
+test("buildAnthropicBody schickt einen Dateianhang nur im neuesten Turn erneut (LibreChat resendFiles=false Muster)", () => {
+  // Live auf netcup gemessen (2026-10-18): derselbe Anhang (Willkommen.md,
+  // 3,2 MB) blieb ueber mehrere Turns am user-Eintrag haengen und wurde bei
+  // jeder neuen Frage erneut mitgeschickt -- litellm.ContextWindowExceededError
+  // bei ~12,25 Mio. Tokens. LibreChats BaseClient.getModelBoundStoredMessages
+  // loescht bei resendFiles===false die Felder files/attachments aus jeder
+  // vergangenen Nachricht (omitUnreplayedHistoricalFiles) und laesst nur die
+  // gerade gesendete Nachricht ihren echten Dateitext behalten. Das bilden wir
+  // hier als Standardverhalten nach, ohne eigene Einstellung: der Anhang
+  // reist nur mit dem Turn, der ihn gerade (neu) mitbringt.
+  const grosseDatei = { path: "Willkommen.md", text: "X".repeat(5000) };
+  const turns = [
+    { role: "user", content: "Erste Frage", files: [grosseDatei] },
+    { role: "assistant", content: "Antwort eins." },
+    { role: "user", content: "Zweite Frage", files: [grosseDatei] },
+    { role: "assistant", content: "Antwort zwei." },
+    { role: "user", content: "wach?", files: [grosseDatei] },
+  ];
+  const body = buildAnthropicBody({ model: "rmxos-mega2026.1", system: "s", turns });
+  const userMessages = body.messages.filter((message) => message.role === "user");
+  assert.equal(userMessages.length, 3);
+  // Die beiden aelteren user-Turns verlieren den Dateianhang vollstaendig.
+  assert.equal(userMessages[0].content.length, 1);
+  assert.equal(userMessages[0].content.some((block) => /linked_content/.test(block.text)), false);
+  assert.equal(userMessages[1].content.length, 1);
+  assert.equal(userMessages[1].content.some((block) => /linked_content/.test(block.text)), false);
+  // Nur der neueste Turn behaelt den echten Dateitext.
+  assert.equal(userMessages[2].content.length, 2);
+  assert.match(userMessages[2].content[1].text, /linked_content path="Willkommen\.md"/);
+});
+
+test("buildChatBody schickt einen Dateianhang nur im neuesten Turn erneut (LibreChat resendFiles=false Muster)", () => {
+  const grosseDatei = { path: "Willkommen.md", text: "X".repeat(5000) };
+  const turns = [
+    { role: "user", content: "Erste Frage", files: [grosseDatei] },
+    { role: "assistant", content: "Antwort eins." },
+    { role: "user", content: "wach?", files: [grosseDatei] },
+  ];
+  const body = buildChatBody({ model: "rmxos-mega2026.1", turns });
+  const userMessages = body.messages.filter((message) => message.role === "user");
+  assert.equal(userMessages.length, 2);
+  assert.equal(userMessages[0].content, "Erste Frage");
+  assert.match(userMessages[1].content, /^wach\?\n\n<linked_content path="Willkommen\.md">/);
 });
 
 test("eine fehlende Erwähnung bleibt ein Textblock und wird nicht zum Werkzeug", () => {

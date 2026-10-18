@@ -80,6 +80,26 @@ test("geschlossener und danach angefangener Block", () => {
   assert.equal(visibleStreamText(text), "Erst\n\ndann");
 });
 
+test("der Platzhalter ist kein Antworttext", () => {
+  assert.equal(visibleStreamText("[Das Modell hat nichts geliefert.]"), "");
+  assert.equal(
+    visibleStreamText("Hallo.\n\n[Das Modell hat nichts geliefert.]\n\nWeiter."),
+    "Hallo.\n\nWeiter.",
+  );
+  assert.equal(visibleStreamText("Es ist 14:23 Uhr."), "Es ist 14:23 Uhr.");
+});
+
+test("eine entkommene Mermaid-Zeile wird ein Zaun und bleibt es", () => {
+  const fence = "```mermaid\nflowchart TD\n  A-->B\n```";
+  assert.equal(visibleStreamText(fence), fence);
+  const python = "```python\nprint(\"\\n\")\n```";
+  assert.equal(visibleStreamText(python), python);
+  const dump = "mermaid\\nflowchart TD\\n  W[\\\"Willkommen.md<br/>(Inhaltsverzeichnis)\\\"]\\n```}";
+  const once = visibleStreamText(dump);
+  assert.equal(once, "```mermaid\nflowchart TD\n  W[\"Willkommen.md<br/>(Inhaltsverzeichnis)\"]\n```");
+  assert.equal(visibleStreamText(once), once);
+});
+
 test("die Zaunsprache darf Zusätze tragen", () => {
   // parseVaultActions erlaubt ```unitedshare mit Anhaengseln. Was dort als
   // Protokoll gilt, muss hier auch verschwinden -- sonst zeigt die Blase,

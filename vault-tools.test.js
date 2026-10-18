@@ -503,7 +503,7 @@ test("eine mesh-join-Antwort startet nur den lokalen Beitritt", async () => {
 test("Prompt und Readme nennen Beitritt und Abgleich und lassen den Einstellungssatz", () => {
   const src = fs.readFileSync(path.join(__dirname, "main.src.js"), "utf8");
   const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
-  const settings = 'text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Aktive Notiz setzt @\\"Pfad\\" ins Feld. In die Notiz schreibt Frage und Antwort an den Cursor."';
+  const settings = 'text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Notiz hängt die offene Notiz an. Einfügen setzt die Zwischenablage an den Cursor. Antwort schreibt Frage und Antwort an den Cursor."';
   assert.equal(src.includes(settings), true);
   assert.equal(src.includes('{"action":"mesh-join","path":"relativer/pfad.json"}'), true);
   assert.equal(src.includes('{"action":"sync","peer":"name","direction":"pull"}'), true);

@@ -95,6 +95,10 @@ function createNode(tag) {
   };
 }
 
+function knopf(view, label) {
+  return find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === label);
+}
+
 function find(node, pred) {
   if (pred(node)) return node;
   for (const child of node.children || []) {
@@ -142,11 +146,18 @@ function installObsidianMock() {
       this.contentEl = createNode("div");
     }
   }
+  const modals = [];
   class Modal {
     constructor(app) {
       this.app = app;
       this.contentEl = createNode("div");
+      modals.push(this);
     }
+    open() {
+      this.opened = true;
+      if (typeof this.onOpen === "function") this.onOpen();
+    }
+    close() {}
   }
   class PluginSettingTab {
     constructor() {
@@ -326,6 +337,7 @@ function installObsidianMock() {
     },
     MarkdownView,
     settings,
+    modals,
     restore() {
       Module.prototype.require = original;
     },
@@ -454,9 +466,9 @@ test("die Seitenansicht stellt die Frage und schreibt Frage plus Antwort in die 
   const composer = find(view.contentEl, (node) => node.classList.has("unitedshare-input-wrapper"));
   const badge = find(view.contentEl, (node) => node.classList.has("unitedshare-tab-badge") && node.text === "1");
   const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
-  const insertButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "In die Notiz");
+  const insertButton = knopf(view, "Antwort");
   const newConversation = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Neues Gespräch");
-  const privacy = find(view.contentEl, (node) => node.tag === "a" && node.attrs.href === "https://unitedshare.ai/privacy");
+  assert.equal(find(view.contentEl, (node) => node.tag === "a" && node.attrs.href === "https://unitedshare.ai/privacy"), null);
   assert.equal(find(view.contentEl, (node) => node.tag === "h3"), null);
   assert.ok(welcome);
   assert.ok(lockup);
@@ -474,7 +486,10 @@ test("die Seitenansicht stellt die Frage und schreibt Frage plus Antwort in die 
   assert.equal(askButton.attrs["data-icon"], "arrow-up");
   assert.equal(newConversation.attrs["data-icon"], "square-pen");
   assert.ok(insertButton);
+  await plugin.settingTab.display();
+  const privacy = find(plugin.settingTab.statusHost, (node) => node.tag === "a" && node.attrs.href === "https://unitedshare.ai/privacy");
   assert.ok(privacy);
+  assert.equal(privacy.text, "Datenschutz");
 
   view.questionEl.value = "   ";
   await askButton.listeners.click();
@@ -538,7 +553,7 @@ test("während die Frage läuft sind die Knöpfe aus, das Feld leer und das Zeic
   const pending = view.askButton.listeners.click();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(view.questionEl.value, "");
-  const labels = ["Fragen", "In die Notiz", "Aktive Notiz", "Neuer Tab", "Neues Gespräch", "Verlauf"];
+  const labels = ["Fragen", "Antwort", "Notiz", "Einfügen", "Mermaid", "Link", "Neuer Tab", "Neues Gespräch", "Verlauf"];
   for (const label of labels) {
     const button = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === label);
     assert.equal(button.disabled, true, label);
@@ -844,7 +859,7 @@ test("README, Stil und gebündelte main.js enthalten die Seitenleiste", () => {
   assert.equal(main.includes("open-unitedshare-sidebar"), true);
 });
 
-test("eine erwähnte Notiz geht als Text mit, die aktive Notiz wird als @-Pfad eingesetzt", async () => {
+test("eine erwähnte Notiz geht als Text mit, Notiz hängt die offene Notiz an", async () => {
   const app = makeApp();
   const reads = [];
   app.vault = {
@@ -867,11 +882,20 @@ test("eine erwähnte Notiz geht als Text mit, die aktive Notiz wird als @-Pfad e
   const view = plugin.registeredViews[0].factory({ app });
   await view.onOpen();
   app.workspace.activeView = { file: { path: "Notizen/Heute.md" }, editor: {} };
-  const attach = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Aktive Notiz");
-  assert.ok(attach, "Schaltfläche Aktive Notiz fehlt");
+  const attach = knopf(view, "Notiz");
+  assert.ok(attach, "Schaltfläche Notiz fehlt");
+  assert.equal(attach.classList.has("is-labeled"), true);
   await attach.listeners.click();
-  assert.equal(view.questionEl.value, '@"Notizen/Heute.md"');
+  assert.equal(view.questionEl.value, "");
+  assert.deepEqual(view.attachments, ["Notizen/Heute.md"]);
+  const chip = find(view.contentEl, (node) => node.classList.has("unitedshare-attachment-path"));
+  assert.equal(chip.text, "Notizen/Heute.md");
 
+  plugin.embedForFrontier = async () => {
+    throw new Error("Eine Erwähnung wird nicht eingebettet.");
+  };
+  view.attachments = [];
+  view.renderAttachments();
   view.questionEl.value = 'Was steht in @"Notizen/Heute.md"?';
   const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
   await askButton.listeners.click();
@@ -885,7 +909,81 @@ test("eine erwähnte Notiz geht als Text mit, die aktive Notiz wird als @-Pfad e
   ]]);
 });
 
-test("completeThread geht an /v1/messages ohne Werkzeuge", async () => {
+test("ein Anhang geht als Ausschnitt mit und die Chips verschwinden", async () => {
+  const app = makeApp();
+  app.vault = {
+    getAbstractFileByPath(notePath) {
+      if (notePath === "Plan.md") return { path: notePath };
+      return null;
+    },
+    async cachedRead(file) {
+      assert.equal(file.path, "Plan.md");
+      return "Der Nordflügel bleibt geschlossen.";
+    },
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const asked = [];
+  plugin.completeThread = async (turns) => {
+    asked.push(turns);
+    return "Plan steht.";
+  };
+  plugin.embedForFrontier = async ({ question, mentioned, attached }) => {
+    assert.equal(question, "Was machen wir mit dem Flügel?");
+    assert.deepEqual(mentioned, []);
+    assert.equal(attached[0].path, "Plan.md");
+    assert.match(attached[0].text, /Nordflügel/);
+    return [{ path: "Plan.md", text: "Ausschnitt: Nordflügel" }];
+  };
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  view.addAttachment("Plan.md");
+  const chip = find(view.contentEl, (node) => node.classList.has("unitedshare-attachment-path"));
+  assert.equal(chip.text, "Plan.md");
+  view.questionEl.value = "Was machen wir mit dem Flügel?";
+  await view.askButton.listeners.click();
+  assert.deepEqual(view.attachments, []);
+  assert.equal(find(view.contentEl, (node) => node.classList.has("unitedshare-attachment")), null);
+  assert.equal(asked[0][0].files[0].text, "Ausschnitt: Nordflügel");
+  const user = find(view.contentEl, (node) => node.classList.has("unitedshare-message-user"));
+  const files = find(user, (node) => node.classList.has("unitedshare-message-files"));
+  assert.equal(files.text, "Plan.md");
+});
+
+test("fällt das Embedding aus, bleibt die Frage stehen und das Modell wird nicht gefragt", async () => {
+  const { UnitedShareError } = require("./unitedshare-core");
+  const app = makeApp();
+  app.vault = {
+    getAbstractFileByPath(notePath) {
+      if (notePath === "Plan.md") return { path: notePath };
+      return null;
+    },
+    async cachedRead() {
+      return "Der Nordflügel bleibt geschlossen.";
+    },
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  let asked = 0;
+  plugin.completeThread = async () => {
+    asked += 1;
+    return "nein";
+  };
+  plugin.embedForFrontier = async () => {
+    throw new UnitedShareError("Das lokale Embedding auf diesem Rechner antwortet nicht.", 0);
+  };
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  view.addAttachment("Plan.md");
+  view.questionEl.value = "Was machen wir?";
+  await view.askButton.listeners.click();
+  assert.equal(asked, 0);
+  assert.equal(view.questionEl.value, "Was machen wir?");
+  assert.deepEqual(view.attachments, ["Plan.md"]);
+  assert.match(view.statusEl.text, /Embedding/);
+});
+
+test("completeThread geht an /v1/chat/completions ohne Werkzeuge", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);
   await plugin.onload();
@@ -894,15 +992,21 @@ test("completeThread geht an /v1/messages ohne Werkzeuge", async () => {
   const before = mock.requests.length;
   const text = await plugin.completeThread([{ role: "user", content: "Hallo" }]);
   const call = mock.requests[before];
-  assert.equal(call.url, "https://api.unitedshare.ai/v1/messages");
+  assert.equal(call.url, "https://api.unitedshare.ai/v1/chat/completions");
   const body = JSON.parse(call.body);
   assert.equal(body.model, "rmxos-mega2026.1");
   assert.equal(body.stream, true);
+  assert.equal(body.max_tokens, 1200);
   // requestUrlAsFetch entfernt Content-Length bewusst, bevor es an requestUrl
   // geht: Capacitors natives HTTP auf Mobile wirft bei diesem verbotenen Header.
   assert.equal(Object.hasOwn(call.headers, "Content-Length"), false);
   assert.equal(Object.hasOwn(body, "tools"), false);
-  assert.equal(body.messages[0].content[0].type, "text");
+  assert.equal(Object.hasOwn(body, "system"), false);
+  assert.equal(body.messages[0].role, "system");
+  assert.equal(typeof body.messages[0].content, "string");
+  assert.match(body.messages[0].content, /Obsidian/);
+  assert.equal(body.messages[1].role, "user");
+  assert.equal(body.messages[1].content, "Hallo");
   assert.equal(text, "Antwort aus messages");
 });
 
@@ -1076,6 +1180,12 @@ function nodeTexts(node, acc = []) {
   return acc;
 }
 
+function pillTexte(node, acc = []) {
+  if (node && node.classList && node.classList.has("unitedshare-pill")) acc.push(node.text);
+  for (const child of (node && node.children) || []) pillTexte(child, acc);
+  return acc;
+}
+
 function meshSpawn(bodies) {
   const seen = [];
   const spawn = (cmd, args) => {
@@ -1137,9 +1247,25 @@ test("ein Schlüssel und reemax zeigen das direkte Netz, nicht im Modellmenü", 
   const view = plugin.registeredViews[0].factory(leaf);
   leaf.view = view;
   await view.onOpen();
-  const mesh = find(view.contentEl, (node) => node.classList && node.classList.has("unitedshare-mesh"));
-  assert.ok(mesh, "die Seitenleiste zeigt das direkte Netz");
+  assert.equal(
+    find(view.contentEl, (node) => node.classList && node.classList.has("unitedshare-mesh")),
+    null,
+  );
+  const mesh = plugin.settingTab.statusMesh;
+  assert.ok(mesh, "die Einstellungen zeigen das direkte Netz");
   const sideText = nodeTexts(mesh).join("\n");
+  assert.equal(sideText.includes("Direktes Netz"), false);
+  assert.equal(find(mesh, (node) => node.tag === "h3"), null);
+  assert.equal(find(mesh, (node) => node.classList && node.classList.has("unitedshare-mesh-options")), null);
+  assert.deepEqual(pillTexte(mesh), [
+    "reemax 0.3.3",
+    "Modell: mini:qwen, mesh-only-model",
+    "Agent: mini:schreiber",
+    "Oberfläche: tafel",
+    "Gegenstellen: mini",
+    "Dateipaare im direkten Netz: noten",
+    "Dateipaare im Firmennetz: demo",
+  ]);
   assert.match(sideText, /Modell: mini:qwen, mesh-only-model/);
   assert.match(sideText, /Agent: mini:schreiber/);
   assert.match(sideText, /Oberfläche: tafel/);
@@ -1194,6 +1320,60 @@ test("unter node --test startet ein fehlender meshSpawn nicht das echte reemax",
   assert.equal(text.includes("Direktes Netz"), false);
   assert.equal(text.includes("0.3.3"), false);
   assert.equal(text.includes("demo"), false);
+});
+
+test("unter dem Eingabefeld steht eine Statusleiste aus kleinen Pills", async () => {
+  const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  assert.match(css, /\.unitedshare-statusleiste\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(css, /\.unitedshare-pill\s*\{[^}]*border-radius:\s*999px/);
+  assert.match(css, /\.unitedshare-sidebar\.is-keyboard-open \.unitedshare-statusleiste/);
+  const { plugin, view } = await offeneSeite();
+  const footer = find(view.contentEl, (node) => node.classList.has("unitedshare-input-footer"));
+  assert.equal(footer.children.find((node) => node.classList.has("unitedshare-statusleiste")), undefined);
+  assert.equal(find(view.contentEl, (node) => node.classList.has("unitedshare-hint")), null);
+  const text = nodeTexts(view.contentEl).join("\n");
+  assert.equal(text.includes("Die Frage verlässt den Tresor als Text"), false);
+  assert.equal(text.includes("Direktes Netz"), false);
+  await plugin.settingTab.display();
+  const bar = plugin.settingTab.statusHost;
+  assert.ok(bar, "Statusleiste fehlt");
+  const pills = pillTexte(bar);
+  assert.ok(pills.includes("Frage als Text"));
+  assert.ok(pills.includes("Einbettung lokal"));
+  assert.ok(pills.includes("Dateien lokal"));
+  const link = find(bar, (node) => node.tag === "a" && node.attrs.href === "https://unitedshare.ai/privacy");
+  assert.equal(link.text, "Datenschutz");
+  assert.equal(link.classList.has("unitedshare-pill"), true);
+});
+
+test("die Statusleiste lässt leere Netz-Angebote weg", async () => {
+  const { plugin, view } = await offeneSeite();
+  await plugin.settingTab.display();
+  plugin.ensureMesh = async () => ({
+    installed: true,
+    version: "0.3.3",
+    ready: true,
+    peers: ["node"],
+    kinds: [
+      { id: "model", name: "Modell", items: [] },
+      { id: "agent", name: "Agent", items: [] },
+      { id: "ui", name: "Oberfläche", items: [] },
+    ],
+    pairs: { direkt: [], firma: ["demo"] },
+  });
+  await view.renderMeshOptions();
+  const mesh = plugin.settingTab.statusMesh;
+  const text = nodeTexts(mesh).join("\n");
+  assert.equal(text.includes("Direktes Netz"), false);
+  assert.equal(text.includes("keins"), false);
+  assert.equal(text.includes("keine"), false);
+  assert.deepEqual(pillTexte(mesh), [
+    "reemax 0.3.3",
+    "Gegenstellen: node",
+    "Dateipaare im Firmennetz: demo",
+  ]);
+  const settings = nodeTexts(plugin.settingTab.containerEl).join("\n");
+  assert.equal(settings.includes("Direktes Netz"), false);
 });
 
 // --------------------------------------------------------------------------
@@ -1345,6 +1525,29 @@ test("ein zweites Gespräch schreibt in dieselbe Datei", async () => {
   const pfade = [...adapter.inhalt.keys()].filter((p) => p.startsWith(".vault/chats/"));
   assert.equal(pfade.length, 1, "derselbe Reiter, dieselbe Datei");
   assert.equal(JSON.parse(adapter.inhalt.get(pfade[0])).messages.length, 4);
+});
+
+test("scheitert der Modellaufruf, landet die Ursache im Fehlerprotokoll", async () => {
+  // ANLASS (2026-10-18): "ab und zu" meldete das Plugin nur "Status 400",
+  // ohne dass sich hinterher rekonstruieren liess, warum. Eine Zeile im
+  // Tresor macht den seltenen Fall rückwirkend sichtbar.
+  const { UnitedShareError } = require("./unitedshare-core");
+  const adapter = chatAdapterMock();
+  const { plugin, view } = await ansichtMitAdapter(adapter);
+  plugin.completeThread = async () => {
+    throw new UnitedShareError(
+      "Modellaufruf fehlgeschlagen (Status 400): model rmxos-mobil2026.1 ist unbekannt",
+      400,
+    );
+  };
+  await view.onOpen();
+  view.questionEl.value = "Wie spät ist es?";
+  await view.submit();
+
+  const protokoll = adapter.inhalt.get(".vault/debug.log");
+  assert.ok(protokoll, "kein Fehlerprotokoll geschrieben");
+  assert.match(protokoll, /status=400/);
+  assert.match(protokoll, /model rmxos-mobil2026\.1 ist unbekannt/);
 });
 
 test("ein abgeschlossenes Gespräch wird mit seinen Nachrichten abgelegt", async () => {
@@ -1589,6 +1792,542 @@ test("bricht die Antwort ab, bleibt der offene Schritt als abgebrochen stehen", 
   assert.ok(zeilen[0].classList.has("is-fertig"));
   assert.ok(zeilen[1].classList.has("is-abgebrochen"));
   assert.equal(view.statusEl.text, "Der Modellaufruf ist fehlgeschlagen.");
+});
+
+function editorMit(text) {
+  return {
+    value: text,
+    cursor: { line: 1, ch: 0 },
+    replaced: 0,
+    getValue() {
+      return this.value;
+    },
+    getCursor() {
+      return this.cursor;
+    },
+    replaceRange(chunk, cursor) {
+      this.replaced += 1;
+      this.last = { text: chunk, cursor };
+      this.value += chunk;
+    },
+  };
+}
+
+function notizTresor(texts) {
+  const vault = {
+    writes: 0,
+    getAbstractFileByPath(notePath) {
+      if (Object.hasOwn(texts, notePath)) return { path: notePath };
+      return null;
+    },
+    async cachedRead(file) {
+      return texts[file.path];
+    },
+    async modify(file, content) {
+      texts[file.path] = content;
+      vault.writes += 1;
+    },
+  };
+  return vault;
+}
+
+async function offeneSeite() {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  return { app, plugin, view };
+}
+
+test("die untere Leiste trägt Beschriftung, Notiz, Einfügen, Mermaid und Link", async () => {
+  const { app, plugin, view } = await offeneSeite();
+  for (const label of ["Notiz", "Einfügen", "Mermaid", "Link", "Antwort", "Fragen", "Bild"]) {
+    const button = knopf(view, label);
+    assert.ok(button, label);
+    assert.equal(button.classList.has("is-labeled"), true, label);
+    const caption = find(button, (node) => node.classList.has("unitedshare-nav-caption"));
+    assert.equal(caption.text, label);
+  }
+  assert.equal(knopf(view, "Verlauf").classList.has("is-labeled"), false);
+  assert.equal(view.budgetEl.text, "");
+  assert.equal(view.budgetEl.classList.has("is-ruhend"), true);
+  assert.equal(view.budgetEl.classList.has("is-leer"), false);
+
+  const vorher = mock.modals.length;
+  app.workspace.activeView = null;
+  await knopf(view, "Notiz").listeners.click();
+  assert.equal(view.questionEl.value, "");
+  assert.equal((view.attachments || []).length, 0);
+  const wahl = mock.modals[mock.modals.length - 1];
+  assert.ok(mock.modals.length > vorher);
+  assert.equal(wahl.opened, true);
+  assert.equal(find(wahl.contentEl, (node) => node.tag === "h2").text, "Notiz anhängen");
+
+  app.workspace.activeView = { file: { path: "../Geheim.md" }, editor: editorMit("") };
+  await knopf(view, "Notiz").listeners.click();
+  assert.equal((view.attachments || []).length, 0);
+
+  const editor = editorMit("schon da");
+  app.workspace.activeView = { file: { path: "Offen.md" }, editor };
+  app.vault = notizTresor({ "Offen.md": "schon da" });
+  await knopf(view, "Notiz").listeners.click();
+  assert.deepEqual(view.attachments, ["Offen.md"]);
+  assert.equal(view.questionEl.value, "");
+  await knopf(view, "Notiz").listeners.click();
+  assert.deepEqual(view.attachments, ["Offen.md"]);
+  assert.equal(mock.modals[mock.modals.length - 1].opened, true);
+
+  plugin.clipboardRead = async () => "aus der Zwischenablage";
+  await knopf(view, "Einfügen").listeners.click();
+  assert.equal(editor.last.text, "aus der Zwischenablage");
+  assert.equal(editor.cursor, editor.last.cursor);
+
+  app.workspace.activeView = null;
+  plugin.clipboardRead = async () => "Feld";
+  view.questionEl.value = "Frage ";
+  await knopf(view, "Einfügen").listeners.click();
+  assert.equal(view.questionEl.value, "Frage Feld");
+
+  const leerAb = mock.notices.length;
+  plugin.clipboardRead = async () => "";
+  await knopf(view, "Einfügen").listeners.click();
+  assert.ok(mock.notices.slice(leerAb).includes("Die Zwischenablage ist leer."));
+  assert.equal(view.questionEl.value, "Frage Feld");
+
+  const unlesbarAb = mock.notices.length;
+  plugin.clipboardRead = async () => {
+    throw new Error("denied");
+  };
+  await knopf(view, "Einfügen").listeners.click();
+  assert.ok(mock.notices.slice(unlesbarAb).includes("Die Zwischenablage lässt sich nicht lesen."));
+
+  plugin.clipboardRead = async () => "```mermaid\nflowchart LR\n  A-->B\n```\n";
+  app.workspace.activeView = { editor };
+  const vorherErsetzt = editor.replaced;
+  await knopf(view, "Mermaid").listeners.click();
+  assert.equal(editor.replaced, vorherErsetzt + 1);
+  assert.match(editor.last.text, /```mermaid\nflowchart LR\n {2}A-->B\n```\n/);
+  assert.equal(editor.last.text.includes("A[Notiz]"), false);
+
+  const mermaidAb = mock.notices.length;
+  plugin.clipboardRead = async () => {
+    throw new Error("denied");
+  };
+  view.answer = "siehe\n```mermaid\nflowchart TD\n  X[Ja]\n```\n";
+  await knopf(view, "Mermaid").listeners.click();
+  assert.match(editor.last.text, /X\[Ja\]/);
+  assert.equal(mock.notices.length, mermaidAb);
+
+  plugin.clipboardRead = async () => "";
+  view.answer = "";
+  await knopf(view, "Mermaid").listeners.click();
+  assert.equal(editor.last.text, "```mermaid\nflowchart LR\n  A[Notiz]\n```\n");
+
+  const paarAb = mock.notices.length;
+  view.attachments = [];
+  app.workspace.activeView = { file: { path: "Offen.md" }, editor };
+  await knopf(view, "Link").listeners.click();
+  assert.ok(mock.notices.slice(paarAb).includes("Hänge die andere Notiz an. Die offene Notiz ist die eine Seite."));
+
+  view.attachments = ["Offen.md"];
+  await knopf(view, "Link").listeners.click();
+  assert.ok(mock.notices.slice(paarAb).includes("Hänge die andere Notiz an. Die offene Notiz ist die eine Seite."));
+  assert.equal(editor.value.includes("[[Offen]]"), false);
+
+  const texts = { "Offen.md": "Anfang\n", "Andere.md": "Ziel\n" };
+  app.vault = notizTresor(texts);
+  editor.value = "Anfang\n";
+  editor.replaced = 0;
+  view.attachments = ["Andere.md"];
+  await knopf(view, "Link").listeners.click();
+  assert.equal(editor.last.text, "[[Andere]]");
+  assert.match(texts["Andere.md"], /\[\[Offen\]\]/);
+  assert.equal((texts["Andere.md"].match(/\[\[Offen\]\]/g) || []).length, 1);
+  const writes = app.vault.writes;
+  await knopf(view, "Link").listeners.click();
+  assert.equal(editor.replaced, 1);
+  assert.equal(app.vault.writes, writes);
+  assert.equal((texts["Andere.md"].match(/\[\[Offen\]\]/g) || []).length, 1);
+
+  const fremdAb = mock.notices.length;
+  app.vault = notizTresor({ "Offen.md": "Anfang\n" });
+  editor.value = "Anfang\n";
+  view.attachments = ["Fehlt.md"];
+  await knopf(view, "Link").listeners.click();
+  assert.ok(mock.notices.slice(fremdAb).includes("Die andere Notiz lässt sich nicht lesen."));
+});
+
+test("das Budget nennt nur mitgelieferte Grenzen", async () => {
+  const { plugin, view } = await offeneSeite();
+  const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  assert.match(css, /\.unitedshare-toolbar-actions\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(css, /\.unitedshare-nav-btn\.is-labeled/);
+  assert.match(css, /\.unitedshare-budget\b/);
+  assert.match(css, /\.unitedshare-budget\.is-leer/);
+  assert.match(css, /\.unitedshare-budget\.is-ruhend/);
+  assert.equal(css.includes(".unitedshare-budget:empty"), false);
+
+  let runde = 0;
+  plugin.completeThread = async (_turns, _onDelta, _onSchritt, onMeta) => {
+    runde += 1;
+    if (runde === 1) {
+      onMeta({
+        limits: { rest_tag: 800, rest_monat: 40000 },
+        usage: { summe: 16 },
+      });
+    } else if (runde === 2) {
+      onMeta({ limits: null, usage: { summe: 4 } });
+    } else {
+      onMeta({
+        limits: { rest_tag: 1, rest_woche: 2, rest_monat: 3, nachgekauft: 9 },
+        usage: { summe: 1 },
+      });
+    }
+    return "ok";
+  };
+  view.questionEl.value = "Erste";
+  await knopf(view, "Fragen").listeners.click();
+  assert.equal(view.statusEl.text, "");
+  assert.equal(view.budgetEl.text, "Tag 800 · Monat 40.000 · Dieser Aufruf: 16 Token");
+  assert.equal(view.budgetEl.classList.has("is-leer"), false);
+
+  view.questionEl.value = "Zweite";
+  await knopf(view, "Fragen").listeners.click();
+  assert.equal(view.budgetEl.text, "Tag 800 · Monat 40.000 · Dieser Aufruf: 4 Token");
+
+  view.questionEl.value = "Dritte";
+  await knopf(view, "Fragen").listeners.click();
+  assert.equal(view.budgetEl.text, "Tag 1 · Woche 2 · Monat 3 · Nachgekauft 9 · Dieser Aufruf: 1 Token");
+
+  const { UnitedShareError } = require("./unitedshare-core");
+  plugin.completeThread = async () => {
+    const error = new UnitedShareError("Das Tageslimit ist aufgebraucht.", 429);
+    error.limits = { rest_tag: 0, rest_monat: 1200 };
+    throw error;
+  };
+  const ab = mock.notices.length;
+  view.questionEl.value = "Vierte";
+  await knopf(view, "Fragen").listeners.click();
+  assert.ok(mock.notices.slice(ab).includes("Das Tageslimit ist aufgebraucht."));
+  assert.equal(view.statusEl.text, "Das Tageslimit ist aufgebraucht.");
+  assert.equal(view.budgetEl.text, "Tag 0 · Monat 1.200");
+  assert.equal(view.budgetEl.classList.has("is-leer"), true);
+});
+
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("Bild zeigt die Abbildung und setzt sie in die offene Notiz", async () => {
+  const { app, plugin, view } = await offeneSeite();
+  const leerAb = mock.notices.length;
+  view.questionEl.value = "   ";
+  await knopf(view, "Bild").listeners.click();
+  assert.equal(view.bildMenu.classList.has("is-open"), true);
+  assert.equal(mock.notices.slice(leerAb).includes("Beschreibe das Bild."), false);
+  await knopf(view, "1:1").listeners.click();
+  assert.ok(mock.notices.slice(leerAb).includes("Beschreibe das Bild."));
+
+  let statusBeimAuftrag = "";
+  let knopfGesperrt = false;
+  plugin.generateImage = async (prompt) => {
+    statusBeimAuftrag = view.statusEl.text;
+    knopfGesperrt = knopf(view, "Bild").disabled;
+    return { mime: "image/png", b64: PNG_B64, prompt, extra: "weg" };
+  };
+  view.questionEl.value = "eine rote Kugel";
+  await knopf(view, "1:1").listeners.click();
+  assert.equal(statusBeimAuftrag, "Die Aufgabe läuft noch.");
+  assert.equal(knopfGesperrt, true);
+  const img = find(view.contentEl, (node) => node.tag === "img");
+  assert.match(img.attrs.src, new RegExp(`^data:image/png;base64,${PNG_B64}`));
+  const einbetten = knopf(view, "In die Notiz");
+  assert.equal(einbetten.attrs.title, "In die Notiz");
+  assert.equal(einbetten.attrs["data-icon"], "image-plus");
+  assert.equal(view.questionEl.value, "");
+  const nachricht = view.activeTab().messages.find((message) => message.bilder);
+  assert.deepEqual(nachricht.bilder, [{
+    mime: "image/png",
+    b64: PNG_B64,
+    prompt: "eine rote Kugel",
+    breite: 1024,
+    hoehe: 1024,
+  }]);
+  assert.equal(Object.hasOwn(nachricht.bilder[0], "path"), false);
+  assert.equal(nachricht.content, "eine rote Kugel");
+
+  const ohneNotiz = mock.notices.length;
+  app.workspace.activeView = null;
+  await einbetten.listeners.click();
+  assert.ok(mock.notices.slice(ohneNotiz).includes("Keine aktive Notiz."));
+
+  const written = [];
+  const folders = [];
+  app.vault = {
+    getAbstractFileByPath() {
+      return null;
+    },
+    async createFolder(folder) {
+      folders.push(folder);
+    },
+    async createBinary(notePath, data) {
+      written.push({ notePath, data });
+      return { path: notePath };
+    },
+  };
+  const editor = editorMit("");
+  app.workspace.activeView = { editor, file: { path: "Offen.md" } };
+  await einbetten.listeners.click();
+  assert.deepEqual(folders, ["UnitedShare", "UnitedShare/bilder"]);
+  assert.match(written[0].notePath, /^UnitedShare\/bilder\/bild-\d+\.png$/);
+  assert.ok(written[0].data instanceof Uint8Array);
+  assert.equal(written[0].data[0], 0x89);
+  assert.equal(written[0].data[1], 0x50);
+  assert.match(editor.last.text, /^!\[\[UnitedShare\/bilder\/bild-\d+\.png\]\]$/);
+});
+
+test("ein Bild ohne Text bleibt im Gespräch und in der Ablage", async () => {
+  const { view } = await offeneSeite();
+  const bild = { mime: "image/png", b64: PNG_B64, prompt: "Kugel", extra: "weg" };
+  view.activeTab().messages = [{ role: "assistant", content: "", bilder: [bild] }];
+  const eintrag = view.tabAlsEintrag(view.activeTab());
+  assert.equal(eintrag.messages.length, 1);
+  assert.deepEqual(eintrag.messages[0].bilder, [{ mime: "image/png", b64: PNG_B64, prompt: "Kugel" }]);
+  assert.equal(Object.hasOwn(eintrag.messages[0].bilder[0], "extra"), false);
+
+  view.newConversation();
+  assert.deepEqual(view.history[0].messages[0].bilder, [{ mime: "image/png", b64: PNG_B64, prompt: "Kugel" }]);
+  view.restoreHistory(view.history[0]);
+  assert.deepEqual(view.activeTab().messages[0].bilder, [{ mime: "image/png", b64: PNG_B64, prompt: "Kugel" }]);
+});
+
+test("Token aufladen verlinkt die Verbrauchsseite und lässt den bestehenden Text stehen", async () => {
+  const { plugin } = await offeneSeite();
+  const satz = "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Notiz hängt die offene Notiz an. Einfügen setzt die Zwischenablage an den Cursor. Antwort schreibt Frage und Antwort an den Cursor.";
+  await plugin.settingTab.display();
+  const setting = lastSetting("Token aufladen");
+  assert.ok(setting);
+  assert.equal(setting.desc, "Tag und Monat kommen vom Dienst. Nachkauf und Planwechsel stehen auf der Verbrauchsseite.");
+  const link = find(plugin.settingTab.containerEl, (node) => node.tag === "a" && node.text === "Verbrauch öffnen");
+  assert.equal(link.attrs.href, "https://unitedshare.ai/app/budget/");
+  assert.equal(nodeTexts(plugin.settingTab.containerEl).join("\n").includes(satz), true);
+
+  plugin.aufladenUrl = "https://evil.example/app/budget";
+  await plugin.settingTab.display();
+  const boese = find(plugin.settingTab.containerEl, (node) => node.tag === "a" && node.text === "Verbrauch öffnen");
+  assert.equal(boese.attrs.href, "https://unitedshare.ai/app/budget/");
+
+  plugin.aufladenUrl = "https://unitedshare.ai/app/budget/nachkauf";
+  await plugin.settingTab.display();
+  const gut = find(plugin.settingTab.containerEl, (node) => node.tag === "a" && node.text === "Verbrauch öffnen");
+  assert.equal(gut.attrs.href, "https://unitedshare.ai/app/budget/nachkauf");
+});
+
+test("ein Bildfehler schreibt Limit und Auflade-Adresse", async () => {
+  const { UnitedShareError } = require("./unitedshare-core");
+  const { plugin, view } = await offeneSeite();
+  plugin.generateImage = async () => {
+    const error = new UnitedShareError("Das Tageslimit ist aufgebraucht.", 429);
+    error.limits = { rest_tag: 0, rest_monat: 10 };
+    error.aufladenUrl = "https://unitedshare.ai/app/budget/";
+    throw error;
+  };
+  view.questionEl.value = "zu viel";
+  await knopf(view, "Bild").listeners.click();
+  await knopf(view, "1:1").listeners.click();
+  assert.equal(find(view.contentEl, (node) => node.tag === "img"), null);
+  assert.equal(find(view.contentEl, (node) => node.classList && node.classList.has("unitedshare-bild-platz")), null);
+  assert.equal(view.statusEl.text, "Das Tageslimit ist aufgebraucht.");
+  assert.equal(view.budgetEl.text.includes("Tag 0"), true);
+  assert.equal(plugin.aufladenUrl, "https://unitedshare.ai/app/budget/");
+});
+
+test("die drei Punkte öffnen das Menü und schicken keine Frage", async () => {
+  const { app, plugin, view } = await offeneSeite();
+  view.questionEl.value = "bleibt";
+  let called = 0;
+  plugin.completeThread = async () => {
+    called += 1;
+    return "nein";
+  };
+  const mehr = knopf(view, "Mehr");
+  const caption = find(mehr, (node) => node.classList.has("unitedshare-nav-caption"));
+  assert.equal(caption.text, "...");
+  const vorher = app.workspace.opened.length;
+  await mehr.listeners.click();
+  assert.equal(view.questionEl.value, "bleibt");
+  assert.equal(called, 0);
+  assert.equal(view.mehrMenu.classList.has("is-open"), true);
+  assert.equal(app.workspace.opened.length, vorher);
+  assert.equal(view.mehrMenu.children.includes(view.bildMenu), false);
+});
+
+test("eine Einstellung legt Notiz in die Leiste", async () => {
+  const { app, plugin, view } = await offeneSeite();
+  app.workspace.leaves.push({ type: VIEW_TYPE, app, view });
+  assert.ok(view.mehrMenu.children.includes(view.attachButton));
+  assert.equal(view.leisteEl.children.includes(view.attachButton), false);
+  assert.ok(view.leisteEl.children.includes(view.askButton));
+  await plugin.settingTab.display();
+  await lastSetting("Notiz").dropdown.change("leiste");
+  assert.ok(view.leisteEl.children.includes(view.attachButton));
+  assert.equal(view.mehrMenu.children.includes(view.attachButton), false);
+  assert.ok(view.leisteEl.children.includes(view.askButton));
+  assert.equal(plugin.settings.promptWerkzeuge.notiz, "leiste");
+  assert.ok(view.leisteEl.children.indexOf(view.attachButton) < view.leisteEl.children.indexOf(view.askButton));
+});
+
+test("ein eigenes Format mit 10 mal 10 wird abgelehnt", async () => {
+  const { plugin, view } = await offeneSeite();
+  view.questionEl.value = "klein";
+  find(view.contentEl, (node) => node.attrs["aria-label"] === "Breite").value = "10";
+  find(view.contentEl, (node) => node.attrs["aria-label"] === "Höhe").value = "10";
+  let calls = 0;
+  plugin.generateImage = async () => {
+    calls += 1;
+    return { mime: "image/png", b64: PNG_B64, prompt: "klein" };
+  };
+  const ab = mock.notices.length;
+  await knopf(view, "Bild erzeugen").listeners.click();
+  assert.ok(mock.notices.slice(ab).includes("Breite und Höhe liegen zwischen 64 und 2048."));
+  assert.equal(calls, 0);
+  assert.equal(view.questionEl.value, "klein");
+});
+
+test("16:9 hält den Platzhalter im Seitenverhältnis", async () => {
+  const { plugin, view } = await offeneSeite();
+  let gesehen = null;
+  plugin.generateImage = async (prompt, mass) => {
+    const platz = find(view.contentEl, (node) => node.attrs["aria-label"] === "Bild wird erzeugt");
+    const figur = find(view.contentEl, (node) => node.classList && node.classList.has("is-laden"));
+    gesehen = {
+      mass,
+      aria: platz && platz.attrs["aria-label"],
+      ratio: figur && figur.style["--unitedshare-bild-ratio"],
+    };
+    return { mime: "image/png", b64: PNG_B64, prompt };
+  };
+  view.questionEl.value = "weit";
+  await knopf(view, "16:9").listeners.click();
+  assert.deepEqual(gesehen.mass, { breite: 1024, hoehe: 576, format: "png" });
+  assert.equal(gesehen.aria, "Bild wird erzeugt");
+  assert.equal(gesehen.ratio, "1024 / 576");
+});
+
+test("ein Bild bleibt nach dem Neuladen über den Pfad im Tresor", async () => {
+  const adapter = chatAdapterMock();
+  delete adapter.getBasePath;
+  const dateien = new Map();
+  const ordner = new Set();
+  const { app, plugin, view } = await ansichtMitAdapter(adapter);
+  app.vault.getAbstractFileByPath = (notePath) => {
+    if (ordner.has(notePath)) return { path: notePath, children: [] };
+    if (dateien.has(notePath)) return { path: notePath };
+    return null;
+  };
+  app.vault.createFolder = async (folder) => {
+    ordner.add(folder);
+  };
+  app.vault.createBinary = async (notePath, data) => {
+    dateien.set(notePath, data);
+    return { path: notePath };
+  };
+  app.vault.readBinary = async (file) => dateien.get(file.path);
+  plugin.generateImage = async (prompt) => ({ mime: "image/png", b64: PNG_B64, prompt, extra: "weg" });
+  await view.onOpen();
+  view.questionEl.value = "eine rote Kugel";
+  await knopf(view, "1:1").listeners.click();
+
+  const pfade = [...adapter.inhalt.keys()].filter((p) => p.startsWith(".vault/chats/"));
+  assert.equal(pfade.length, 1);
+  const roh = adapter.inhalt.get(pfade[0]);
+  assert.equal(roh.includes(PNG_B64), false);
+  const abgelegt = JSON.parse(roh);
+  assert.match(abgelegt.messages[0].bilder[0].path, /^UnitedShare\/bilder\/bild-\d+\.png$/);
+
+  const neu = plugin.registeredViews[0].factory({ app });
+  await neu.onOpen();
+  const img = find(neu.contentEl, (node) => node.tag === "img");
+  assert.match(img.attrs.src, new RegExp(`^data:image/png;base64,${PNG_B64}`));
+});
+
+test("In die Notiz nutzt einen vorhandenen Pfad und schreibt die Datei nicht neu", async () => {
+  const { app, view } = await offeneSeite();
+  const bild = {
+    mime: "image/png",
+    b64: PNG_B64,
+    path: "UnitedShare/bilder/da.png",
+    prompt: "da",
+    breite: 1024,
+    hoehe: 1024,
+  };
+  view.activeTab().messages = [{ role: "assistant", content: "da", bilder: [bild] }];
+  await view.renderMessages();
+  let writes = 0;
+  app.vault = {
+    getAbstractFileByPath() {
+      return null;
+    },
+    async createFolder() {},
+    async createBinary() {
+      writes += 1;
+    },
+  };
+  const editor = editorMit("");
+  app.workspace.activeView = { editor, file: { path: "Offen.md" } };
+  await knopf(view, "In die Notiz").listeners.click();
+  assert.equal(writes, 0);
+  assert.equal(editor.last.text, "![[UnitedShare/bilder/da.png]]");
+});
+
+test("eine fehlende Bilddatei lässt keinen Platzhalter stehen", async () => {
+  const { plugin, view } = await offeneSeite();
+  plugin.readVaultBinary = async () => {
+    throw new Error("fehlt");
+  };
+  view.activeTab().messages = [{
+    role: "assistant",
+    content: "weg",
+    bilder: [{ mime: "image/png", path: "UnitedShare/bilder/fehlt.png", prompt: "weg", breite: 1024, hoehe: 576 }],
+  }];
+  await view.renderMessages();
+  assert.equal(find(view.contentEl, (node) => node.tag === "img"), null);
+  assert.equal(find(view.contentEl, (node) => node.classList && node.classList.has("is-laden")), null);
+});
+
+test("ein eigenes Format speichert Breite, Höhe und gif vor dem Erzeugen", async () => {
+  const { plugin, view } = await offeneSeite();
+  find(view.contentEl, (node) => node.classList && node.classList.has("unitedshare-bild-format")).value = "gif";
+  find(view.contentEl, (node) => node.attrs["aria-label"] === "Breite").value = "640";
+  find(view.contentEl, (node) => node.attrs["aria-label"] === "Höhe").value = "480";
+  view.questionEl.value = "eigen";
+  let saved = null;
+  plugin.generateImage = async () => {
+    saved = {
+      bildBreite: plugin.settings.bildBreite,
+      bildHoehe: plugin.settings.bildHoehe,
+      bildFormat: plugin.settings.bildFormat,
+    };
+    throw new Error("kaputt");
+  };
+  await knopf(view, "Bild erzeugen").listeners.click();
+  assert.deepEqual(saved, { bildBreite: 640, bildHoehe: 480, bildFormat: "gif" });
+});
+
+test("ein leeres eigenes Format speichert nichts und lässt das Feld stehen", async () => {
+  const { plugin, view } = await offeneSeite();
+  view.questionEl.value = "   ";
+  const vorher = plugin.settings.bildBreite;
+  let calls = 0;
+  plugin.generateImage = async () => {
+    calls += 1;
+    return { mime: "image/png", b64: PNG_B64, prompt: "leer" };
+  };
+  const ab = mock.notices.length;
+  await knopf(view, "Bild erzeugen").listeners.click();
+  assert.ok(mock.notices.slice(ab).includes("Beschreibe das Bild."));
+  assert.equal(calls, 0);
+  assert.equal(plugin.settings.bildBreite, vorher);
+  assert.equal(view.questionEl.value, "   ");
 });
 
 test.after(() => {

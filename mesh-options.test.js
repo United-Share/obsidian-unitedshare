@@ -296,7 +296,7 @@ test("die Anleitung nennt das direkte Netz und lässt Tag und Einstellungssatz",
   assert.ok(readme.includes(`Release-Tag \`${manifestVersion}\``),
     `die Anleitung nennt nicht ${manifestVersion}`);
   assert.equal(
-    src.includes('text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Aktive Notiz setzt @\\"Pfad\\" ins Feld. In die Notiz schreibt Frage und Antwort an den Cursor."'),
+    src.includes('text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Notiz hängt die offene Notiz an. Einfügen setzt die Zwischenablage an den Cursor. Antwort schreibt Frage und Antwort an den Cursor."'),
     true,
   );
   assert.equal(readme.includes("Eine Datenbank"), false);

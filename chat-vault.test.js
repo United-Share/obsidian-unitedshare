@@ -290,7 +290,7 @@ test("Fragen legt hallo.py aus einem Python-Block an und startet sie", async () 
       assert.equal(body.stream, true);
       assert.equal(Object.hasOwn(body, "tools"), false);
     }
-    assert.equal(state.requests[0].url, "https://api.unitedshare.ai/v1/messages");
+    assert.equal(state.requests[0].url, "https://api.unitedshare.ai/v1/chat/completions");
     assert.match(JSON.stringify(parsed[1].messages), /vault-ok/);
     assert.equal(view.answer.includes("```"), false);
   } finally {

@@ -141,3 +141,85 @@ test("ein Abbruch mitten im Strom liefert das bisher Gelesene", async () => {
   }, null);
   assert.equal(antwort, "Angefangen");
 });
+
+// ANLASS (2026-10-10): "ab und zu" meldete das Plugin "Das Modell hat keine
+// Antwort geliefert", obwohl das Modell nur noch nicht angefangen hatte zu
+// antworten. "mega" braucht bis zu zwanzig Sekunden Stille vor dem ersten
+// Zeichen (siehe completeThread in main.src.js) -- bricht in dieser Zeit
+// irgendwo zwischen hier und dem Modell die Verbindung ab (ein Proxy mit
+// kürzerem Leerlauf-Timeout als unsere 90 Sekunden, ein Netzwerk-Hänger),
+// kommt null Bytes an. Das ist von einer echten leeren Antwort nicht zu
+// unterscheiden, aber im Unterschied dazu ein einmaliger Netz-Zufall, kein
+// Urteil über die Frage. Ein einziger stiller Wiederholungsversuch kostet
+// nichts (es wurde ja nichts erzeugt) und behebt die meisten Fälle.
+test("eine einmalig leere Antwort wird automatisch wiederholt", async () => {
+  let versuch = 0;
+  const antwort = await gegen(async (req, res) => {
+    versuch += 1;
+    if (versuch === 1) {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end("");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end(sseText(["Beim zweiten Versuch da"]));
+  }, null);
+  assert.equal(antwort, "Beim zweiten Versuch da");
+  assert.equal(versuch, 2);
+});
+
+test("bleibt die Antwort dauerhaft leer, wird nach einem Versuch mehr trotzdem aufgegeben", async () => {
+  let versuche = 0;
+  await assert.rejects(() => gegen(async (req, res) => {
+    versuche += 1;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end("");
+  }, null));
+  assert.equal(versuche, 2, "genau ein Wiederholungsversuch, dann aufgeben, keine Endlosschleife");
+});
+
+test("Müll statt Antwort wird nicht wiederholt (kein Verbindungsabbruch, sondern eine echte Antwort)", async () => {
+  let versuche = 0;
+  await assert.rejects(() => gegen(async (req, res) => {
+    versuche += 1;
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<html>Gateway kaputt</html>");
+  }, null));
+  assert.equal(versuche, 1, "Muell ist eine echte Antwort, kein Verbindungsabbruch -- kein Wiederholungsgrund");
+});
+
+// ANLASS (2026-10-17): "ab und zu" meldete das Plugin bei einem 400 nur
+// "Modellaufruf fehlgeschlagen, Status 400." -- unabhaengig davon, was der
+// Gateway tatsaechlich bemaengelt hat. drainError liest den Antwortkoerper
+// zwar schon fuer die 429-Budgetgrenzen, wirft die Meldung fuer jeden
+// anderen Status aber weg. Ohne sie laesst sich "warum" nie beantworten.
+test("ein 400 mit lesbarer Gateway-Meldung zeigt die echte Ursache, nicht nur den Status", async () => {
+  await assert.rejects(
+    () => gegen(async (req, res) => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        error: { type: "invalid_request_error", message: "model rmxos-mobil2026.1 ist unbekannt" },
+      }));
+    }, null),
+    (e) => {
+      assert.match(String(e.message), /model rmxos-mobil2026\.1 ist unbekannt/);
+      assert.equal(e.status, 400);
+      assert.equal(e.detail, "model rmxos-mobil2026.1 ist unbekannt");
+      return true;
+    },
+  );
+});
+
+test("ein 400 ohne lesbaren Grund fällt auf die generische Meldung zurück", async () => {
+  await assert.rejects(
+    () => gegen(async (req, res) => {
+      res.writeHead(400, { "Content-Type": "text/plain" });
+      res.end("nope");
+    }, null),
+    (e) => {
+      assert.equal(String(e.message), "Modellaufruf fehlgeschlagen, Status 400.");
+      assert.equal(e.detail, "");
+      return true;
+    },
+  );
+});
