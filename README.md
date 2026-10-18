@@ -40,4 +40,4 @@ Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. E
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.12` — [Community-Seite](https://community.obsidian.md/plugins/unitedshare)
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.13` — [Community-Seite](https://community.obsidian.md/plugins/unitedshare)

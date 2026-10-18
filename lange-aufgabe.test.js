@@ -545,7 +545,7 @@ test("Quellen nennen die lange Frist, das Bild und die Auflade-Seite", () => {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   assert.match(main, /dauerMs:\s*600000/);
-  assert.equal(manifest.version, "1.2.12");
+  assert.equal(manifest.version, "1.2.13");
   assert.match(css, /\.unitedshare-bild\.is-laden\s*\{[^}]*aspect-ratio:\s*var\(--unitedshare-bild-ratio/);
   assert.equal(readme.includes("enthält nur Textblöcke"), true);
   assert.equal(readme.includes("POST /v1/images/generations"), true);
