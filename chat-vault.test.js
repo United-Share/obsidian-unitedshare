@@ -85,6 +85,13 @@ function installObsidianMock() {
     registerView(type, factory) {
       this.registeredViews.push({ type, factory });
     }
+    registerExtensions(extensions, type) {
+      this.registeredExtensions = { extensions, type };
+    }
+    registerMarkdownCodeBlockProcessor(language, handler) {
+      this.codeBlockProcessors = this.codeBlockProcessors || [];
+      this.codeBlockProcessors.push({ language, handler });
+    }
     addRibbonIcon(icon, title, callback) {
       this.ribbons.push({ icon, title, callback });
     }
@@ -107,6 +114,12 @@ function installObsidianMock() {
       this.contentEl = createNode("div");
     }
   }
+  class FileView extends ItemView {
+    constructor(leaf) {
+      super(leaf);
+      this.file = null;
+    }
+  }
   class Modal {
     constructor(app) {
       this.app = app;
@@ -122,6 +135,7 @@ function installObsidianMock() {
   }
   class MarkdownView {}
   const obsidian = {
+    FileView,
     ItemView,
     MarkdownView,
     MarkdownRenderer: { async render() {} },
@@ -173,6 +187,28 @@ function diskVault(root) {
     adapter: {
       getBasePath() {
         return root;
+      },
+      getFullPath(rel) {
+        return path.join(root, rel);
+      },
+      async exists(rel) {
+        if (files.has(rel) || folders.has(rel)) return true;
+        return fs.existsSync(path.join(root, rel));
+      },
+      async stat(rel) {
+        if (files.has(rel)) {
+          return { type: "file", ctime: 0, mtime: 0, size: Buffer.byteLength(String(files.get(rel))) };
+        }
+        if (folders.has(rel)) return { type: "folder", ctime: 0, mtime: 0, size: 0 };
+        const abs = path.join(root, rel);
+        if (!fs.existsSync(abs)) return null;
+        const st = fs.statSync(abs);
+        return {
+          type: st.isDirectory() ? "folder" : "file",
+          ctime: st.ctimeMs,
+          mtime: st.mtimeMs,
+          size: st.size,
+        };
       },
     },
     getAbstractFileByPath(rel) {

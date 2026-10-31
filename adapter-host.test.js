@@ -6,17 +6,15 @@
 // Node.js fs module to access the filesystem outside of the Obsidian vault
 // API. Can read and write any file on the system."
 //
-// Der Vorwurf trifft zu: fsVaultHost liest, listet und schreibt über
-// node:fs. Für Dateien im Tresor ist das unnötig — die Adapter-API kann
-// dasselbe, und sie kann den Tresor gar nicht verlassen. Danach bleibt
-// node:fs nur noch dort, wo ohnehin eine Shell startet (Ausführen, reemax
-// suchen). Diese Warnung lässt sich nicht wegbauen, ohne die Funktion
-// aufzugeben; der Dateizugriff schon.
+// Dateien im Tresor laufen über die Adapter-API. Sie kann den Tresor nicht
+// verlassen. Die ausgelieferte main.js bindet das Node-Modul fs nicht ein.
+// Ein Skript oder reemax startet erst, nachdem der Adapter die Datei im
+// Tresor bestätigt hat. Der absolute Pfad kommt von getFullPath/getBasePath.
 //
-// HEIKEL: fs.readdirSync liefert NAMEN ("notiz.md"), die Adapter-API liefert
-// volle PFADE ("ordner/notiz.md"). Wer das übersieht, baut einen Fehler ein,
-// den kein Typ und kein Linter zeigt — nur eine Liste, die plötzlich anders
-// aussieht. Darum steht es hier als eigener Test.
+// HEIKEL: Ein Verzeichnislisting der Platte liefert NAMEN ("notiz.md"), die
+// Adapter-API liefert volle PFADE ("ordner/notiz.md"). Wer das übersieht,
+// baut einen Fehler ein, den kein Typ und kein Linter zeigt — nur eine Liste,
+// die plötzlich anders aussieht. Darum steht es hier als eigener Test.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -110,8 +108,8 @@ test("ohne Adapter gibt es keinen Host", () => {
 });
 
 test("ein Pfad kann den Tresor nicht verlassen", async () => {
-  // Der Adapter arbeitet immer tresorrelativ. Anders als bei node:fs gibt es
-  // hier keinen Weg nach draussen -- das ist der eigentliche Gewinn der
+  // Der Adapter arbeitet immer tresorrelativ. Ein zweites Dateisystem
+  // daneben gibt es hier nicht -- das ist der eigentliche Gewinn der
   // Umstellung und wird deshalb festgeschrieben.
   const adapter = falscherAdapter();
   const host = adapterVaultHost(adapter);

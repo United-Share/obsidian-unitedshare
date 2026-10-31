@@ -6,8 +6,10 @@ const Module = require("node:module");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { UnitedShareError } = require("./unitedshare-core");
 
 const VIEW_TYPE = "unitedshare-sidebar";
+const DUCKDB_ANSICHT_VIEW_TYPE = "unitedshare-duckdb-ansicht";
 const root = __dirname;
 const MARK_D = "M67.562 0.672852V55.2979C67.562 63.2369 61.2603 69.6729 53.4866 69.6729H0V16.4854C0 7.75235 6.93196 0.672852 15.483 0.672852H67.562ZM48.9193 14.6729H29.7023C26.4996 14.6729 23.428 15.9679 21.1633 18.2733C18.8986 20.5786 17.6263 23.7053 17.6263 26.9655L17.6267 57.8002C17.636 58.0152 17.68 58.2276 17.7574 58.4287C17.8541 58.6801 18.0008 58.9084 18.1884 59.0993C18.3759 59.2902 18.6002 59.4396 18.8471 59.538C19.094 59.6365 19.3583 59.6819 19.6233 59.6714H27.7053C28.235 59.6714 28.7429 59.4572 29.1175 59.076C29.492 58.6948 29.7023 58.1777 29.7023 57.6386V28.9983C29.701 28.7309 29.7517 28.466 29.8515 28.2187C29.9514 27.9715 30.0984 27.7468 30.2842 27.5577C30.4698 27.3687 30.6906 27.219 30.9335 27.1174C31.1763 27.0157 31.4367 26.9641 31.6993 26.9655H48.9193C49.4489 26.9655 49.9569 26.7513 50.3314 26.3701C50.706 25.9889 50.9163 25.4719 50.9163 24.9327V16.8015C50.9168 16.2531 50.7095 15.7257 50.3375 15.3292C49.9654 14.9326 49.4575 14.6975 48.9193 14.6729Z";
 
@@ -125,6 +127,13 @@ function installObsidianMock() {
     registerView(type, factory) {
       this.registeredViews.push({ type, factory });
     }
+    registerExtensions(extensions, type) {
+      this.registeredExtensions = { extensions, type };
+    }
+    registerMarkdownCodeBlockProcessor(language, handler) {
+      this.codeBlockProcessors = this.codeBlockProcessors || [];
+      this.codeBlockProcessors.push({ language, handler });
+    }
     addRibbonIcon(icon, title, callback) {
       this.ribbons.push({ icon, title, callback });
     }
@@ -147,6 +156,12 @@ function installObsidianMock() {
       this.leaf = leaf;
       this.app = leaf.app;
       this.contentEl = createNode("div");
+    }
+  }
+  class FileView extends ItemView {
+    constructor(leaf) {
+      super(leaf);
+      this.file = null;
     }
   }
   const modals = [];
@@ -243,12 +258,17 @@ function installObsidianMock() {
     addToggle(build) {
       const toggle = {
         value: false,
+        disabled: false,
         setValue(value) {
           this.value = Boolean(value);
           return this;
         },
         getValue() {
           return this.value;
+        },
+        setDisabled(disabled) {
+          this.disabled = Boolean(disabled);
+          return this;
         },
         onChange(fn) {
           this.onChangeFn = fn;
@@ -289,12 +309,15 @@ function installObsidianMock() {
     },
   };
 
+  const Platform = { isMobile: false };
   const obsidian = {
+    FileView,
     ItemView,
     MarkdownView,
     MarkdownRenderer,
     Modal,
     Notice,
+    Platform,
     Plugin,
     PluginSettingTab,
     Setting,
@@ -362,6 +385,7 @@ function installObsidianMock() {
       };
     },
     MarkdownView,
+    Platform,
     settings,
     modals,
     restore() {
@@ -416,8 +440,11 @@ test("onload zeigt UnitedShare in der rechten Seitenleiste und in der linken Lei
   const plugin = new UnitedSharePlugin(app);
   await plugin.onload();
 
-  assert.equal(plugin.registeredViews.length, 1);
+  assert.equal(plugin.registeredViews.length, 2);
   assert.equal(plugin.registeredViews[0].type, VIEW_TYPE);
+  assert.equal(plugin.registeredViews[1].type, DUCKDB_ANSICHT_VIEW_TYPE);
+  assert.deepEqual([...plugin.registeredExtensions.extensions].sort(), ["duckdb", "parquet", "sql"]);
+  assert.equal(plugin.registeredExtensions.type, DUCKDB_ANSICHT_VIEW_TYPE);
   assert.equal(plugin.ribbons.length, 1);
   assert.equal(plugin.ribbons[0].icon, "unitedshare");
   const ribbonMark = mock.icons.find((icon) => icon.id === "unitedshare");
@@ -440,7 +467,7 @@ test("onload zeigt UnitedShare in der rechten Seitenleiste und in der linken Lei
   assert.equal(app.workspace.revealed.length, 2);
 
   plugin.onunload();
-  assert.deepEqual(app.workspace.detached, [VIEW_TYPE]);
+  assert.deepEqual(app.workspace.detached, [VIEW_TYPE, DUCKDB_ANSICHT_VIEW_TYPE]);
 });
 
 test("onload gibt den Start frei, bevor das Layout eines großen Tresors fertig ist", { timeout: 1000 }, async () => {
@@ -563,6 +590,84 @@ test("die Seitenansicht stellt die Frage und schreibt Frage plus Antwort in die 
   view.questionEl.value = "Neue Frage";
   await askButton.listeners.click();
   assert.deepEqual(asked[2], [{ role: "user", content: "Neue Frage" }]);
+});
+
+test("der Tresor-Index ist ein Desktop-Befehl und sucht ohne Ordner nicht", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const befehl = plugin.commands.find((command) => command.id === "vault-index-bge");
+  assert.ok(befehl);
+  assert.equal(befehl.name, "Tresor-Index für bge-m3 nachziehen");
+
+  const vorher = mock.requests.length;
+  await befehl.callback();
+  assert.equal(mock.notices.at(-1), "Der Tresor-Index liegt neben dem Plugin.");
+  assert.equal(mock.requests.length, vorher);
+
+  plugin.completeThread = async () => "Antworttext";
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+  view.questionEl.value = "Was steht in der Notiz?";
+  await askButton.listeners.click();
+  assert.equal(mock.requests.length, vorher);
+
+  mock.Platform.isMobile = true;
+  try {
+    await befehl.callback();
+    assert.equal(mock.notices.at(-1), "Der Tresor-Index läuft in der Desktop-App.");
+  } finally {
+    mock.Platform.isMobile = false;
+  }
+});
+
+test("ein Embedding-Fehler im Tresor hält die Frage nicht auf", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const asked = [];
+  plugin.completeThread = async (turns) => {
+    asked.push(turns);
+    return "Antworttext";
+  };
+  plugin.sucheTresor = async () => {
+    throw new UnitedShareError("Das lokale Embedding auf diesem Rechner antwortet nicht.");
+  };
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+  view.questionEl.value = "Wo liegt der Satz?";
+  await askButton.listeners.click();
+  assert.equal(asked.length, 1);
+  assert.equal(mock.notices.includes("Das lokale Embedding auf diesem Rechner antwortet nicht."), true);
+});
+
+test("ein Anhang gewinnt vor demselben Pfad im Tresor", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const asked = [];
+  plugin.completeThread = async (turns) => {
+    asked.push(turns);
+    return "Antworttext";
+  };
+  plugin.embedForFrontier = async () => [{ path: "A.md", text: "ANGEHANGEN" }];
+  plugin.sucheTresor = async () => [
+    { pfad: "A.md", stueck: 0, text: "INDEX", score: 0.9 },
+    { pfad: "B.md", stueck: 0, text: "NEU", score: 0.4 },
+  ];
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  view.attachments = ["A.md"];
+  const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+  view.questionEl.value = "Was steht bei Alpha?";
+  await askButton.listeners.click();
+  assert.deepEqual(asked[0][0].files, [
+    { path: "A.md", text: "ANGEHANGEN" },
+    { path: "B.md", text: "NEU" },
+  ]);
+  assert.equal(JSON.stringify(asked).includes("vektor"), false);
 });
 
 test("während die Frage läuft sind die Knöpfe aus, das Feld leer und das Zeichen läuft", async () => {
@@ -2413,6 +2518,22 @@ test("schließt die Modal ohne Entscheidung, zählt das als Ablehnung", async ()
   assert.equal(await promise, false);
 });
 
+test("Schreibfreigabe zeigt den vorgeschlagenen Inhalt als Text", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+
+  const inhalt = "# Notiz\n<script>untrusted</script>";
+  const promise = plugin.bestaetigeAktion({ action: "write", path: "Notiz.md", content: inhalt });
+  const modal = mock.modals[mock.modals.length - 1];
+  const vorschau = find(modal.contentEl, (n) => n.tag === "pre");
+  assert.ok(vorschau);
+  assert.equal(vorschau.text, inhalt);
+  const ablehnen = find(modal.contentEl, (n) => n.tag === "button" && n.text === "Ablehnen");
+  ablehnen.listeners.click();
+  assert.equal(await promise, false);
+});
+
 test("der Schalter für Schreiben-Bestätigung ist aus, bis er eingeschaltet wird", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);
@@ -2424,6 +2545,170 @@ test("der Schalter für Schreiben-Bestätigung ist aus, bis er eingeschaltet wir
   assert.ok(setting, "Schalter fehlt in den Einstellungen");
   await setting.toggle.change(true);
   assert.equal(plugin.settings.requireWriteConfirm, true);
+});
+
+function letzteNutzer(turns) {
+  const nutzer = (turns || []).filter((turn) => turn.role === "user");
+  return nutzer[nutzer.length - 1];
+}
+
+async function enterSeite() {
+  const seite = await offeneSeite();
+  const { plugin, view } = seite;
+  seite.bilder = [];
+  seite.asked = [];
+  plugin.generateImage = async (prompt, mass) => {
+    seite.bilder.push({ prompt, mass });
+    return { mime: "image/png", b64: PNG_B64, prompt };
+  };
+  plugin.completeThread = async (turns) => {
+    seite.asked.push(turns);
+    return "Antworttext";
+  };
+  return seite;
+}
+
+test("Enter mit zeichne beauftragt das Bild und lässt das Textmodell", async () => {
+  const { view, bilder, asked } = await enterSeite();
+  view.attachments = ["Bleibt.md"];
+  let gesammelt = 0;
+  view.collectFiles = async () => {
+    gesammelt += 1;
+    return [{ path: "Bleibt.md", text: "Hinweis" }];
+  };
+  view.questionEl.value = "zeichne eine rote Kugel";
+  await view.submit();
+  assert.equal(gesammelt, 0);
+  assert.deepEqual(view.attachments, ["Bleibt.md"]);
+  assert.equal(asked.length, 0);
+  assert.equal(bilder.length, 1);
+  assert.equal(bilder[0].prompt, "rote Kugel");
+  assert.deepEqual(bilder[0].mass, { breite: 1024, hoehe: 1024, format: "png" });
+  const messages = view.activeTab().messages;
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].content, "zeichne eine rote Kugel");
+  assert.equal(messages[1].role, "assistant");
+  assert.equal(messages[1].bilder[0].b64, PNG_B64);
+  assert.equal(view.questionEl.value, "");
+});
+
+test("Enter mit Zeichnung und Frage beauftragt Bild und Text", async () => {
+  const { view, bilder, asked } = await enterSeite();
+  const satz = "zeichne eine rote Kugel und nenne den Durchmesser";
+  view.questionEl.value = satz;
+  await view.submit();
+  assert.equal(bilder.length, 1);
+  assert.equal(bilder[0].prompt, "rote Kugel");
+  assert.equal(asked.length, 1);
+  assert.equal(letzteNutzer(asked[0]).content, "nenne den Durchmesser");
+  const messages = view.activeTab().messages;
+  assert.equal(messages.filter((message) => message.role === "user").length, 1);
+  assert.equal(messages[0].content, satz);
+  assert.equal(view.askedQuestion, satz);
+});
+
+test("Enter mit einer Frage beauftragt nur das Textmodell", async () => {
+  const { view, bilder, asked } = await enterSeite();
+  view.questionEl.value = "Was steht in der Notiz?";
+  await view.submit();
+  assert.equal(bilder.length, 0);
+  assert.equal(asked.length, 1);
+  assert.equal(letzteNutzer(asked[0]).content, "Was steht in der Notiz?");
+});
+
+test("Enter mit der Graphansicht beauftragt kein Modell", async () => {
+  const { view, bilder, asked } = await enterSeite();
+  view.questionEl.value = "zeige die Graphansicht";
+  await view.submit();
+  assert.equal(bilder.length, 0);
+  assert.equal(asked.length, 0);
+  assert.equal(view.activeTab().messages.length, 0);
+});
+
+test("Enter mit Seitenverhältnis gibt Breite und Höhe an das Bild", async () => {
+  const { view, bilder, asked } = await enterSeite();
+  view.questionEl.value = "16:9 von der fassade bei nacht";
+  await view.submit();
+  assert.equal(asked.length, 0);
+  assert.equal(bilder.length, 1);
+  assert.equal(bilder[0].prompt, "fassade bei nacht");
+  assert.equal(bilder[0].mass.breite, 1024);
+  assert.equal(bilder[0].mass.hoehe, 576);
+});
+
+test("Enter mit einem Sequenzdiagramm bleibt Text", async () => {
+  const { view, bilder, asked } = await enterSeite();
+  view.questionEl.value = "zeichne ein Sequenzdiagramm";
+  await view.submit();
+  assert.equal(bilder.length, 0);
+  assert.equal(asked.length, 1);
+  assert.equal(letzteNutzer(asked[0]).content, "zeichne ein Sequenzdiagramm");
+});
+
+test("ein unklarer Satz folgt dem lokalen Embedding", async () => {
+  const { plugin, view, bilder, asked } = await enterSeite();
+  plugin.absichtEmbed = async () => ({ bild: true, text: false, bildPrompt: "rote Kugel" });
+  view.questionEl.value = "eine rote Kugel auf weißem Grund";
+  await view.submit();
+  assert.equal(bilder.length, 1);
+  assert.equal(bilder[0].prompt, "rote Kugel");
+  assert.equal(asked.length, 0);
+  assert.equal(view.activeTab().messages[0].content, "eine rote Kugel auf weißem Grund");
+});
+
+test("eine geteilte Embedding-Antwort beauftragt Bild und Text", async () => {
+  const { plugin, view, bilder, asked } = await enterSeite();
+  plugin.absichtEmbed = async () => ({
+    bild: true,
+    text: true,
+    bildPrompt: "rote Kugel",
+    textPrompt: "nenne die Farbe",
+  });
+  view.questionEl.value = "eine rote Kugel auf weißem Grund";
+  await view.submit();
+  assert.equal(bilder[0].prompt, "rote Kugel");
+  assert.equal(letzteNutzer(asked[0]).content, "nenne die Farbe");
+  assert.equal(view.activeTab().messages[0].content, "eine rote Kugel auf weißem Grund");
+  assert.equal(view.askedQuestion, "eine rote Kugel auf weißem Grund");
+});
+
+test("eine leere Textseite im Embedding bleibt die Textfrage", async () => {
+  const { plugin, view, bilder, asked } = await enterSeite();
+  plugin.absichtEmbed = async () => ({ bild: true, text: true, bildPrompt: "rote Kugel", textPrompt: "" });
+  view.questionEl.value = "eine rote Kugel auf weißem Grund";
+  await view.submit();
+  assert.equal(bilder.length, 0);
+  assert.equal(asked.length, 1);
+  assert.equal(letzteNutzer(asked[0]).content, "eine rote Kugel auf weißem Grund");
+});
+
+test("ein werfendes Embedding bleibt die Textfrage", async () => {
+  const { plugin, view, bilder, asked } = await enterSeite();
+  plugin.absichtEmbed = async () => {
+    throw new Error("weg");
+  };
+  view.questionEl.value = "eine rote Kugel auf weißem Grund";
+  await view.submit();
+  assert.equal(bilder.length, 0);
+  assert.equal(asked.length, 1);
+  assert.equal(letzteNutzer(asked[0]).content, "eine rote Kugel auf weißem Grund");
+});
+
+test("absichtModell bleibt ein verborgener Schlüssel", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  let saved = 0;
+  plugin.loadData = async () => ({ absichtModell: "  qwen3:8b  " });
+  plugin.saveData = async () => {
+    saved += 1;
+  };
+  await plugin.onload();
+  assert.equal(plugin.settings.absichtModell, "qwen3:8b");
+  assert.equal(saved, 0);
+  const vorher = mock.settings.length;
+  await plugin.settingTab.display();
+  const neu = mock.settings.slice(vorher);
+  assert.equal(neu.some((setting) => /absicht/i.test(String(setting.name || ""))), false);
 });
 
 test.after(() => {

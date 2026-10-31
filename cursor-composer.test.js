@@ -250,6 +250,8 @@ function installComposerObsidian() {
       this.app = app;
     }
     registerView() {}
+    registerExtensions() {}
+    registerMarkdownCodeBlockProcessor() {}
     addRibbonIcon() {}
     addCommand() {}
     addSettingTab() {}
@@ -270,11 +272,13 @@ function installComposerObsidian() {
     async saveData() {}
   }
   class ItemView {}
+  class FileView extends ItemView {}
   class Modal {}
   class PluginSettingTab {}
   class Setting {}
   class MarkdownView {}
   const obsidian = {
+    FileView,
     ItemView,
     MarkdownRenderer: {},
     MarkdownView,

@@ -1,7 +1,7 @@
 "use strict";
 
-const { ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { adapterVaultHost, applyComposerAnswer, assertLoopbackEmbedUrl, assertVaultRelative, aufladenAdresse, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, executeVaultAction, fsVaultHost, isObsidianModel, keyboardCoverPx, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, prepareContextFiles, readIndexedOrHidden, readMeshInventory, resolveInsideVault, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
+const { FileView, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
+const { absichtLokal, adapterVaultHost, akzeptierePairing, applyComposerAnswer, assertLoopbackEmbedUrl, assertTailscaleAdresse, assertSyncRequest, assertVaultRelative, auftragSpalten, aufladenAdresse, bedieneSyncAnfrage, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, dateienAusTreffern, DUCKDB_ANSICHT_ENDUNGEN, duckdbDateiverweiseAusSql, duckdbSqlAusDatei, duckdbTabelleAusZeilen, duckdbVorschauAbfrage, erkenneICloudTresor, erkenneTailscaleAdresse, erzeugePairingAnfrage, erzeugePairingAngebot, executeVaultAction, fluentScriptAlsZeilen, fluentScriptKarten, fluentScriptParsen, fuehreSyncDurch, indexNachziehen, isObsidianModel, istDuckdbAnsichtEndung, keyboardCoverPx, konfliktDateiname, lanAdresseAusInterfaces, leiteSessionSchluesselAb, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, lokalText, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, mischeDateien, pairingEntschluesseln, pairingVerschluesseln, pairingVersuchErlaubt, pairingVersuchVermerken, PEER_SYNC_TOKEN_HEADER, prepareContextFiles, readIndexedOrHidden, readMeshInventory, runReemax, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, sucheImTresor, tresorIndexPfad, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
 
 // Ein 400 oder eine leere Antwort tritt "ab und zu" auf -- meist ohne offene
 // Entwicklerkonsole. console.error bleibt das Erste, aber das Fehlerprotokoll
@@ -23,6 +23,10 @@ async function protokolliereAufrufFehler(adapter, error) {
 
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
+const DUCKDB_ANSICHT_VIEW_TYPE = "unitedshare-duckdb-ansicht";
+const DUCKDB_ANSICHT_DESKTOP = "Die DuckDB-Ansicht ist nur auf dem Desktop verfügbar.";
+const DUCKDB_ANSICHT_FEHLER = "DuckDB-WASM ließ sich nicht laden.";
+const DUCKDB_ANSICHT_KEINE_ABFRAGE = "Keine Abfrage.";
 const MARK_D = "M67.562 0.672852V55.2979C67.562 63.2369 61.2603 69.6729 53.4866 69.6729H0V16.4854C0 7.75235 6.93196 0.672852 15.483 0.672852H67.562ZM48.9193 14.6729H29.7023C26.4996 14.6729 23.428 15.9679 21.1633 18.2733C18.8986 20.5786 17.6263 23.7053 17.6263 26.9655L17.6267 57.8002C17.636 58.0152 17.68 58.2276 17.7574 58.4287C17.8541 58.6801 18.0008 58.9084 18.1884 59.0993C18.3759 59.2902 18.6002 59.4396 18.8471 59.538C19.094 59.6365 19.3583 59.6819 19.6233 59.6714H27.7053C28.235 59.6714 28.7429 59.4572 29.1175 59.076C29.492 58.6948 29.7023 58.1777 29.7023 57.6386V28.9983C29.701 28.7309 29.7517 28.466 29.8515 28.2187C29.9514 27.9715 30.0984 27.7468 30.2842 27.5577C30.4698 27.3687 30.6906 27.219 30.9335 27.1174C31.1763 27.0157 31.4367 26.9641 31.6993 26.9655H48.9193C49.4489 26.9655 49.9569 26.7513 50.3314 26.3701C50.706 25.9889 50.9163 25.4719 50.9163 24.9327V16.8015C50.9168 16.2531 50.7095 15.7257 50.3375 15.3292C49.9654 14.9326 49.4575 14.6975 48.9193 14.6729Z";
 
 // Obsidian setzt den addIcon-Inhalt in viewBox 0 0 100 100. Das Zeichen der Seite ist 68×70.
@@ -62,8 +66,129 @@ function paintMesh(host, view, intro) {
 
 function runningNodeTest() {
   if (typeof process === "undefined") return false;
+  // Node 24 runs each file in its own process. That child has no --test
+  // flag. NODE_TEST_CONTEXT is set only by the test runner.
+  const ctx = process.env && String(process.env.NODE_TEST_CONTEXT || "");
+  if (ctx.startsWith("child")) return true;
   const flags = [].concat(process.execArgv || [], process.argv || []);
   return flags.includes("--test");
+}
+
+// Gleiches Muster wie die Modulprüfung im Kern: "läuft das
+// hier auf Desktop (Node verfügbar) oder Mobile?" Der Peer-Sync-Host darf nur
+// starten, wenn das hier etwas liefert. Bewusst nur http, kein https: ein
+// zusätzliches TLS-Zertifikat auf diesem Pfad wäre eine weitere Abhängigkeit
+// ohne zusätzlichen Schutz -- NICHT mehr, weil "das Mesh (Tailscale/
+// Headscale/WireGuard) die Verschlüsselung schon übernimmt": der Host
+// erkennt inzwischen zuerst eine LAN-Adresse (lanAdresseAusInterfaces()) und
+// faellt nur bei fehlendem LAN auf Tailscale zurück, läuft also auch im
+// normalen, nicht per WireGuard geschützten WLAN. Die eigentliche
+// Verschlüsselung der Nutzdaten (Manifest- und Dateiinhalte) passiert darum
+// auf Anwendungsebene: mit dem beim Pairing per ECDH+HKDF abgeleiteten
+// Sitzungsschlüssel (pairingVerschluesseln/pairingEntschluesseln im
+// Kernmodul), unabhängig vom Transport (LAN oder Tailscale). Nur
+// der Pairing-Code-Austausch selbst und der laufende Geräte-Token im Header
+// sind kein Notizinhalt und bleiben daher ohne diese zusätzliche Schicht.
+function nodeHttp() {
+  try {
+    return require("http");
+  } catch (_err) {
+    return null;
+  }
+}
+
+// Gleiches Muster wie nodeHttp(): nur auf Desktop (Node) verfuegbar, liefert
+// null auf Mobile. Wird fuer require("os").hostname() (Geraetename im
+// Pairing-Angebot) und require("os").networkInterfaces() (LAN-Erkennung,
+// siehe lanAdresseAusInterfaces() im Kernmodul) gebraucht.
+function nodeOs() {
+  try {
+    return require("os");
+  } catch (_err) {
+    return null;
+  }
+}
+
+// Kleine JSON-Antwort fuer die unauthentifizierten /pair/*-Routen -- gleiche
+// Form wie peerSyncJson() im Kernmodul (bewusst nicht von dort importiert,
+// die Pairing-Routen laufen VOR der Token-Pruefung und liegen deshalb hier).
+function pairJson(status, body) {
+  return {
+    status,
+    textkoerper: JSON.stringify(body),
+    kopfzeilen: { "content-type": "application/json; charset=utf-8" },
+  };
+}
+
+// Sowohl peerSyncAdresse (Host) als auch mobilSyncAdresse (Client) duerfen
+// jetzt ENTWEDER eine Tailscale-Adresse (100.64.0.0/10, gueltig ueber
+// assertTailscaleAdresse) ODER eine private LAN-Adresse sein (192.168.0.0/16,
+// 10.0.0.0/8, 172.16.0.0/12 -- dieselben drei Bereiche wie
+// lanAdresseAusInterfaces(), hier aber auf einen von Hand/Netzwerk
+// ankommenden String angewendet, nicht auf os.networkInterfaces()). Eine
+// ungueltige oder leere Eingabe wird zu "", nie zu einem Absturz.
+function adresseGueltig(input) {
+  const raw = String(input ?? "").trim();
+  if (!raw) return "";
+  try {
+    return assertTailscaleAdresse(raw);
+  } catch (_err) {
+    // keine Tailscale-Adresse -- weiter zur LAN-Pruefung unten.
+  }
+  const teile = raw.split(".");
+  if (teile.length !== 4) return "";
+  const zahlen = teile.map(Number);
+  if (zahlen.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return "";
+  const [a, b] = zahlen;
+  const privat = a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  return privat ? raw : "";
+}
+
+// Erzeugt ein neues Einladungstoken fuer ein Mobilgeraet. require("crypto")
+// kommt nur hier zum Einsatz -- Mobile hat kein crypto-Modul, aber diese
+// Funktion wird ohnehin nur aus dem Desktop-Einstellungs-Tab aufgerufen.
+function neuesPeerSyncToken() {
+  try {
+    return require("crypto").randomBytes(24).toString("hex");
+  } catch (_err) {
+    return "";
+  }
+}
+
+// Reine Pruefung: passt das Token zu einem der gepaarten Mobilgeraete? Kein
+// Netzwerk, kein fs -- deshalb kein eigener Testfall notwendig, aber bewusst
+// als eigene Funktion statt inline, damit bedieneSyncAnfrage() sie als
+// kontext.pruefeToken bekommt, ohne die Geraeteliste selbst zu kennen.
+function peerSyncTokenGueltig(geraete, token) {
+  const gesucht = String(token || "");
+  if (!gesucht) return false;
+  return (Array.isArray(geraete) ? geraete : []).some(
+    (eintrag) => eintrag && typeof eintrag.token === "string" && eintrag.token === gesucht,
+  );
+}
+
+// Liefert den zum Token gehoerenden Sitzungsschluessel als Buffer (32 Byte),
+// oder null -- sowohl wenn kein Geraet zu diesem Token passt, als auch wenn
+// das Geraet (vor dieser Aenderung gepaart) nur {name, token} ohne
+// symmetricKey hat. bedieneSyncAnfrage() (Kernmodul) behandelt beide Faelle
+// gleich: Anfrage ablehnen, NIE unverschluesselt weiterlaufen. symmetricKey
+// liegt als Base64-String in peerSyncGeraete (settings/data.json, siehe
+// antwortPairHandshake()) -- hier wird er zurueck in den rohen 32-Byte-
+// Schluessel dekodiert, den pairingVerschluesseln/pairingEntschluesseln
+// erwarten.
+function peerSyncSchluesselFuerToken(geraete, token) {
+  const gesucht = String(token || "");
+  if (!gesucht) return null;
+  const eintrag = (Array.isArray(geraete) ? geraete : []).find(
+    (e) => e && typeof e.token === "string" && e.token === gesucht,
+  );
+  if (!eintrag || typeof eintrag.symmetricKey !== "string" || !eintrag.symmetricKey) return null;
+  try {
+    const schluessel = Buffer.from(eintrag.symmetricKey, "base64");
+    return schluessel.length === 32 ? schluessel : null;
+  } catch (_err) {
+    return null;
+  }
 }
 
 function nativeKeyboardHeight() {
@@ -115,6 +240,18 @@ const WERKZEUGE = [
   { id: "fragen", label: "Fragen" },
 ];
 
+// Voreingestellter Port fuer den Peer-Sync-Host (Desktop-Seite). Frei
+// gewaehlt, liegt im dynamischen Bereich und kollidiert nicht mit
+// gaengigen Diensten (SGLang 8650, litellm-Gateway, Obsidian selbst nutzt
+// keinen festen Port). Aenderbar im Einstellungs-Textfeld.
+const PEER_SYNC_PORT_STANDARD = 8765;
+
+// Entprellzeit fuer den Automatik-Auslöser "Dateiänderung im Vault": erst
+// 3 Sekunden nach der letzten Änderung läuft der Sync, sonst würde jede
+// Tastenanschlag-Erkennung (Obsidian speichert laufend) einen eigenen
+// HTTP-Roundtrip auslösen.
+const MOBIL_SYNC_DEBOUNCE_MS = 3000;
+
 const DEFAULT_SETTINGS = {
   apiKey: "",
   baseUrl: "https://api.unitedshare.ai/v1",
@@ -122,11 +259,24 @@ const DEFAULT_SETTINGS = {
   timeoutMs: 90000,
   embedUrl: "http://127.0.0.1:11434",
   embedModel: "",
+  absichtModell: "",
   requireWriteConfirm: false,
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
   bildHoehe: 1024,
+  peerSyncAktiv: false,
+  peerSyncAdresse: "",
+  peerSyncAdresseArt: "",
+  peerSyncPort: PEER_SYNC_PORT_STANDARD,
+  peerSyncGeraete: [],
+  mobilSyncAktiv: false,
+  mobilSyncAdresse: "",
+  mobilSyncPort: PEER_SYNC_PORT_STANDARD,
+  mobilSyncToken: "",
+  mobilSyncSchluessel: "",
+  mobilSyncAutomatisch: false,
+  mobilSyncLetzterStand: {},
   promptWerkzeuge: {
     notiz: "menu",
     einfuegen: "menu",
@@ -411,6 +561,13 @@ class BestaetigungsModal extends Modal {
     contentEl.createEl("p", { text: schrittText(this.action) });
     const pfad = this.action && typeof this.action.path === "string" ? this.action.path : "";
     if (pfad) contentEl.createEl("p", { cls: "unitedshare-bestaetigung-pfad", text: pfad });
+    if (this.action && this.action.action === "write") {
+      contentEl.createEl("p", { text: "Vorgeschlagener vollständiger Dateiinhalt:" });
+      contentEl.createEl("pre", {
+        cls: "unitedshare-bestaetigung-inhalt",
+        text: typeof this.action.content === "string" ? this.action.content : "",
+      });
+    }
     const reihe = contentEl.createEl("div", { cls: "unitedshare-bestaetigung-knoepfe" });
     const ablehnen = reihe.createEl("button", { text: "Ablehnen", attr: { type: "button" } });
     ablehnen.addEventListener("click", () => this.entscheide(false));
@@ -1165,12 +1322,12 @@ class UnitedShareView extends ItemView {
     if (this.busy) return;
     this.menuZu(this.mehrMenu);
     this.menuZu(this.bildMenu);
-    const prompt = (this.questionEl.value || "").trim();
+    const gegeben = mass && typeof mass === "object" ? mass : {};
+    const prompt = String((gegeben && gegeben.prompt) || this.questionEl.value || "").trim();
     if (!prompt) {
       new Notice("Beschreibe das Bild.");
       return;
     }
-    const gegeben = mass && typeof mass === "object" ? mass : {};
     const einstellungen = (this.plugin && this.plugin.settings) || DEFAULT_SETTINGS;
     const breite = Number.isInteger(gegeben.breite) ? gegeben.breite : bildKante(einstellungen.bildBreite);
     const hoehe = Number.isInteger(gegeben.hoehe) ? gegeben.hoehe : bildKante(einstellungen.bildHoehe);
@@ -1486,6 +1643,22 @@ class UnitedShareView extends ItemView {
     return this.plugin.embedForFrontier({ question, mentioned, attached });
   }
 
+  async mitTresor(frage, dateien) {
+    const basis = Array.isArray(dateien) ? dateien : [];
+    let treffer = [];
+    try {
+      treffer = await this.plugin.sucheTresor(frage);
+    } catch (error) {
+      if (error instanceof UnitedShareError) {
+        if (this.statusEl && typeof this.statusEl.setText === "function") this.statusEl.setText(error.message);
+        new Notice(error.message);
+      }
+      return basis;
+    }
+    if (!Array.isArray(treffer)) return basis;
+    return mischeDateien(basis, dateienAusTreffern(treffer));
+  }
+
   aktiveMarkdown() {
     const workspace = this.app && this.app.workspace;
     if (!workspace || typeof workspace.getActiveViewOfType !== "function") return null;
@@ -1668,17 +1841,34 @@ class UnitedShareView extends ItemView {
         : (local ? "Lokale Graphansicht ist offen." : "Graphansicht ist offen."));
       return;
     }
-    let files = [];
-    try {
-      files = await this.collectFiles(question);
-    } catch (error) {
-      const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
-      this.statusEl.setText(text);
-      new Notice(text);
+    let plan = auftragSpalten(question);
+    if (!plan.bild) {
+      const erkannt = await this.plugin.absichtEinbetten(question);
+      const textLeer = erkannt && erkannt.text && !String(erkannt.textPrompt || "").trim();
+      if (erkannt && erkannt.bild && erkannt.bildPrompt && !textLeer) plan = erkannt;
+    }
+    if (plan.bild && plan.bildPrompt && !(plan.text && !String(plan.textPrompt || "").trim())) {
+      await this.frageMitBild(question, plan);
       return;
     }
-    this.attachments = [];
-    this.renderAttachments();
+    await this.frageAlsText(question, null);
+  }
+
+  async frageMitBild(question, plan) {
+    let files = [];
+    if (plan.text) {
+      try {
+        files = await this.collectFiles(question);
+      } catch (error) {
+        const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+        this.statusEl.setText(text);
+        new Notice(text);
+        return;
+      }
+      this.attachments = [];
+      this.renderAttachments();
+      files = await this.mitTresor(question, files);
+    }
     const tab = this.activeTab();
     const entry = { role: "user", content: question };
     if (files.length) entry.files = files;
@@ -1686,6 +1876,37 @@ class UnitedShareView extends ItemView {
     this.questionEl.value = "";
     if (this.keyboardInsetPx > 0) this.dismissKeyboard();
     this.askedQuestion = question;
+    const mass = { prompt: plan.bildPrompt };
+    if (Number.isInteger(plan.breite) && Number.isInteger(plan.hoehe)) {
+      mass.breite = plan.breite;
+      mass.hoehe = plan.hoehe;
+    }
+    await this.bildErzeugen(mass);
+    if (plan.text) await this.frageAlsText(plan.textPrompt, question);
+  }
+
+  async frageAlsText(question, gezeigt) {
+    const tab = this.activeTab();
+    if (gezeigt == null) {
+      let files = [];
+      try {
+        files = await this.collectFiles(question);
+      } catch (error) {
+        const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+        this.statusEl.setText(text);
+        new Notice(text);
+        return;
+      }
+      this.attachments = [];
+      this.renderAttachments();
+      files = await this.mitTresor(question, files);
+      const entry = { role: "user", content: question };
+      if (files.length) entry.files = files;
+      tab.messages.push(entry);
+      this.questionEl.value = "";
+      if (this.keyboardInsetPx > 0) this.dismissKeyboard();
+    }
+    this.askedQuestion = gezeigt || question;
     this.answer = "";
     this.busy = true;
     this.setAskControls(true);
@@ -1700,6 +1921,15 @@ class UnitedShareView extends ItemView {
         return turn;
       })
       .filter((turn) => turn.role !== "assistant" || String(turn.content || "").trim());
+    if (gezeigt != null) {
+      for (let index = turns.length - 1; index >= 0; index -= 1) {
+        if (turns[index].role !== "user") continue;
+        const turn = { role: "user", content: question };
+        if (turns[index].files && turns[index].files.length) turn.files = turns[index].files;
+        turns[index] = turn;
+        break;
+      }
+    }
     const draft = { role: "assistant", content: "", streaming: true };
     tab.messages.push(draft);
     // Vor dem ersten Zeichen passiert etwas, das niemand sieht. Bei mega
@@ -1789,6 +2019,8 @@ class UnitedShareSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.plugin.settingTab = this;
+    this.offen = false;
     this.modelTimer = null;
     this.modelGeneration = 0;
     this.modelDropdown = null;
@@ -1798,9 +2030,28 @@ class UnitedShareSettingTab extends PluginSettingTab {
     this.statusHost = null;
     this.statusMesh = null;
     this.statusGeneration = 0;
+    this.tailscaleHost = null;
+    this.tailscaleGeneration = 0;
+    this.hostAktivToggle = null;
+    this.pairingPoll = null;
+  }
+
+  // Obsidian ruft hide() beim Verlassen des Tabs auf -- der Poll-Timer (siehe
+  // display(), Pairing-Anzeige) darf dann nicht weiterlaufen.
+  hide() {
+    this.offen = false;
+    this.stopPairingPoll();
+  }
+
+  stopPairingPoll() {
+    if (this.pairingPoll) {
+      clearInterval(this.pairingPoll);
+      this.pairingPoll = null;
+    }
   }
 
   display() {
+    this.offen = true;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "UnitedShare" });
@@ -1836,6 +2087,16 @@ class UnitedShareSettingTab extends PluginSettingTab {
     this.statusHost = containerEl.createEl("div", { cls: "unitedshare-statusleiste" });
     for (const label of ["Frage als Text", "Einbettung lokal", "Dateien lokal"]) {
       this.statusHost.createEl("span", { cls: "unitedshare-pill", text: label });
+    }
+    // Automatisch erkannt, keine Einstellung dafuer: liegt der Tresor im
+    // iCloud-Drive-Container von Obsidian, synct macOS/iOS ihn selbst
+    // zwischen allen Geraeten mit demselben iCloud-Konto -- nichts zu tun,
+    // nur anzeigen, dass es schon laeuft.
+    if (erkenneICloudTresor(this.plugin.vaultAdapterRoot())) {
+      this.statusHost.createEl("span", {
+        cls: "unitedshare-pill unitedshare-pill-icloud",
+        text: "iCloud erkannt — Tresor synct automatisch",
+      });
     }
     this.statusHost.createEl("a", {
       cls: "unitedshare-pill",
@@ -1919,6 +2180,179 @@ class UnitedShareSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    // Nur Desktop: der Host braucht einen echten Netzwerk-Listener
+    // (http.createServer + Socket-Bindung), den es auf Mobile nicht gibt --
+    // ohne diese Grenze zeigte die Oberfläche Port-Feld und "Gerät koppeln"
+    // auch auf dem Handy an, wo beides nichts bewirken kann.
+    if (!Platform || !Platform.isMobile) {
+    containerEl.createEl("h3", { text: "Mobilgerät-Sync (LAN/Tailscale)" });
+    containerEl.createEl("p", {
+      text: "Öffnet einen kleinen Server, den ein Mobilgerät im selben WLAN oder über das Tailscale/Headscale-Mesh erreicht, um den Tresor abzugleichen. Standardmäßig aus. Bindet ausschließlich an die erkannte Adresse, nie an alle Netzwerkschnittstellen. Die Kopplung läuft über einen Code und ist auch über unverschlüsseltes WLAN sicher, weil die Antwort mit dem dabei ausgehandelten Schlüssel verschlüsselt wird.",
+    });
+
+    this.hostAktivToggle = null;
+    new Setting(containerEl)
+      .setName("Host aktiv")
+      .setDesc("Ein offener Port ist kein Standardverhalten — erst nach Adresse UND Einschalten startet der Server.")
+      .addToggle((toggle) => {
+        this.hostAktivToggle = toggle;
+        toggle.setValue(Boolean(this.plugin.settings.peerSyncAktiv));
+        toggle.setDisabled(!String(this.plugin.settings.peerSyncAdresse || "").trim());
+        toggle.onChange(async (value) => {
+          this.plugin.settings.peerSyncAktiv = Boolean(value);
+          await this.plugin.saveSettings();
+          this.plugin.restartPeerSyncHost();
+        });
+      });
+
+    this.tailscaleHost = containerEl.createEl("div", { cls: "unitedshare-tailscale" });
+    void this.renderAdresse();
+
+    new Setting(containerEl)
+      .setName("Port")
+      .setDesc(`Standard ${PEER_SYNC_PORT_STANDARD}.`)
+      .addText((text) => {
+        text.setValue(String(this.plugin.settings.peerSyncPort || PEER_SYNC_PORT_STANDARD));
+        text.onChange(async (value) => {
+          const port = Number(value.trim());
+          if (!Number.isInteger(port) || port <= 0 || port >= 65536) {
+            new Notice("Der Port liegt zwischen 1 und 65535.");
+            return;
+          }
+          this.plugin.settings.peerSyncPort = port;
+          await this.plugin.saveSettings();
+          this.plugin.restartPeerSyncHost();
+        });
+      });
+
+    // Pairing-Anzeige: laeuft gerade ein Angebot (this.plugin.pairingZustand,
+    // NUR im Speicher, siehe starteKoppeln()), zeigt dieser Block Code und
+    // Adresse; sonst nur den Knopf zum Start. Ein Poll-Timer prueft jede
+    // Sekunde, ob der Zustand von aussen (erfolgreicher Handshake oder
+    // Ablauf nach 5 Minuten) verworfen wurde, und rendert dann neu -- siehe
+    // stopPairingPoll()/hide().
+    this.stopPairingPoll();
+    const pairingZustand = this.plugin.pairingZustand;
+    if (pairingZustand && pairingZustand.angebot) {
+      const box = containerEl.createEl("div", { cls: "unitedshare-pairing-aktiv" });
+      box.createEl("p", { text: "Code auf dem Mobilgerät eingeben:" });
+      const codeEl = box.createEl("div", { cls: "unitedshare-pairing-code", text: pairingZustand.code });
+      if (codeEl.style) {
+        codeEl.style.fontSize = "2.2em";
+        codeEl.style.letterSpacing = "0.35em";
+        codeEl.style.fontWeight = "700";
+        codeEl.style.textAlign = "center";
+      }
+      box.createEl("p", {
+        text: `Adresse (${this.plugin.settings.peerSyncAdresseArt || "erkannt"}): ${pairingZustand.angebot.host}:${pairingZustand.angebot.port}`,
+      });
+      box.createEl("p", { text: "Gültig 5 Minuten." });
+      new Setting(containerEl).addButton((button) => {
+        button.setButtonText("Abbrechen").onClick(() => {
+          this.plugin.verwirfPairing();
+          this.display();
+        });
+      });
+      if (!runningNodeTest()) {
+        this.pairingPoll = setInterval(() => {
+          if (!this.plugin.pairingZustand) {
+            this.stopPairingPoll();
+            this.display();
+          }
+        }, 1000);
+      }
+    } else {
+      new Setting(containerEl).addButton((button) => {
+        button.setButtonText("Gerät koppeln").setCta().onClick(async () => {
+          const zustand = await this.plugin.starteKoppeln();
+          if (!zustand) {
+            new Notice("Für das Koppeln wird zuerst eine erkannte Adresse gebraucht.");
+            return;
+          }
+          this.display();
+        });
+      });
+    }
+    } // Ende: nur Desktop
+
+    if (Platform && Platform.isMobile) {
+      containerEl.createEl("h3", { text: "Mobil-Sync" });
+      containerEl.createEl("p", {
+        text: "Dieses Gerät holt sich den Tresor-Abgleich von einem Desktop-Gerät, das den Host oben eingeschaltet hat. Code und Adresse dafür zeigt das Desktop-Gerät unter \"Gerät koppeln\" an.",
+      });
+
+      const verbunden =
+        String(this.plugin.settings.mobilSyncAdresse || "").trim() &&
+        Number(this.plugin.settings.mobilSyncPort) &&
+        String(this.plugin.settings.mobilSyncToken || "").trim();
+      if (verbunden) {
+        new Setting(containerEl)
+          .setName("Status")
+          .setDesc(`Verbunden mit ${this.plugin.settings.mobilSyncAdresse}:${this.plugin.settings.mobilSyncPort}.`);
+      } else {
+        let eingabeAdresse = "";
+        let eingabeCode = "";
+        new Setting(containerEl)
+          .setName("Adresse des Desktop-Geräts")
+          .setDesc("Wie auf dem Desktop-Gerät unter \"Gerät koppeln\" angezeigt, als Adresse:Port.")
+          .addText((text) => {
+            text.setPlaceholder("192.168.1.23:8765");
+            text.setValue(eingabeAdresse);
+            text.onChange((value) => {
+              eingabeAdresse = value.trim();
+            });
+          });
+        new Setting(containerEl)
+          .setName("6-stelliger Code")
+          .addText((text) => {
+            text.setPlaceholder("123456");
+            text.inputEl.setAttribute("inputmode", "numeric");
+            text.onChange((value) => {
+              eingabeCode = value.trim();
+            });
+          });
+        new Setting(containerEl).addButton((button) => {
+          button.setButtonText("Verbinden").setCta().onClick(async () => {
+            try {
+              const ok = await this.plugin.versucheKoppeln({ hostUndPort: eingabeAdresse, code: eingabeCode });
+              if (ok) this.display();
+            } catch (err) {
+              // Ein unerwarteter, nicht abgefangener Fehler in versucheKoppeln
+              // waere sonst eine stille Unhandled-Promise-Rejection -- der
+              // Knopf haette sichtbar nichts getan. Diagnose: .vault/debug.log.
+              console.error("UnitedShare: Koppeln unerwartet fehlgeschlagen.", err);
+              new Notice("Koppeln ist unerwartet fehlgeschlagen -- siehe .vault/debug.log.");
+              const adapter = this.plugin.vaultAdapter();
+              await debugLogSchreiben(adapter, {
+                zeit: new Date().toISOString(),
+                status: 0,
+                meldung: "koppeln: unerwarteter Fehler im Knopf-Handler",
+                body: String((err && err.stack) || (err && err.message) || err),
+              });
+            }
+          });
+        });
+      }
+
+      new Setting(containerEl)
+        .setName("Automatisch synchronisieren")
+        .setDesc("Aus: nur per Knopf. An: läuft 3 Sekunden nach jeder Dateiänderung im Tresor, und jedes Mal, wenn die App wieder in den Vordergrund kommt (um eingehende Änderungen vom Desktop-Gerät abzuholen).")
+        .addToggle((toggle) => {
+          toggle.setValue(Boolean(this.plugin.settings.mobilSyncAutomatisch));
+          toggle.onChange(async (value) => {
+            this.plugin.settings.mobilSyncAutomatisch = Boolean(value);
+            await this.plugin.saveSettings();
+            this.plugin.restartMobilSyncAutomatik();
+          });
+        });
+
+      new Setting(containerEl).addButton((button) => {
+        button.setButtonText("Jetzt synchronisieren").onClick(async () => {
+          await this.plugin.mobilSyncLauf();
+        });
+      });
+    }
 
     containerEl.createEl("h3", { text: "Prompt" });
     new Setting(containerEl)
@@ -2080,6 +2514,61 @@ class UnitedShareSettingTab extends PluginSettingTab {
     if (this.statusMesh) paintMesh(this.statusMesh, view, false);
   }
 
+  // Zero-Config: die Adresse dieses Rechners wird erkannt statt von Hand
+  // eingetragen -- zuerst eine LAN-Adresse (lanAdresseAusInterfaces(),
+  // synchron, Kernmodul), nur wenn das nichts findet ein Tailscale-Fallback
+  // ("tailscale ip -4" ueber erkenneTailscaleAdresse(), Desktop-Core); siehe
+  // this.plugin.ermittleHostAdresse(). Ein alter, gespeicherter Wert wird
+  // bei einem Erkennungs-Fehlschlag NICHT geloescht (sonst verliert jemand
+  // eine funktionierende Konfiguration nur weil Tailscale gerade kurz nicht
+  // laeuft) -- nur neu erkannte, GEAENDERTE Adressen loesen einen
+  // Host-Neustart aus, damit ein blosses Oeffnen der Einstellungsseite
+  // keine laufende Mobilgeraet-Sitzung trennt.
+  async renderAdresse() {
+    const host = this.tailscaleHost;
+    if (!host) return;
+    const generation = (this.tailscaleGeneration = (this.tailscaleGeneration || 0) + 1);
+    host.empty();
+    new Setting(host).setName("Adresse dieses Rechners").setDesc("Wird erkannt …");
+    let gefunden = null;
+    if (!runningNodeTest()) {
+      // Gleiche Vorsicht wie bei restartPeerSyncHost(): nie einen echten
+      // Tailscale-Prozess im Testlauf starten, auch nicht ueber ein
+      // Settings-Tab-display(), das in Tests mehrfach aufgerufen wird.
+      try {
+        gefunden = await this.plugin.ermittleHostAdresse();
+      } catch (_err) {
+        gefunden = null;
+      }
+    }
+    if (generation !== this.tailscaleGeneration || this.tailscaleHost !== host) return;
+    host.empty();
+    const vorhanden = String(this.plugin.settings.peerSyncAdresse || "").trim();
+    if (gefunden && gefunden.adresse) {
+      if (gefunden.adresse !== vorhanden || gefunden.art !== this.plugin.settings.peerSyncAdresseArt) {
+        this.plugin.settings.peerSyncAdresse = gefunden.adresse;
+        this.plugin.settings.peerSyncAdresseArt = gefunden.art;
+        await this.plugin.saveSettings();
+        if (gefunden.adresse !== vorhanden) this.plugin.restartPeerSyncHost();
+      }
+      new Setting(host)
+        .setName("Adresse dieses Rechners")
+        .setDesc(`${gefunden.art} erkannt: ${gefunden.adresse}`);
+      if (this.hostAktivToggle) this.hostAktivToggle.setDisabled(false);
+    } else {
+      const hinweis = vorhanden
+        ? `Weder LAN noch Tailscale wurden gerade gefunden. Die zuletzt erkannte Adresse (${vorhanden}) bleibt gespeichert, bis die Erkennung wieder anschlägt.`
+        : "Weder eine LAN- noch eine Tailscale-Adresse wurden auf diesem Rechner gefunden.";
+      new Setting(host).setName("Adresse dieses Rechners").setDesc(hinweis);
+      if (this.hostAktivToggle) this.hostAktivToggle.setDisabled(!vorhanden);
+    }
+    new Setting(host).addButton((button) => {
+      button.setButtonText("Erneut prüfen").onClick(() => {
+        void this.renderAdresse();
+      });
+    });
+  }
+
   async paintStatusMesh() {
     const host = this.statusMesh;
     if (!host) return;
@@ -2172,6 +2661,113 @@ function cursorKeyboardCover() {
   );
 }
 
+// Baut aus {spalten, zeilen} (duckdbTabelleAusZeilen im Kernmodul) eine
+// einfache HTML-Tabelle -- kein Framework, reines createEl() wie im Rest
+// des Plugins. Reine DOM-Erzeugung, deshalb hier statt im Kernmodul (das
+// bleibt DOM-frei und bleibt dadurch mit node --test testbar).
+function renderDuckdbTabelle(container, tabelle) {
+  container.empty();
+  const spalten = (tabelle && tabelle.spalten) || [];
+  const zeilen = (tabelle && tabelle.zeilen) || [];
+  if (!spalten.length) {
+    container.createEl("div", { cls: "unitedshare-duckdb-leer", text: "Kein Ergebnis." });
+    return;
+  }
+  const table = container.createEl("table", { cls: "unitedshare-duckdb-tabelle" });
+  const headRow = table.createEl("thead").createEl("tr");
+  for (const spalte of spalten) headRow.createEl("th", { text: String(spalte) });
+  const tbody = table.createEl("tbody");
+  for (const zeile of zeilen) {
+    const tr = tbody.createEl("tr");
+    for (const wert of zeile) tr.createEl("td", { text: wert === "" || wert == null ? "" : String(wert) });
+  }
+}
+
+// Wandelt die Zeilen eines Apache-Arrow-Table-Ergebnisses (conn.query(...)
+// liefert laut duckdb-browser.mjs ein "new u.Table(reader)" aus dem
+// apache-arrow-Paket) in reine Zeilen-Objekte, bevor duckdbTabelleAusZeilen
+// (Kernmodul) sie in {spalten, zeilen} für renderDuckdbTabelle überführt.
+// row.toJSON() ist die dokumentierte Arrow-API für eine StructRowProxy;
+// ohne sie (ältere/abweichende Build) bleibt die Row selbst als Fallback,
+// Object.keys() liest darauf dieselben Feldnamen.
+function duckdbZeilenAlsObjekte(arrowTable) {
+  const liste = typeof arrowTable.toArray === "function" ? arrowTable.toArray() : [];
+  return liste.map((row) => (row && typeof row.toJSON === "function" ? row.toJSON() : row));
+}
+
+class UnitedShareDuckDbView extends FileView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.allowNoFile = false;
+  }
+
+  getViewType() {
+    return DUCKDB_ANSICHT_VIEW_TYPE;
+  }
+
+  getDisplayText() {
+    return this.file ? this.file.basename : "UnitedShare DuckDB-Ansicht";
+  }
+
+  getIcon() {
+    return "database";
+  }
+
+  async onLoadFile(file) {
+    this.file = file;
+    await this.renderDatei(file);
+  }
+
+  async onUnloadFile(file) {
+    this.contentEl.empty();
+    return super.onUnloadFile(file);
+  }
+
+  async renderDatei(file) {
+    const root = this.contentEl;
+    root.empty();
+    root.addClass("unitedshare-duckdb-ansicht");
+    if (Platform && Platform.isMobile) {
+      root.createEl("div", { cls: "unitedshare-duckdb-hinweis", text: DUCKDB_ANSICHT_DESKTOP });
+      return;
+    }
+    const statusEl = root.createEl("div", { cls: "unitedshare-duckdb-status", text: "Lädt…" });
+    const ergebnisEl = root.createEl("div", { cls: "unitedshare-duckdb-ergebnis" });
+    try {
+      const { db, conn } = await this.plugin.getDuckDb();
+      const endung = String(file.extension || "").toLowerCase();
+      let sql = "";
+      if (endung === "sql") {
+        const text = await this.plugin.readVaultNote(file.path);
+        sql = duckdbSqlAusDatei(text || "");
+        if (!sql) {
+          statusEl.setText(DUCKDB_ANSICHT_KEINE_ABFRAGE);
+          return;
+        }
+      } else if (endung === "parquet") {
+        const bytes = await this.plugin.readVaultBinary(file.path);
+        // registerFileBuffer lebt auf AsyncDuckDB (db), nicht auf der
+        // Connection -- siehe duckdb/duckdb-browser.mjs: dort postet sie
+        // einen REGISTER_FILE_BUFFER-Task an den Worker, genauso wie
+        // instantiate()/connect() weiter oben.
+        await db.registerFileBuffer(file.path, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+        sql = duckdbVorschauAbfrage(file.path, 100);
+      } else {
+        statusEl.setText("DuckDB-Datenbankdateien (.duckdb) direkt öffnen ist hier noch nicht unterstützt -- nur .parquet und .sql.");
+        return;
+      }
+      const arrowTable = await conn.query(sql);
+      const tabelle = duckdbTabelleAusZeilen(duckdbZeilenAlsObjekte(arrowTable));
+      statusEl.remove();
+      renderDuckdbTabelle(ergebnisEl, tabelle);
+    } catch (error) {
+      statusEl.setText(error instanceof UnitedShareError ? error.message : DUCKDB_ANSICHT_FEHLER);
+      console.error("UnitedShare: DuckDB-Ansicht fehlgeschlagen.", error);
+    }
+  }
+}
+
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
@@ -2179,6 +2775,10 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.statusBarItem.addClass("unitedshare-statusbar");
     this.addSettingTab(new UnitedShareSettingTab(this.app, this));
     this.registerView(VIEW_TYPE, (leaf) => new UnitedShareView(leaf, this));
+    this.registerView(DUCKDB_ANSICHT_VIEW_TYPE, (leaf) => new UnitedShareDuckDbView(leaf, this));
+    this.registerExtensions([...DUCKDB_ANSICHT_ENDUNGEN], DUCKDB_ANSICHT_VIEW_TYPE);
+    this.registerMarkdownCodeBlockProcessor("sql", (source, el) => this.renderSqlCodeBlock(source, el));
+    this.registerMarkdownCodeBlockProcessor("rmxos", (source, el) => this.renderRmxosCodeBlock(source, el));
     addIcon(UNITEDSHARE_ICON, markInner());
     this.addRibbonIcon(UNITEDSHARE_ICON, "UnitedShare", () => this.openSidebar());
     this.addCommand({
@@ -2198,15 +2798,889 @@ module.exports = class UnitedSharePlugin extends Plugin {
         new AskModal(this.app, (question) => this.ask(editor, question, false)).open();
       },
     });
+    this.addCommand({
+      id: "vault-index-bge",
+      name: "Tresor-Index für bge-m3 nachziehen",
+      callback: () => this.tresorIndexNachziehen(),
+    });
     this.app.workspace.onLayoutReady(() => {
       void this.openSidebar();
     });
     this.mountCursorComposer();
+    this.restartPeerSyncHost();
+    this.restartMobilSyncAutomatik();
   }
 
   onunload() {
     this.removeCursorComposer();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+    this.app.workspace.detachLeavesOfType(DUCKDB_ANSICHT_VIEW_TYPE);
+    this.schliesseDuckDb();
+    this.stopPeerSyncHost();
+    this.stopMobilSyncAutomatik();
+    this.verwirfPairing();
+  }
+
+  // -- DuckDB-WASM-Ansicht: ein Singleton pro Plugin-Laufzeit (nicht pro
+  // geöffneter Datei) -- die 41-MB-WASM-Instanz wird genau einmal geladen
+  // und von jeder .parquet-/.sql-Ansicht wiederverwendet. Ein zweiter
+  // Aufruf während des ersten Ladens bekommt denselben Promise zurück,
+  // nie eine zweite Instanz.
+  // Die echte Ursache ging bisher beim Werfen verloren (nur die allgemeine
+  // Meldung DUCKDB_ANSICHT_FEHLER kam beim Menschen an) -- console.error
+  // UND .vault/debug.log bekommen jetzt die wirkliche Fehlermeldung/den
+  // Stack, die Oberfläche bleibt bei der verständlichen Kurzfassung.
+  _duckdbFehler(meldung, ursache) {
+    console.error("UnitedShare: DuckDB-WASM-Initialisierung fehlgeschlagen.", ursache);
+    const adapter = this.vaultAdapter();
+    void debugLogSchreiben(adapter, {
+      zeit: new Date().toISOString(),
+      status: 0,
+      meldung: "duckdb: Initialisierung fehlgeschlagen",
+      body: String((ursache && ursache.stack) || (ursache && ursache.message) || ursache),
+    });
+    return new UnitedShareError(meldung, 0);
+  }
+
+  getDuckDb() {
+    if (!this.duckdbPromise) {
+      this.duckdbPromise = this.initDuckDb().catch((error) => {
+        this.duckdbPromise = null; // ein späterer Versuch darf es erneut probieren
+        throw error;
+      });
+    }
+    return this.duckdbPromise;
+  }
+
+  async initDuckDb() {
+    if (Platform && Platform.isMobile) throw new UnitedShareError(DUCKDB_ANSICHT_DESKTOP, 0);
+    const adapter = this.vaultAdapter();
+    const basis = String((this.manifest && this.manifest.dir) || "").replace(/\/+$/, "");
+    if (!adapter || !basis || typeof adapter.read !== "function" || typeof adapter.readBinary !== "function" || typeof adapter.getFullPath !== "function") {
+      throw new UnitedShareError(DUCKDB_ANSICHT_DESKTOP, 0);
+    }
+    // this.manifest.dir ist vault-relativ. Der Adapter liefert den vollen
+    // Pfad nur für require() der CommonJS-Datei. Worker und WASM kommen als
+    // Bytes aus adapter.read und adapter.readBinary.
+    const cjsRel = `${basis}/duckdb/duckdb-browser.cjs`;
+    const workerRel = `${basis}/duckdb/duckdb-browser-eh.worker.js`;
+    const wasmRel = `${basis}/duckdb/duckdb-eh.wasm`;
+    // Bewusst require() der CommonJS-Variante (duckdb-browser.cjs) statt
+    // import() der ES-Modul-Variante (duckdb-browser.mjs) ueber eine
+    // file://-URL: dynamisches import() einer file://-URL scheitert in
+    // Obsidians Electron-Fenster mit "Failed to fetch dynamically imported
+    // module" -- geht ueber dieselbe Chromium-Fetch-Schicht, die auch beim
+    // WASM-Laden weiter unten faellt, siehe dortigen Kommentar. require()
+    // nutzt dagegen Nodes eigene, synchrone Modulaufloesung.
+    let duckdb;
+    try {
+      duckdb = require(adapter.getFullPath(cjsRel));
+    } catch (err) {
+      throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, err);
+    }
+    // Zwei VERSCHIEDENE Regeln, nicht eine -- die Verwechslung hat den
+    // vorigen Versuch gekostet:
+    //   1) new Worker(url) VERLANGT zwingend denselben Origin wie die Seite
+    //      selbst (hier app://obsidian.md) -- das ist eine harte Browser-
+    //      Spezifikationsregel, kein Header kann sie umgehen. Eine
+    //      http://127.0.0.1-URL ist ein ANDERER Origin -> SecurityError,
+    //      reproduzierbar gemessen. Eine blob:-URL erbt dagegen den Origin
+    //      der Seite, die sie erzeugt hat -- genau das wird hier gebraucht.
+    //   2) Das fetch() DER .wasm-DATEI, das der Worker intern aufruft, ist
+    //      eine andere API mit anderen Regeln -- cross-origin erlaubt,
+    //      solange Access-Control-Allow-Origin gesetzt ist. Dafuer bleibt
+    //      der lokale HTTP-Server (127.0.0.1) richtig, nur mit CORS-Header.
+    // "eh" (Exception Handling) statt "mvp": bestaetigter Fehler im
+    // duckdb-wasm-Projekt selbst (github.com/duckdb/duckdb-wasm Issue
+    // #2267) -- im MVP-Bundle verschluckt sich JEDE DuckDB-Fehlermeldung
+    // selbst zu "ReferenceError: _setThrew is not defined", weil die
+    // JS-Glue-Ausnahmebehandlung (invoke_ii/_setThrew) nie an den echten
+    // WASM-Export gebunden wird. Erfolgreiche Abfragen waeren unbetroffen
+    // gewesen, aber JEDE Fehlermeldung (falsches SQL, fehlende Datei) haette
+    // dieselbe nichtssagende Meldung gezeigt. "eh" nutzt native WASM-
+    // Ausnahmebehandlung, braucht diese Hilfskonstruktion gar nicht erst.
+    let workerCode = "";
+    try {
+      workerCode = await adapter.read(workerRel);
+    } catch (err) {
+      throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, err);
+    }
+    if (typeof workerCode !== "string" || !workerCode) {
+      throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, new Error("Der DuckDB-Worker ließ sich nicht lesen."));
+    }
+    // Root Cause, diesmal wirklich bis zum Ende verfolgt (der erste Versuch
+    // -- globalThis.Buffer setzen -- griff nicht, siehe Begruendung unten):
+    // js-sha256 (im Worker mitgeliefert) haelt sich faelschlich fuer
+    // "echtes Node.js" (process.versions.node gesetzt, process.type aber
+    // NICHT "renderer") und liest darum Node-eigenes require("buffer")
+    // statt eines eigenen Web-Ersatzes. esbuild hat beim Bauen des
+    // vendorten Workers "buffer" als externes Node-Modul behandelt, aber
+    // ohne echte Node-Umgebung bleibt der Platzhalter dafuer LEER
+    // (`var Ol=pr(()=>{})` -- ein Lazy-Require-Stub, dessen Fabrikfunktion
+    // ein No-Op ist und IMMER `{}` liefert, unabhaengig von globalThis).
+    // Genau DARUM griff der erste Fix nicht: globalThis.Buffer zu setzen
+    // aendert nichts an diesem isolierten, zur Baeuzeit leeren Stub.
+    // Die einzig wirksame Stelle ist der Stub selbst: das Muster
+    // "<name>().Buffer" im Quelltext suchen (zeigt, welcher Name fuer
+    // "buffer" steht -- bei dieser Version "Ol", aber bewusst nicht
+    // hartkodiert, falls sich das mit einer anderen duckdb-wasm-Version
+    // verschiebt) und dessen No-Op-Fabrik durch eine ersetzen, die
+    // tatsaechlich ein Buffer-Objekt liefert.
+    let patchedWorkerCode = workerCode;
+    const bufferStubMatch = workerCode.match(/(\w+)\(\)\.Buffer/);
+    if (bufferStubMatch) {
+      const stubName = bufferStubMatch[1];
+      const stubDeclRegex = new RegExp(`var ${stubName}=pr\\(\\(\\)=>\\{\\}\\)`);
+      patchedWorkerCode = patchedWorkerCode.replace(
+        stubDeclRegex,
+        `var ${stubName}=pr((e)=>{e.Buffer={from:function(v){if(typeof v==="string")return new TextEncoder().encode(v);if(ArrayBuffer.isView(v))return new Uint8Array(v.buffer,v.byteOffset,v.byteLength);return new Uint8Array(v)},isBuffer:function(){return false}}})`,
+      );
+      if (patchedWorkerCode === workerCode) {
+        // Muster gefunden, aber die genaue Stub-Form hat sich nicht
+        // getroffen (z. B. andere duckdb-wasm-Version) -- lieber klar
+        // scheitern als still eine wirkungslose Kopie weiterreichen.
+        throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, new Error(`Buffer-Stub "${stubName}" nicht ersetzbar -- Musterform hat sich geaendert.`));
+      }
+    }
+    const workerBlob = new Blob([patchedWorkerCode], { type: "text/javascript" });
+    const workerUrl = URL.createObjectURL(workerBlob);
+    const worker = new Worker(workerUrl);
+    URL.revokeObjectURL(workerUrl); // der Worker hat das Skript beim Konstruieren schon geladen
+    const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+    let wasmBytes;
+    try {
+      const roh = await adapter.readBinary(wasmRel);
+      wasmBytes = roh instanceof Uint8Array ? roh : new Uint8Array(roh || []);
+    } catch (err) {
+      throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, err);
+    }
+    if (!wasmBytes.byteLength) {
+      throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, new Error("Die DuckDB-WASM-Datei ließ sich nicht lesen."));
+    }
+    let wasmServer;
+    try {
+      wasmServer = await this._duckdbStatischeDateiServen(wasmBytes, "duckdb-eh.wasm", "application/wasm");
+    } catch (err) {
+      throw this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, err);
+    }
+    try {
+      await db.instantiate(wasmServer.url);
+    } catch (err) {
+      wasmServer.stop();
+      throw err instanceof UnitedShareError ? err : this._duckdbFehler(DUCKDB_ANSICHT_FEHLER, err);
+    }
+    // Bleibt absichtlich stehen, solange die DuckDB-Instanz lebt -- der
+    // Worker kann die .wasm bei Bedarf erneut anfordern (z. B. nach einem
+    // internen Neustart). schliesseDuckDb() raeumt ihn ab.
+    this._duckdbServerStopper = [wasmServer.stop];
+    const conn = await db.connect();
+    return { duckdb, db, conn };
+  }
+
+  // Winziger, rein lokaler statischer Dateiserver fuer GENAU eine Datei --
+  // kein allgemeiner Zweck, kein Routing, bindet ausschliesslich an
+  // 127.0.0.1 mit Port 0 (Betriebssystem waehlt einen freien Port), nie
+  // von aussen erreichbar. Gibt {url, stop} zurueck.
+  async _duckdbStatischeDateiServen(inhalt, basename, contentType) {
+    const http = nodeHttp();
+    if (!http) throw new UnitedShareError(DUCKDB_ANSICHT_DESKTOP, 0);
+    const bytes = inhalt instanceof Uint8Array ? inhalt : new Uint8Array(inhalt || []);
+    const server = http.createServer((_req, res) => {
+      // Access-Control-Allow-Origin noetig: der Fetch kommt aus einem
+      // anderen Origin (app://obsidian.md) als dieser Server
+      // (http://127.0.0.1:<port>) -- anders als bei new Worker() (siehe
+      // initDuckDb()) ist das bei fetch() per CORS-Header erlaubbar.
+      res.writeHead(200, {
+        "content-type": contentType,
+        "content-length": bytes.byteLength,
+        "access-control-allow-origin": "*",
+      });
+      res.end(bytes);
+    });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
+    });
+    const { port } = server.address();
+    return {
+      url: `http://127.0.0.1:${port}/${basename}`,
+      stop: () => {
+        try {
+          server.close();
+        } catch (_err) {
+          /* lief schon nicht mehr */
+        }
+      },
+    };
+  }
+
+  schliesseDuckDb() {
+    if (!this.duckdbPromise) return;
+    const laufend = this.duckdbPromise;
+    this.duckdbPromise = null;
+    for (const stop of this._duckdbServerStopper || []) {
+      try {
+        stop();
+      } catch (_err) {
+        /* lief schon nicht mehr */
+      }
+    }
+    this._duckdbServerStopper = null;
+    laufend
+      .then(({ conn, db } = {}) => {
+        if (conn && typeof conn.close === "function") conn.close().catch(() => {});
+        if (db && typeof db.terminate === "function") db.terminate().catch(() => {});
+      })
+      .catch(() => {});
+  }
+
+  // -- SQL-Codeblock direkt in einer Notiz (``` sql ... ```) -- nutzt GENAU
+  // dieselbe DuckDB-Singleton-Verbindung (getDuckDb()) und dieselbe
+  // Tabellen-Darstellung (renderDuckdbTabelle) wie UnitedShareDuckDbView,
+  // keine zweite WASM-Instanz. Relative Dateiverweise im SQL-Text (z. B.
+  // FROM 'daten.parquet') werden als Tresor-relative Pfade behandelt: ueber
+  // readVaultBinary() gelesen und per registerFileBuffer() unter GENAU dem
+  // String registriert, den DuckDB im FROM sieht -- siehe
+  // duckdbDateiverweiseAusSql() (Kernmodul) fuer die Erkennung und
+  // UnitedShareDuckDbView.renderDatei() fuer dasselbe Prinzip bei einer
+  // einzelnen .parquet-Datei. Fehlt eine verwiesene Datei im Tresor, wird
+  // sie einfach nicht registriert -- DuckDBs eigene "file not found"-
+  // Fehlermeldung landet dann (abgefangen, nicht geworfen) im el.
+  async renderSqlCodeBlock(source, el) {
+    el.empty();
+    el.addClass("unitedshare-duckdb-ansicht");
+    el.addClass("unitedshare-duckdb-sql-block");
+    if (Platform && Platform.isMobile) {
+      el.createEl("div", { cls: "unitedshare-duckdb-hinweis", text: DUCKDB_ANSICHT_DESKTOP });
+      return;
+    }
+    const sql = duckdbSqlAusDatei(source || "");
+    if (!sql) {
+      el.createEl("div", { cls: "unitedshare-duckdb-leer", text: DUCKDB_ANSICHT_KEINE_ABFRAGE });
+      return;
+    }
+    const statusEl = el.createEl("div", { cls: "unitedshare-duckdb-status", text: "Lädt…" });
+    const ergebnisEl = el.createEl("div", { cls: "unitedshare-duckdb-ergebnis" });
+    try {
+      const { db, conn } = await this.getDuckDb();
+      for (const pfad of duckdbDateiverweiseAusSql(sql)) {
+        let bytes = null;
+        try {
+          bytes = await this.readVaultBinary(pfad);
+        } catch (_err) {
+          continue; // nicht im Tresor -- DuckDBs eigene Fehlermeldung greift unten
+        }
+        if (!bytes) continue;
+        await db.registerFileBuffer(pfad, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+      }
+      const arrowTable = await conn.query(sql);
+      const tabelle = duckdbTabelleAusZeilen(duckdbZeilenAlsObjekte(arrowTable));
+      statusEl.remove();
+      renderDuckdbTabelle(ergebnisEl, tabelle);
+    } catch (error) {
+      statusEl.setText(error instanceof UnitedShareError ? error.message : DUCKDB_ANSICHT_FEHLER);
+      console.error("UnitedShare: SQL-Codeblock fehlgeschlagen.", error);
+    }
+  }
+
+  // rmxos-Codeblöcke: reine Anzeige der FluentScript-Nachricht als Karte(n).
+  // Bewusst ohne Ausführung/Netzwerk -- fluentScriptParsen/-Karten sind reine
+  // Funktionen, hier nur ins DOM gebracht.
+  renderRmxosCodeBlock(source, el) {
+    el.empty();
+    el.addClass("unitedshare-rmxos-block");
+    let ketten;
+    try {
+      ketten = fluentScriptParsen(source || "");
+    } catch (error) {
+      const meldung = error instanceof UnitedShareError ? error.message : String((error && error.message) || error);
+      el.createEl("div", { cls: "unitedshare-rmxos-fehler", text: `FluentScript ungültig: ${meldung}` });
+      return;
+    }
+    // Mehrere gleichfoermige Ketten (gleicher Kopfverb, gleiche Aufrufnamen --
+    // z. B. mehrere result(...).ok().value(...)-Ketten durch ";" getrennt)
+    // lassen sich als Tabelle lesen, nicht nur als Liste einzelner Karten.
+    // fluentScriptAlsZeilen() gibt dafuer `null` zurueck, wenn die Ketten
+    // nicht zueinander passen -- dann bleibt es bei der Karten-Ansicht.
+    const zeilen = fluentScriptAlsZeilen(ketten);
+    if (zeilen) {
+      renderDuckdbTabelle(el, duckdbTabelleAusZeilen(zeilen));
+    } else {
+      for (const karte of fluentScriptKarten(ketten)) {
+        const karteEl = el.createEl("div", { cls: "unitedshare-rmxos-karte" });
+        karteEl.createEl("div", {
+          cls: "unitedshare-rmxos-kopf",
+          text: karte.id ? `${karte.kopfverb}("${karte.id}")` : `${karte.kopfverb}()`,
+        });
+        const listeEl = karteEl.createEl("ul", { cls: "unitedshare-rmxos-felder" });
+        for (const feld of karte.felder) {
+          listeEl.createEl("li", { text: feld.wert ? `${feld.name}: ${feld.wert}` : feld.name });
+        }
+      }
+    }
+    el.createEl("div", {
+      cls: "unitedshare-rmxos-hinweis",
+      text: "Nur Anzeige -- Ausführung kommt später.",
+    });
+  }
+
+  // -- Peer-Sync-Host (Desktop-Seite, Mobile folgt in einem späteren Schritt) --
+
+  stopPeerSyncHost() {
+    if (this.peerSyncServer) {
+      try {
+        this.peerSyncServer.close();
+      } catch (_err) {
+        /* Der Server lief schon nicht mehr. */
+      }
+      this.peerSyncServer = null;
+    }
+  }
+
+  // Einziger Einstiegspunkt zum (Neu-)Starten: stoppt immer zuerst einen
+  // laufenden Server, damit ein Settings-Wechsel (Schalter, Adresse, Port)
+  // nie zwei Server gleichzeitig offen lässt.
+  restartPeerSyncHost() {
+    this.stopPeerSyncHost();
+    if (runningNodeTest()) return; // nie einen echten Socket im Testlauf öffnen
+    if (!this.settings || !this.settings.peerSyncAktiv) return;
+    const http = nodeHttp();
+    if (!http) return; // nie auf Mobile
+    const adresse = String(this.settings.peerSyncAdresse || "").trim();
+    if (!adresse) return;
+    const port = Number(this.settings.peerSyncPort) || 0;
+    if (!port) return;
+    const server = http.createServer((req, res) => {
+      void this.handlePeerSyncRequest(req, res);
+    });
+    server.on("error", (error) => {
+      console.error("UnitedShare: Peer-Sync-Host-Fehler.", error);
+    });
+    try {
+      server.listen(port, adresse);
+    } catch (error) {
+      console.error("UnitedShare: Peer-Sync-Host ließ sich nicht starten.", error);
+      return;
+    }
+    this.peerSyncServer = server;
+  }
+
+  // -- Adresserkennung mit Rangfolge: zuerst LAN, nur bei Fehlschlag
+  // Tailscale. lanAdresseAusInterfaces() ist synchron und rein (Kernmodul,
+  // injiziertes os.networkInterfaces()); erkenneTailscaleAdresse() ruft
+  // einen echten Unterprozess auf ("tailscale ip -4"), deshalb async. Das
+  // Ergebnis trägt die Art mit (fürs Anzeigen in der Oberfläche), nicht nur
+  // die Adresse.
+  async ermittleHostAdresse() {
+    const os = nodeOs();
+    if (os && typeof os.networkInterfaces === "function") {
+      try {
+        const lan = lanAdresseAusInterfaces(os.networkInterfaces());
+        if (lan) return { adresse: lan, art: "LAN" };
+      } catch (_err) {
+        // weiter zum Tailscale-Fallback
+      }
+    }
+    try {
+      const ts = await erkenneTailscaleAdresse();
+      if (ts) return { adresse: ts, art: "Tailscale" };
+    } catch (_err) {
+      /* keine Adresse erkannt -- kein Fehler, nur kein Treffer */
+    }
+    return null;
+  }
+
+  // -- Pairing (Host-Seite) -----------------------------------------------
+  // Ersetzt die alte "Mobilgerät einladen"-Oberflaeche. Der Zustand lebt
+  // AUSSCHLIESSLICH im Speicher dieses Plugin-Objekts (this.pairingZustand),
+  // nie in settings/data.json -- er ist maximal 5 Minuten gueltig und danach
+  // wertlos. {angebot, privaterSchluessel, code, token, versuche,
+  // erfolgreich, laeuftAbAm}: die letzten drei Felder sind das, was
+  // pairingVersuchErlaubt()/pairingVersuchVermerken() (Kernmodul) lesen und
+  // zurückgeben -- pairingVersuchVermerken() liefert NUR diese drei Felder
+  // zurueck, darum wird das Ergebnis immer mit dem Rest des Zustands
+  // gemergt (siehe antwortPairHandshake()), sonst wären angebot/
+  // privaterSchluessel/code/token nach dem ersten Versuch weg.
+
+  async starteKoppeln() {
+    this.verwirfPairing();
+    const adresse = String((this.settings && this.settings.peerSyncAdresse) || "").trim();
+    if (!adresse) return null;
+    const port = Number(this.settings.peerSyncPort) || PEER_SYNC_PORT_STANDARD;
+    const os = nodeOs();
+    let geraetename = "Dieser Rechner";
+    try {
+      if (os && typeof os.hostname === "function") geraetename = os.hostname() || geraetename;
+    } catch (_err) {
+      /* Platzhalter bleibt stehen */
+    }
+    const { angebot, privaterSchluessel, code } = await erzeugePairingAngebot({ host: adresse, port, geraetename });
+    const token = neuesPeerSyncToken();
+    if (!token) return null;
+    this.pairingZustand = {
+      angebot,
+      privaterSchluessel,
+      code,
+      token,
+      versuche: 0,
+      erfolgreich: false,
+      laeuftAbAm: angebot.expiresAt,
+    };
+    const verzoegerung = Math.max(0, angebot.expiresAt - Date.now());
+    this.pairingTimeout = setTimeout(() => this.verwirfPairing(), verzoegerung);
+    return this.pairingZustand;
+  }
+
+  verwirfPairing() {
+    if (this.pairingTimeout) {
+      clearTimeout(this.pairingTimeout);
+      this.pairingTimeout = null;
+    }
+    this.pairingZustand = null;
+  }
+
+  // GET /pair/offer -- unauthentifiziert, liefert nur die oeffentlichen
+  // Felder des Angebots. 404 ohne laufendes Pairing.
+  antwortPairOffer() {
+    const zustand = this.pairingZustand;
+    if (!zustand || !zustand.angebot) return pairJson(404, { fehler: "kein Pairing aktiv" });
+    const { host, port, publicKey, codeHash, expiresAt, deviceName } = zustand.angebot;
+    return pairJson(200, { host, port, publicKey, codeHash, expiresAt, deviceName });
+  }
+
+  // POST /pair/handshake -- unauthentifiziert (das Mobilgeraet hat vor
+  // einem erfolgreichen Handshake noch kein Token). Body ist direkt die
+  // Anfrage aus erzeugePairingAnfrage() ({clientPublicKey, codeProof,
+  // deviceName}). pairingVersuchErlaubt() wird VOR akzeptierePairing()
+  // geprueft -- ein verbrauchter oder abgelaufener Zustand bekommt gar
+  // keinen Versuch mehr. 410 statt 429: "dieser Code gilt nicht mehr" trifft
+  // beide Faelle (Ablauf wie Verbrauch) genauer als eine Rate-Limit-Meldung.
+  async antwortPairHandshake(textkoerper) {
+    const zustand = this.pairingZustand;
+    if (!zustand) return pairJson(410, { fehler: "kein Pairing aktiv" });
+    if (!pairingVersuchErlaubt(zustand)) {
+      this.verwirfPairing();
+      return pairJson(410, { fehler: "Pairing abgelaufen oder verbraucht." });
+    }
+    let body;
+    try {
+      body = JSON.parse(String(textkoerper || "{}"));
+    } catch (_err) {
+      this.pairingZustand = { ...zustand, ...pairingVersuchVermerken(zustand, false) };
+      return pairJson(400, { fehler: "ungueltiger Textkoerper" });
+    }
+    let session;
+    try {
+      session = await akzeptierePairing({
+        anfrage: body,
+        privaterSchluessel: zustand.privaterSchluessel,
+        erwarteterCode: zustand.code,
+        angebot: zustand.angebot,
+      });
+    } catch (_err) {
+      this.pairingZustand = { ...zustand, ...pairingVersuchVermerken(zustand, false) };
+      return pairJson(401, { fehler: "Pairing fehlgeschlagen." });
+    }
+    this.pairingZustand = { ...zustand, ...pairingVersuchVermerken(zustand, true) };
+    const liste = Array.isArray(this.settings.peerSyncGeraete) ? this.settings.peerSyncGeraete.slice() : [];
+    // symmetricKey ueber die Kopplung hinaus aufbewahren (nicht nur fuer die
+    // einmalige Verschluesselung der Pairing-Antwort unten) -- jeder
+    // weitere Sync-Request/-Response dieses Geraets wird damit ver-/
+    // entschluesselt (bedieneSyncAnfrage() im Kernmodul, ueber
+    // peerSyncKontext().schluesselFuerToken()). Landet als Base64-String in
+    // settings/data.json -- akzeptabel, data.json bleibt lokal auf diesem
+    // Geraet, anders als der Sync-Traffic selbst.
+    liste.push({
+      name: session.peerDeviceName || `Gerät ${liste.length + 1}`,
+      token: zustand.token,
+      symmetricKey: session.symmetricKey.toString("base64"),
+    });
+    this.settings.peerSyncGeraete = liste;
+    await this.saveSettings();
+    const antwortDaten = JSON.stringify({
+      token: zustand.token,
+      adresse: zustand.angebot.host,
+      port: zustand.angebot.port,
+    });
+    const verschluesselt = await pairingVerschluesseln(antwortDaten, session.symmetricKey);
+    this.verwirfPairing();
+    return pairJson(200, verschluesselt);
+  }
+
+  // kontext für bedieneSyncAnfrage() -- die reine, getestete Logik bleibt im
+  // Kernmodul; hier kommen nur die echten Tresor-Zugriffe über
+  // adapterVaultHost(this.vaultAdapter()) dazu.
+  peerSyncKontext() {
+    const host = adapterVaultHost(this.vaultAdapter());
+    const vault = this.app && this.app.vault;
+    return {
+      pruefeToken: (token) => peerSyncTokenGueltig(this.settings.peerSyncGeraete, token),
+      schluesselFuerToken: (token) => peerSyncSchluesselFuerToken(this.settings.peerSyncGeraete, token),
+      listeDateien: () => {
+        if (!vault || typeof vault.getFiles !== "function") return [];
+        return vault.getFiles().map((file) => ({
+          pfad: file.path,
+          mtime: file.stat && file.stat.mtime,
+          groesse: file.stat && file.stat.size,
+        }));
+      },
+      liesInhalt: (pfad) => host.read(pfad),
+      existiertDatei: async (pfad) => (await host.read(pfad)) !== null,
+      schreibeInhalt: (pfad, inhalt) => host.write(pfad, inhalt),
+    };
+  }
+
+  async handlePeerSyncRequest(req, res) {
+    let antwort;
+    try {
+      const url = new URL(req.url, "http://peer-sync.local");
+      const suche = {};
+      for (const [schluessel, wert] of url.searchParams) suche[schluessel] = wert;
+      let textkoerper = "";
+      if (req.method === "POST" || req.method === "PUT") {
+        textkoerper = await new Promise((resolve) => {
+          let data = "";
+          req.on("data", (chunk) => {
+            data += chunk;
+          });
+          req.on("end", () => resolve(data));
+          req.on("error", () => resolve(data));
+        });
+      }
+      // /pair/* laeuft VOR der Token-Pruefung in bedieneSyncAnfrage() --
+      // das Angebot selbst ist nicht geheim (nur Code und privater
+      // Schluessel bleiben auf dem Host, siehe starteKoppeln()), und ein
+      // Mobilgeraet hat vor dem Handshake noch gar kein Token.
+      if (req.method === "GET" && url.pathname === "/pair/offer") {
+        antwort = this.antwortPairOffer();
+      } else if (req.method === "POST" && url.pathname === "/pair/handshake") {
+        antwort = await this.antwortPairHandshake(textkoerper);
+      } else {
+        const anfrage = {
+          methode: req.method,
+          pfad: url.pathname,
+          suche,
+          kopfzeilen: req.headers || {},
+          textkoerper,
+        };
+        antwort = await bedieneSyncAnfrage(anfrage, this.peerSyncKontext());
+      }
+    } catch (error) {
+      console.error("UnitedShare: Peer-Sync-Anfrage fehlgeschlagen.", error);
+      antwort = {
+        status: 500,
+        textkoerper: JSON.stringify({ fehler: "interner Fehler" }),
+        kopfzeilen: { "content-type": "application/json; charset=utf-8" },
+      };
+    }
+    res.writeHead(antwort.status, antwort.kopfzeilen || {});
+    res.end(antwort.textkoerper || "");
+  }
+
+  // -- Peer-Sync-Client (Mobile-Seite) -----------------------------------------
+  // Spricht den Peer-Sync-Host eines gepaarten Desktop-Geräts an. fetchImpl
+  // ist requestUrlAsFetch() -- dasselbe, das auch die Modellaufrufe nutzen --
+  // statt eines rohen fetch(): Capacitor (iOS/Android) blockiert fetch()
+  // gegen beliebige Hosts per CORS, requestUrl() nicht. Die reine
+  // Ablauflogik (push/pull/konflikt) bleibt vollständig in fuehreSyncDurch()
+  // im Kernmodul -- hier kommen nur die echten Netzwerk- und Tresor-Zugriffe
+  // als injizierte Callbacks dazu.
+
+  mobilSyncVerbindungVollstaendig() {
+    const s = this.settings || {};
+    return Boolean(
+      String(s.mobilSyncAdresse || "").trim() &&
+        Number(s.mobilSyncPort) &&
+        String(s.mobilSyncToken || "").trim() &&
+        String(s.mobilSyncSchluessel || "").trim(),
+    );
+  }
+
+  // Dekodiert mobilSyncSchluessel (Base64, siehe versucheKoppeln()) zurueck
+  // in den rohen 32-Byte-AES-256-GCM-Schluessel, oder null bei fehlendem/
+  // ungueltigem Wert -- Spiegelbild von peerSyncSchluesselFuerToken() oben.
+  mobilSyncSchluesselBuffer() {
+    const raw = String((this.settings && this.settings.mobilSyncSchluessel) || "").trim();
+    if (!raw) return null;
+    try {
+      const schluessel = Buffer.from(raw, "base64");
+      return schluessel.length === 32 ? schluessel : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  // Wirft denselben klaren Fehler an jeder Stelle, die ohne Sitzungsschluessel
+  // nicht weiterlaufen darf -- Geraete, die VOR dieser Aenderung gekoppelt
+  // wurden, haben nur mobilSyncToken, kein mobilSyncSchluessel. Kein Absturz,
+  // kein unverschluesselter Weiterlauf, sondern dieser Fehlschlag.
+  mobilSyncSchluesselOderFehler() {
+    const schluessel = this.mobilSyncSchluesselBuffer();
+    if (!schluessel) {
+      throw new UnitedShareError(
+        "Dieses Gerät wurde vor der Verschlüsselung gekoppelt. Bitte erneut koppeln.",
+        0,
+      );
+    }
+    return schluessel;
+  }
+
+  async mobilSyncAnfrage(pfad, init = {}) {
+    const s = this.settings;
+    const url = `http://${s.mobilSyncAdresse}:${s.mobilSyncPort}${pfad}`;
+    const headers = Object.assign({}, init.headers, { [PEER_SYNC_TOKEN_HEADER]: s.mobilSyncToken });
+    const fetchImpl = requestUrlAsFetch();
+    const res = await fetchImpl(url, Object.assign({}, init, { headers }));
+    if (!res.ok) {
+      throw new UnitedShareError(
+        res.status === 401
+          ? "Das Token stimmt nicht mit dem Desktop-Gerät überein."
+          : `Das Desktop-Gerät antwortete mit Status ${res.status}.`,
+        res.status,
+      );
+    }
+    return res;
+  }
+
+  // Liefert die injizierten Callbacks für fuehreSyncDurch() -- Spiegelbild
+  // von peerSyncKontext() oben, nur als Client statt als Server. Jeder
+  // Request-/Response-Body mit echtem Notizinhalt (Manifest, Dateiinhalt)
+  // wird hier ver-/entschlüsselt -- Gegenstück zu
+  // peerSyncVerschluesselteJson()/peerSyncEntschluesselterKoerper() im
+  // Kernmodul auf der Host-Seite.
+  mobilSyncHost() {
+    const host = adapterVaultHost(this.vaultAdapter());
+    const vault = this.app && this.app.vault;
+    const vorhandenePfade = () =>
+      new Set((vault && typeof vault.getFiles === "function" ? vault.getFiles() : []).map((f) => f.path));
+    return {
+      fernManifestHolen: async () => {
+        const schluessel = this.mobilSyncSchluesselOderFehler();
+        const res = await this.mobilSyncAnfrage("/manifest", { method: "GET" });
+        const verschluesselt = await res.json();
+        const klartext = await pairingEntschluesseln(verschluesselt, schluessel);
+        return JSON.parse(klartext.toString("utf8"));
+      },
+      fernDateiHolen: async (pfad) => {
+        const schluessel = this.mobilSyncSchluesselOderFehler();
+        const res = await this.mobilSyncAnfrage(`/datei?pfad=${encodeURIComponent(pfad)}`, { method: "GET" });
+        const verschluesselt = await res.json();
+        const klartext = await pairingEntschluesseln(verschluesselt, schluessel);
+        const body = JSON.parse(klartext.toString("utf8"));
+        return body && body.inhalt;
+      },
+      fernDateiSchreiben: async (pfad, inhalt) => {
+        const schluessel = this.mobilSyncSchluesselOderFehler();
+        const verschluesselt = await pairingVerschluesseln(JSON.stringify({ pfad, inhalt }), schluessel);
+        await this.mobilSyncAnfrage("/datei", {
+          method: "POST",
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify(verschluesselt),
+        });
+      },
+      lokalDateien:
+        vault && typeof vault.getFiles === "function"
+          ? vault.getFiles().map((file) => ({
+              pfad: file.path,
+              mtime: file.stat && file.stat.mtime,
+              groesse: file.stat && file.stat.size,
+            }))
+          : [],
+      lokalInhaltLesen: (pfad) => host.read(pfad),
+      lokalInhaltSchreiben: (pfad, inhalt) => host.write(pfad, inhalt),
+      letzterStand: (this.settings && this.settings.mobilSyncLetzterStand) || {},
+      // konfliktDateiname() prüft synchron -- ein Set vorhandener Pfade
+      // (vault.getFiles(), bereits im Speicher) statt eines async-Prädikats
+      // über den Adapter, sonst würde die interne do/while-Schleife ein
+      // Promise-Objekt (immer wahrheitswertig) statt eines Bool prüfen.
+      konfliktNameFrei: (pfad) => konfliktDateiname(pfad, vorhandenePfade()),
+    };
+  }
+
+  async mobilSyncLauf() {
+    if (!this.mobilSyncVerbindungVollstaendig()) {
+      const s = this.settings || {};
+      // Adresse/Port/Token stehen -- nur mobilSyncSchluessel fehlt: ein vor
+      // dieser Aenderung gekoppeltes Geraet. Klarer Hinweis statt stillem
+      // Abbruch, siehe mobilSyncSchluesselOderFehler() oben.
+      const altGepaartOhneSchluessel =
+        String(s.mobilSyncAdresse || "").trim() &&
+        Number(s.mobilSyncPort) &&
+        String(s.mobilSyncToken || "").trim() &&
+        !String(s.mobilSyncSchluessel || "").trim();
+      if (altGepaartOhneSchluessel) {
+        new Notice("Dieses Gerät wurde vor der Verschlüsselung gekoppelt. Bitte erneut koppeln.");
+      }
+      return;
+    }
+    try {
+      const ergebnis = await fuehreSyncDurch(this.mobilSyncHost());
+      this.settings.mobilSyncLetzterStand = ergebnis.letzterStand;
+      await this.saveSettings();
+      if (ergebnis.push || ergebnis.pull || ergebnis.konflikt) {
+        new Notice(
+          `Mobil-Sync: ${ergebnis.push} gesendet, ${ergebnis.pull} geholt, ${ergebnis.konflikt} Konflikt(e).`,
+        );
+      }
+    } catch (error) {
+      console.error("UnitedShare: Mobil-Sync fehlgeschlagen.", error);
+      new Notice(
+        error instanceof UnitedShareError ? error.message : "Mobil-Sync: das Desktop-Gerät ist nicht erreichbar.",
+      );
+    }
+  }
+
+  // -- Pairing (Mobile-Seite) ----------------------------------------------
+  // Spiegelbild von starteKoppeln()/antwortPairHandshake() oben: holt das
+  // Angebot über GET /pair/offer (noch kein Token nötig), baut daraus mit
+  // dem vom Menschen eingegebenen Code die Anfrage, schickt sie an
+  // POST /pair/handshake und entschlüsselt die Antwort mit dem über ECDH
+  // abgeleiteten Session-Key. Bei jedem Fehler (Netzwerk, falscher Code,
+  // abgelaufen) nur eine Notice -- an den Settings ändert sich dabei nichts.
+  async versucheKoppeln({ hostUndPort, code, geraetename } = {}) {
+    // Vorübergehende Diagnose-Protokollierung (.vault/debug.log, synct über
+    // iCloud mit zurück) -- auf dem Gerät ließ sich nicht zuverlässig
+    // beobachten, ob/welche Notice erscheint. Jeder Rückkehrpfad schreibt
+    // eine Zeile, NIE den Code oder einen privaten Schlüssel.
+    const adapter = this.vaultAdapter();
+    const log = (meldung, body) =>
+      debugLogSchreiben(adapter, { zeit: new Date().toISOString(), status: 0, meldung: `koppeln: ${meldung}`, body });
+    const eingabe = String(hostUndPort || "").trim();
+    const eingabeCode = String(code || "").trim();
+    await log("aufgerufen", `host=${JSON.stringify(eingabe)} codeLaenge=${eingabeCode.length}`);
+    if (!eingabe || !eingabeCode) {
+      new Notice("Adresse und Code werden gebraucht.");
+      await log("abgebrochen: Adresse oder Code leer");
+      return false;
+    }
+    const trenner = eingabe.lastIndexOf(":");
+    if (trenner <= 0 || trenner >= eingabe.length - 1) {
+      new Notice("Die Adresse braucht Host und Port, getrennt durch einen Doppelpunkt (z. B. 192.168.1.23:8765).");
+      await log("abgebrochen: kein Doppelpunkt in der Adresse");
+      return false;
+    }
+    const hostTeil = eingabe.slice(0, trenner);
+    const portTeil = Number(eingabe.slice(trenner + 1));
+    if (!Number.isInteger(portTeil) || portTeil <= 0 || portTeil >= 65536) {
+      new Notice("Der Port in der Adresse ist ungültig.");
+      await log("abgebrochen: Port ungueltig", eingabe.slice(trenner + 1));
+      return false;
+    }
+
+    const fetchImpl = requestUrlAsFetch();
+    let angebot;
+    try {
+      await log("GET /pair/offer wird gesendet", `http://${hostTeil}:${portTeil}/pair/offer`);
+      const res = await fetchImpl(`http://${hostTeil}:${portTeil}/pair/offer`, { method: "GET" });
+      await log("GET /pair/offer Antwort erhalten", `ok=${res.ok} status=${res.status}`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      angebot = await res.json();
+    } catch (err) {
+      new Notice("Das Desktop-Gerät ist unter dieser Adresse nicht erreichbar, oder es läuft gerade kein Pairing.");
+      await log("GET /pair/offer fehlgeschlagen", String((err && err.message) || err));
+      return false;
+    }
+
+    const { anfrage, privaterSchluessel } = await erzeugePairingAnfrage({
+      angebot,
+      code: eingabeCode,
+      geraetename: String(geraetename || "Mobilgerät"),
+    });
+
+    let antwort;
+    try {
+      await log("POST /pair/handshake wird gesendet");
+      const res = await fetchImpl(`http://${hostTeil}:${portTeil}/pair/handshake`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify(anfrage),
+      });
+      await log("POST /pair/handshake Antwort erhalten", `ok=${res.ok} status=${res.status}`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      antwort = await res.json();
+    } catch (err) {
+      new Notice("Der Code stimmt nicht, oder das Pairing ist abgelaufen.");
+      await log("POST /pair/handshake fehlgeschlagen", String((err && err.message) || err));
+      return false;
+    }
+
+    let daten;
+    let sessionKey;
+    try {
+      sessionKey = await leiteSessionSchluesselAb({
+        privaterSchluessel,
+        hostOeffentlicherSchluessel: angebot.publicKey,
+      });
+      const klartext = await pairingEntschluesseln(antwort, sessionKey);
+      daten = JSON.parse(klartext.toString("utf8"));
+    } catch (err) {
+      new Notice("Die Antwort des Desktop-Geräts ließ sich nicht entschlüsseln.");
+      await log("Entschluesseln fehlgeschlagen", String((err && err.message) || err));
+      return false;
+    }
+
+    this.settings.mobilSyncAdresse = adresseGueltig(daten.adresse) || hostTeil;
+    this.settings.mobilSyncPort = Number(daten.port) || portTeil;
+    this.settings.mobilSyncToken = String(daten.token || "");
+    // Derselbe Sitzungsschluessel, den der Host unter diesem Token in
+    // peerSyncGeraete speichert (antwortPairHandshake()) -- hier als Base64
+    // persistiert, damit fernManifestHolen/fernDateiHolen/fernDateiSchreiben
+    // (mobilSyncHost() oben) jeden weiteren Sync-Body ver-/entschluesseln
+    // koennen, nicht nur diese einmalige Pairing-Antwort.
+    this.settings.mobilSyncSchluessel = sessionKey.toString("base64");
+    await this.saveSettings();
+    this.restartMobilSyncAutomatik();
+    new Notice(`Verbunden mit ${this.settings.mobilSyncAdresse}:${this.settings.mobilSyncPort}.`);
+    await log("erfolgreich verbunden", `${this.settings.mobilSyncAdresse}:${this.settings.mobilSyncPort}`);
+    return true;
+  }
+
+  // -- Mobil-Sync-Automatik: Dateiänderung (entprellt) + Vordergrund-Wechsel --
+  // Mobile-Plugins haben keinen Hintergrunddienst -- die Automatik wirkt nur,
+  // solange die App offen ist. Zwei Auslöser: jede Vault-Änderung (entprellt,
+  // MOBIL_SYNC_DEBOUNCE_MS nach der letzten) und jeder Wechsel in den
+  // Vordergrund (document.visibilitychange -- Obsidian selbst hat dafür kein
+  // eigenes Event), um eingehende Desktop-Änderungen abzuholen.
+
+  planeMobilSyncLauf() {
+    if (this.mobilSyncTimer) clearTimeout(this.mobilSyncTimer);
+    this.mobilSyncTimer = setTimeout(() => {
+      this.mobilSyncTimer = null;
+      void this.mobilSyncLauf();
+    }, MOBIL_SYNC_DEBOUNCE_MS);
+  }
+
+  stopMobilSyncAutomatik() {
+    if (this.mobilSyncTimer) {
+      clearTimeout(this.mobilSyncTimer);
+      this.mobilSyncTimer = null;
+    }
+    if (this.mobilSyncVisibilityHandler && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.mobilSyncVisibilityHandler);
+      this.mobilSyncVisibilityHandler = null;
+    }
+    // vault.on("modify") läuft über this.registerEvent() -- Obsidian hängt
+    // das beim Unload selbst aus, ein zweites manuelles Abmelden entfällt.
+  }
+
+  restartMobilSyncAutomatik() {
+    this.stopMobilSyncAutomatik();
+    if (!Platform || !Platform.isMobile) return; // die Automatik ist eine Mobile-Eigenschaft
+    if (!this.settings || !this.settings.mobilSyncAutomatisch) return;
+    if (!this.mobilSyncVerbindungVollstaendig()) return;
+    const vault = this.app && this.app.vault;
+    if (vault && typeof vault.on === "function" && typeof this.registerEvent === "function") {
+      this.registerEvent(vault.on("modify", () => this.planeMobilSyncLauf()));
+    }
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      this.mobilSyncVisibilityHandler = () => {
+        if (document.visibilityState === "visible") void this.mobilSyncLauf();
+      };
+      document.addEventListener("visibilitychange", this.mobilSyncVisibilityHandler);
+    }
   }
 
   mountCursorComposer() {
@@ -2504,6 +3978,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     if (!isObsidianModel(this.settings.model)) this.settings.model = "";
     this.settings.embedModel = String(this.settings.embedModel || "").trim();
+    this.settings.absichtModell = String(this.settings.absichtModell || "").trim();
     try {
       this.settings.embedUrl = assertLoopbackEmbedUrl(this.settings.embedUrl || DEFAULT_SETTINGS.embedUrl);
     } catch (_err) {
@@ -2517,6 +3992,31 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.settings.bildFormat = bildFormatNormal(this.settings.bildFormat);
     this.settings.bildBreite = bildKante(this.settings.bildBreite);
     this.settings.bildHoehe = bildKante(this.settings.bildHoehe);
+    this.settings.peerSyncAktiv = Boolean(this.settings.peerSyncAktiv);
+    this.settings.peerSyncAdresse = adresseGueltig(this.settings.peerSyncAdresse);
+    this.settings.peerSyncAdresseArt = this.settings.peerSyncAdresse
+      ? String(this.settings.peerSyncAdresseArt || "").trim()
+      : "";
+    const port = Number(this.settings.peerSyncPort);
+    this.settings.peerSyncPort =
+      Number.isInteger(port) && port > 0 && port < 65536 ? port : PEER_SYNC_PORT_STANDARD;
+    this.settings.peerSyncGeraete = Array.isArray(this.settings.peerSyncGeraete)
+      ? this.settings.peerSyncGeraete.filter(
+          (eintrag) => eintrag && typeof eintrag.name === "string" && typeof eintrag.token === "string" && eintrag.token,
+        )
+      : [];
+    this.settings.mobilSyncAktiv = Boolean(this.settings.mobilSyncAktiv);
+    this.settings.mobilSyncAutomatisch = Boolean(this.settings.mobilSyncAutomatisch);
+    this.settings.mobilSyncAdresse = adresseGueltig(this.settings.mobilSyncAdresse);
+    const mobilPort = Number(this.settings.mobilSyncPort);
+    this.settings.mobilSyncPort =
+      Number.isInteger(mobilPort) && mobilPort > 0 && mobilPort < 65536 ? mobilPort : PEER_SYNC_PORT_STANDARD;
+    this.settings.mobilSyncToken = String(this.settings.mobilSyncToken || "").trim();
+    this.settings.mobilSyncSchluessel = String(this.settings.mobilSyncSchluessel || "").trim();
+    this.settings.mobilSyncLetzterStand =
+      this.settings.mobilSyncLetzterStand && typeof this.settings.mobilSyncLetzterStand === "object"
+        ? this.settings.mobilSyncLetzterStand
+        : {};
   }
 
   async embedForFrontier({ question, mentioned, attached }) {
@@ -2529,6 +4029,92 @@ module.exports = class UnitedSharePlugin extends Plugin {
       fetchImpl: requestUrlAsFetch(),
       timeoutMs: 20000,
     });
+  }
+
+  async sucheTresor(frage) {
+    const dir = this.manifest && this.manifest.dir;
+    return sucheImTresor({
+      dbPath: tresorIndexPfad(dir || ""),
+      frage,
+      embedUrl: this.settings.embedUrl,
+      fetchImpl: requestUrlAsFetch(),
+      disk: this.indexPlatte(),
+    });
+  }
+
+  async tresorIndexNachziehen() {
+    if (Platform && Platform.isMobile) {
+      new Notice("Der Tresor-Index läuft in der Desktop-App.");
+      return;
+    }
+    const dir = this.manifest && this.manifest.dir;
+    const dbPath = tresorIndexPfad(dir || "");
+    if (!dbPath) {
+      new Notice("Der Tresor-Index liegt neben dem Plugin.");
+      return;
+    }
+    try {
+      const vault = this.app && this.app.vault;
+      const listed = vault && typeof vault.getMarkdownFiles === "function" ? vault.getMarkdownFiles() : [];
+      const dateien = Array.isArray(listed) ? listed : [];
+      const notizen = [];
+      for (const datei of dateien) {
+        if (!datei || typeof datei.path !== "string" || !datei.path) continue;
+        const text = await this.readVaultNote(datei.path);
+        if (typeof text !== "string") continue;
+        notizen.push({ pfad: datei.path, text });
+      }
+      const zahlen = await indexNachziehen({
+        dbPath,
+        notizen,
+        embedUrl: this.settings.embedUrl,
+        fetchImpl: requestUrlAsFetch(),
+        disk: this.indexPlatte(),
+      });
+      new Notice(`Tresor-Index bge-m3: ${zahlen.neu} neu, ${zahlen.behalten} unverändert, ${zahlen.weg} entfernt.`);
+    } catch (error) {
+      const text = error instanceof UnitedShareError
+        ? error.message
+        : "Der Tresor-Index ließ sich nicht schreiben.";
+      new Notice(text);
+    }
+  }
+
+  // Loopback only. The UnitedShare key is not part of this call.
+  async absichtEinbetten(frage) {
+    if (typeof this.absichtEmbed === "function") {
+      try {
+        return await this.absichtEmbed(frage);
+      } catch (_err) {
+        return null;
+      }
+    }
+    if (runningNodeTest()) return null;
+    if (!this.absichtCache || typeof this.absichtCache !== "object") this.absichtCache = {};
+    const modell = String((this.settings && this.settings.absichtModell) || "").trim();
+    const origin = this.settings.embedUrl;
+    const fetchImpl = requestUrlAsFetch();
+    try {
+      return await absichtLokal({
+        frage,
+        origin,
+        model: this.settings.embedModel,
+        fetchImpl,
+        timeoutMs: 8000,
+        cache: this.absichtCache,
+        umformen: modell
+          ? (satz) => lokalText({
+            origin,
+            model: modell,
+            prompt: `Antworte nur mit JSON {"bild":"...","text":"..."}. bild ist der Bildauftrag, text die Frage. Kein weiterer Satz. Satz: ${satz}`,
+            fetchImpl,
+            timeoutMs: 8000,
+          })
+          : undefined,
+      });
+    } catch (_err) {
+      return null;
+    }
   }
 
   async saveSettings() {
@@ -2544,9 +4130,70 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return adapter && typeof adapter.getBasePath === "function" ? adapter.getBasePath() : "";
   }
 
+  // Der Index liegt unter dem Plugin-Ordner, also unter .obsidian. Die
+  // Pfadprüfung für Nutzerdateien sperrt diesen Ordner. Der Adapter darf
+  // ihn trotzdem lesen und schreiben. Ohne exists, write und getFullPath
+  // gibt es keine Platte: die Suche findet dann nichts, der Aufbau meldet
+  // die Desktop-App.
+  indexPlatte() {
+    const adapter = this.vaultAdapter();
+    if (
+      !adapter
+      || typeof adapter.exists !== "function"
+      || typeof adapter.write !== "function"
+      || typeof adapter.getFullPath !== "function"
+    ) {
+      return null;
+    }
+    const ordnerAnlegen = async (rel) => {
+      const basis = String(rel).replace(/\\/g, "/");
+      const slash = basis.lastIndexOf("/");
+      if (slash <= 0 || typeof adapter.mkdir !== "function") return;
+      const teile = basis.slice(0, slash).split("/");
+      let acc = "";
+      for (const teil of teile) {
+        if (!teil) continue;
+        acc = acc ? `${acc}/${teil}` : teil;
+        let da = false;
+        try {
+          da = await adapter.exists(acc);
+        } catch (_err) {
+          da = false;
+        }
+        if (!da) await adapter.mkdir(acc);
+      }
+    };
+    return {
+      exists(rel) {
+        return adapter.exists(rel);
+      },
+      async write(rel, text) {
+        await ordnerAnlegen(rel);
+        await adapter.write(rel, String(text ?? ""));
+      },
+      async remove(rel) {
+        if (typeof adapter.remove === "function") await adapter.remove(rel);
+      },
+      full(rel) {
+        return adapter.getFullPath(rel);
+      },
+    };
+  }
+
+  async vaultDatei(rel) {
+    const adapter = this.vaultAdapter();
+    if (!adapter || typeof adapter.exists !== "function" || typeof adapter.stat !== "function") return false;
+    try {
+      if (!(await adapter.exists(rel))) return false;
+      const art = await adapter.stat(rel);
+      return Boolean(art && art.type === "file");
+    } catch (_err) {
+      return false;
+    }
+  }
+
   ensureInsideVault(rel) {
-    const root = this.vaultAdapterRoot();
-    if (root && rel) resolveInsideVault(root, rel);
+    if (rel) assertVaultRelative(rel);
   }
 
   vaultHost() {
@@ -2561,9 +4208,32 @@ module.exports = class UnitedSharePlugin extends Plugin {
   }
 
   reemaxHost() {
+    const plugin = this;
     const root = this.vaultAdapterRoot();
-    if (!root) throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
-    return fsVaultHost(root, { onAktiv: (text) => this.meldeLauf(text) });
+    const adapter = this.vaultAdapter();
+    if (!root || !adapter) throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
+    return {
+      async meshJoin(rel) {
+        const safe = assertVaultRelative(rel);
+        if (!(await plugin.vaultDatei(safe))) {
+          throw new UnitedShareError("Die Einladung liegt nicht im Tresor.", 0);
+        }
+        if (typeof adapter.getFullPath !== "function") {
+          throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
+        }
+        return runReemax(["mesh", "join", adapter.getFullPath(safe)], {
+          cwd: root,
+          onAktiv: (text) => plugin.meldeLauf(text),
+        });
+      },
+      async sync(request) {
+        const { peer, direction } = assertSyncRequest(request && request.peer, request && request.direction);
+        return runReemax(["sync", direction, peer], {
+          cwd: root,
+          onAktiv: (text) => plugin.meldeLauf(text),
+        });
+      },
+    };
   }
 
   async executeInstruction(action, options) {
@@ -2596,8 +4266,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
       }
     }
     // Versteckte Ordner sieht nur die Adapter-API -- so steht es in der
-    // Obsidian-Dokumentation. node:fs waere hier zusaetzlich unnoetig und
-    // wird von der Plugin-Pruefung beanstandet.
+    // Obsidian-Dokumentation. Ein zweites Dateisystem daneben waere hier
+    // unnoetig und wird von der Plugin-Pruefung beanstandet.
     return readIndexedOrHidden(safe, indexed, adapterVaultHost(this.vaultAdapter()));
   }
 
@@ -2717,10 +4387,21 @@ module.exports = class UnitedSharePlugin extends Plugin {
 
   async runVaultSource(rel) {
     const safe = assertVaultRelative(rel);
-    const root = this.vaultAdapterRoot();
-    if (!root) throw new UnitedShareError("Ausführen geht nur in der Desktop-App.");
+    const adapter = this.vaultAdapter();
+    if (
+      !adapter
+      || typeof adapter.getFullPath !== "function"
+      || typeof adapter.getBasePath !== "function"
+      || !adapter.getBasePath()
+    ) {
+      throw new UnitedShareError("Ausführen geht nur in der Desktop-App.");
+    }
+    if (!(await this.vaultDatei(safe))) {
+      throw new UnitedShareError("Die Datei liegt nicht im Tresor.");
+    }
     return runVaultFile({
-      root,
+      abs: adapter.getFullPath(safe),
+      cwd: adapter.getBasePath(),
       relPath: safe,
       onAktiv: (text) => this.meldeLauf(text),
     });

@@ -104,4 +104,21 @@ test("die Release-main.js ist eigenständig", () => {
   assert.match(main, /async function completeChat/);
   assert.match(main, /ask-unitedshare/);
   assert.match(main, /https:\/\/unitedshare\.ai\/privacy/);
+  const verboten = [
+    'require("fs")',
+    "require('fs')",
+    "node:fs",
+    "readFileSync",
+    "writeFileSync",
+    "existsSync",
+    "realpathSync",
+    "statSync",
+    "unlinkSync",
+  ];
+  for (const datei of ["main.js", "main.src.js", "unitedshare-core.js"]) {
+    const text = fs.readFileSync(path.join(__dirname, datei), "utf8");
+    for (const token of verboten) {
+      assert.equal(text.includes(token), false, `${datei} enthält ${token}`);
+    }
+  }
 });

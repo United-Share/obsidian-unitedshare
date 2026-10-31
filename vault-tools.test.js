@@ -7,11 +7,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 
+const { fsVaultHost } = require("./vault-fs-host");
 const {
   assertVaultRelative,
   cleanProcessEnv,
   executeVaultAction,
-  fsVaultHost,
   listIndexedOrHidden,
   parseVaultActions,
   readIndexedOrHidden,

@@ -2,6 +2,8 @@
 
 Fragen aus der Seitenleiste oder einer markierten Notiz gehen an die Modelle eures UnitedShare. Der Auftrag enthält nur Textblöcke, der Tresor bleibt auf diesem Rechner. Ein Bild ist ein eigener Auftrag, `POST /v1/images/generations`, Modell `reemax-image`.
 
+Enter erkennt einen Bildauftrag. Ein klares „zeichne“, „male“ oder ein Seitenverhältnis geht an das Bild, der Rest an das Textmodell. Unklare Sätze prüft das lokale Embedding auf diesem Rechner. Mermaid, Diagramme und Fragen über ein Bild bleiben Text. Ein gesetztes lokales Modell unter `absichtModell` formuliert gemischte Sätze, wenn die Zerlegung keinen Rest findet; sonst bleibt es die Textfrage. Der Schlüssel geht dabei nicht an diesen Rechner.
+
 Datenschutz: https://unitedshare.ai/privacy · Bedingungen: https://unitedshare.ai/terms
 
 Die vollständige Übersicht über Werkzeuge, Gespräche und Einstellungen steht in der [Dokumentation](https://unitedshare.ai/docs/). Hier nur, was zum Einrichten und Betreiben nötig ist.
@@ -40,4 +42,4 @@ Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. E
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.13` — [Community-Seite](https://community.obsidian.md/plugins/unitedshare)
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.14` — [Community-Seite](https://community.obsidian.md/plugins/unitedshare)

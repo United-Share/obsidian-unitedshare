@@ -1122,14 +1122,6 @@ const RUNNERS = {
   ".sh": ["/bin/bash"],
 };
 
-function nodeFs() {
-  try {
-    return require("fs");
-  } catch (_err) {
-    return null;
-  }
-}
-
 function nodePath() {
   try {
     return require("path");
@@ -1161,55 +1153,6 @@ function assertVaultRelative(input) {
   return parts.join("/");
 }
 
-function outsideVault(path, rootReal, target) {
-  const fromRoot = path.relative(rootReal, target);
-  if (!fromRoot) return false;
-  return fromRoot.startsWith("..") || path.isAbsolute(fromRoot);
-}
-
-function realPathBlocked(path, rootReal, target) {
-  const fromRoot = path.relative(rootReal, target);
-  if (!fromRoot || fromRoot.startsWith("..") || path.isAbsolute(fromRoot)) return false;
-  return fromRoot.split(path.sep).some((part) => BLOCKED_VAULT_PARTS.has(part));
-}
-
-function resolveInsideVault(root, rel) {
-  const safe = assertVaultRelative(rel);
-  const fs = nodeFs();
-  const path = nodePath();
-  if (!fs || !path) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-  let rootReal;
-  try {
-    rootReal = fs.realpathSync(root);
-  } catch (_err) {
-    throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-  }
-  const parts = safe.split("/");
-  let current = rootReal;
-  for (let i = 0; i < parts.length; i += 1) {
-    const next = path.join(current, parts[i]);
-    if (fs.existsSync(next)) {
-      let real;
-      try {
-        real = fs.realpathSync(next);
-      } catch (_err) {
-        throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-      }
-      if (outsideVault(path, rootReal, real) || realPathBlocked(path, rootReal, real)) {
-        throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-      }
-      current = real;
-    } else {
-      const rest = path.join(current, ...parts.slice(i));
-      if (outsideVault(path, rootReal, rest) || realPathBlocked(path, rootReal, rest)) {
-        throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-      }
-      return { abs: rest, rel: safe, root: rootReal };
-    }
-  }
-  return { abs: current, rel: safe, root: rootReal };
-}
-
 function cleanProcessEnv(source) {
   const env = {};
   for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"]) {
@@ -1219,14 +1162,31 @@ function cleanProcessEnv(source) {
   return env;
 }
 
-function runnerFor(ext) {
-  const list = RUNNERS[ext];
-  const fs = nodeFs();
-  if (!list || !fs) return null;
-  for (const candidate of list) {
-    if (fs.existsSync(candidate)) return candidate;
+function suchPfad(source) {
+  const pathMod = nodePath();
+  const delimiter = pathMod && pathMod.delimiter ? pathMod.delimiter : ":";
+  const env = source && typeof source === "object" ? source : {};
+  const extra = [];
+  if (pathMod && typeof env.HOME === "string" && env.HOME) {
+    extra.push(pathMod.join(env.HOME, "bin"));
+    extra.push(pathMod.join(env.HOME, ".local", "bin"));
   }
-  return null;
+  extra.push("/opt/homebrew/bin", "/usr/local/bin");
+  const basis = typeof env.PATH === "string" ? env.PATH.split(delimiter) : [];
+  const gesehen = new Set();
+  const rein = [];
+  for (const teil of extra.concat(basis)) {
+    if (!teil || gesehen.has(teil)) continue;
+    gesehen.add(teil);
+    rein.push(teil);
+  }
+  return rein.join(delimiter);
+}
+
+function kindUmgebung(source) {
+  const env = cleanProcessEnv(source);
+  env.PATH = suchPfad(source);
+  return env;
 }
 
 function clipText(text, limit) {
@@ -1649,71 +1609,128 @@ async function executeVaultAction(action, host, options) {
   }
 }
 
+function programmStarten({
+  spawn,
+  kandidaten,
+  datei,
+  cwd,
+  childEnv,
+  timeoutMs,
+  onAktiv,
+  startFehler,
+  fristFehler,
+}) {
+  return new Promise((resolve, reject) => {
+    let index = 0;
+    let settled = false;
+    let aktivGemeldet = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const versuch = () => {
+      if (settled) return;
+      const runner = kandidaten[index];
+      let child;
+      try {
+        child = spawn(runner, [datei], {
+          cwd,
+          shell: false,
+          env: childEnv,
+          windowsHide: true,
+        });
+      } catch (_err) {
+        finish(new UnitedShareError(startFehler, 0));
+        return;
+      }
+      if (!child || !child.stdout || !child.stderr) {
+        finish(new UnitedShareError(startFehler, 0));
+        return;
+      }
+      if (!aktivGemeldet && typeof onAktiv === "function") {
+        aktivGemeldet = true;
+        onAktiv("Die Aufgabe läuft noch.");
+      }
+      const chunks = [];
+      const push = (buf) => {
+        chunks.push(Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf));
+      };
+      child.stdout.on("data", push);
+      child.stderr.on("data", push);
+      let timedOut = false;
+      let weiter = false;
+      const frist = timeoutMs == null ? SCRIPT_DAUER_MS : timeoutMs;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        if (typeof child.kill === "function") child.kill("SIGKILL");
+      }, frist);
+      child.on("error", (err) => {
+        if (weiter || settled) return;
+        if (err && err.code === "ENOENT" && index + 1 < kandidaten.length) {
+          weiter = true;
+          clearTimeout(timer);
+          index += 1;
+          versuch();
+          return;
+        }
+        clearTimeout(timer);
+        finish(new UnitedShareError(startFehler, 0));
+      });
+      child.on("close", (code) => {
+        if (weiter || settled) return;
+        clearTimeout(timer);
+        if (timedOut) {
+          finish(new UnitedShareError(fristFehler, 0));
+          return;
+        }
+        finish(null, `code ${code}\n${chunks.join("").slice(0, RUN_OUTPUT_LIMIT)}`.trimEnd());
+      });
+    };
+    versuch();
+  });
+}
+
 function runVaultFile({
   root,
   relPath,
+  abs,
+  cwd,
   timeoutMs = null,
   spawnImpl,
   env,
   onAktiv,
 } = {}) {
-  const fs = nodeFs();
-  const located = resolveInsideVault(root, relPath);
-  if (!fs || !fs.existsSync(located.abs) || !fs.statSync(located.abs).isFile()) {
-    throw new UnitedShareError("Die Datei liegt nicht im Tresor.", 0);
+  let datei = "";
+  let ext = "";
+  if (typeof abs === "string" && abs) {
+    datei = abs;
+    ext = sourceExt(relPath || abs);
+  } else {
+    const safe = assertVaultRelative(relPath);
+    const basis = String(root ?? "").replace(/\/+$/, "");
+    if (!basis) throw new UnitedShareError("Die Datei liegt nicht im Tresor.", 0);
+    datei = `${basis}/${safe}`;
+    ext = sourceExt(safe);
   }
-  const ext = nodePath().extname(located.abs).toLowerCase();
-  const runner = runnerFor(ext);
-  if (!runner) throw new UnitedShareError("Ausführbar sind nur .py, .js, .mjs und .sh im Tresor.", 0);
+  const kandidaten = RUNNERS[ext] ? RUNNERS[ext].slice() : [];
+  if (!kandidaten.length) {
+    throw new UnitedShareError("Ausführbar sind nur .py, .js, .mjs und .sh im Tresor.", 0);
+  }
   const spawn = spawnImpl || nodeSpawn();
   if (typeof spawn !== "function") throw new UnitedShareError("Ausführen geht nur in der Desktop-App.", 0);
-  const childEnv = cleanProcessEnv(env || (typeof process !== "undefined" ? process.env : {}));
-  return new Promise((resolve, reject) => {
-    let child;
-    try {
-      child = spawn(runner, [located.abs], {
-        cwd: located.root,
-        shell: false,
-        env: childEnv,
-        windowsHide: true,
-      });
-    } catch (_err) {
-      reject(new UnitedShareError("Das Programm ließ sich nicht starten.", 0));
-      return;
-    }
-    if (!child || !child.stdout || !child.stderr) {
-      reject(new UnitedShareError("Das Programm ließ sich nicht starten.", 0));
-      return;
-    }
-    if (typeof onAktiv === "function") onAktiv("Die Aufgabe läuft noch.");
-    const chunks = [];
-    const push = (buf) => {
-      chunks.push(Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf));
-    };
-    child.stdout.on("data", push);
-    child.stderr.on("data", push);
-    let settled = false;
-    let timedOut = false;
-    const finish = (err, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) reject(err);
-      else resolve(value);
-    };
-    const frist = timeoutMs == null ? SCRIPT_DAUER_MS : timeoutMs;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (typeof child.kill === "function") child.kill("SIGKILL");
-    }, frist);
-    child.on("error", () => finish(new UnitedShareError("Das Programm ließ sich nicht starten.", 0)));
-    child.on("close", (code) => {
-      if (timedOut) {
-        finish(new UnitedShareError("Das Programm wurde nach der Frist beendet.", 0));
-        return;
-      }
-      finish(null, `code ${code}\n${chunks.join("").slice(0, RUN_OUTPUT_LIMIT)}`.trimEnd());
-    });
+  const childEnv = kindUmgebung(env || (typeof process !== "undefined" ? process.env : {}));
+  return programmStarten({
+    spawn,
+    kandidaten,
+    datei,
+    cwd: cwd || root || undefined,
+    childEnv,
+    timeoutMs,
+    onAktiv,
+    startFehler: "Das Programm ließ sich nicht starten.",
+    fristFehler: "Das Programm wurde nach der Frist beendet.",
   });
 }
 
@@ -1730,34 +1747,6 @@ function assertSyncRequest(peer, direction) {
   return { peer: name, direction };
 }
 
-function locateReemax(env) {
-  const fs = nodeFs();
-  const path = nodePath();
-  if (!fs || !path) return "reemax";
-  const source = env && typeof env === "object" ? env : {};
-  const dirs = [];
-  if (typeof source.PATH === "string") {
-    for (const dir of source.PATH.split(path.delimiter)) {
-      if (dir) dirs.push(dir);
-    }
-  }
-  if (typeof source.HOME === "string" && source.HOME) {
-    dirs.push(path.join(source.HOME, "bin"));
-    dirs.push(path.join(source.HOME, ".local", "bin"));
-  }
-  dirs.push("/opt/homebrew/bin", "/usr/local/bin");
-  const seen = new Set();
-  for (const dir of dirs) {
-    if (!dir || seen.has(dir)) continue;
-    seen.add(dir);
-    try {
-      if (fs.statSync(path.join(dir, "reemax")).isFile()) return path.join(dir, "reemax");
-    } catch (_err) {
-    }
-  }
-  return "reemax";
-}
-
 function runReemax(args, {
   cwd,
   timeoutMs = null,
@@ -1768,8 +1757,8 @@ function runReemax(args, {
   const spawn = spawnImpl || nodeSpawn();
   if (typeof spawn !== "function") throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
   const sourceEnv = env || (typeof process !== "undefined" ? process.env : {});
-  const childEnv = cleanProcessEnv(sourceEnv);
-  const command = spawnImpl ? "reemax" : locateReemax(sourceEnv);
+  const childEnv = kindUmgebung(sourceEnv);
+  const command = "reemax";
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -1817,65 +1806,6 @@ function runReemax(args, {
       finish(null, `code ${code}\n${chunks.join("").slice(0, RUN_OUTPUT_LIMIT)}`.trimEnd());
     });
   });
-}
-
-function fsVaultHost(root, options = {}) {
-  const fs = nodeFs();
-  const path = nodePath();
-  return {
-    async read(rel) {
-      const { abs } = resolveInsideVault(root, rel);
-      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return null;
-      return fs.readFileSync(abs, "utf8");
-    },
-    async list(rel) {
-      const rootReal = fs.realpathSync(root);
-      const target = rel ? resolveInsideVault(root, rel).abs : rootReal;
-      if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) {
-        throw new UnitedShareError("Der Ordner liegt nicht im Tresor.", 0);
-      }
-      return fs.readdirSync(target);
-    },
-    async write(rel, content) {
-      const { abs, root: rootReal } = resolveInsideVault(root, rel);
-      const dir = path.dirname(abs);
-      if (outsideVault(path, rootReal, dir)) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-      fs.mkdirSync(dir, { recursive: true });
-      const dirReal = fs.realpathSync(dir);
-      if (outsideVault(path, rootReal, dirReal)) throw new UnitedShareError(VAULT_PATH_ERROR, 0);
-      fs.writeFileSync(abs, String(content ?? ""));
-    },
-    async run(rel) {
-      const opts = { root, relPath: rel };
-      if (options.spawnImpl) opts.spawnImpl = options.spawnImpl;
-      if (options.env) opts.env = options.env;
-      if (options.timeoutMs) opts.timeoutMs = options.timeoutMs;
-      if (options.onAktiv) opts.onAktiv = options.onAktiv;
-      return runVaultFile(opts);
-    },
-    async meshJoin(rel) {
-      const located = resolveInsideVault(root, rel);
-      if (!fs.existsSync(located.abs) || !fs.statSync(located.abs).isFile()) {
-        throw new UnitedShareError("Die Einladung liegt nicht im Tresor.", 0);
-      }
-      const opts = { cwd: located.root, args: ["mesh", "join", located.abs] };
-      if (options.spawnImpl) opts.spawnImpl = options.spawnImpl;
-      if (options.env) opts.env = options.env;
-      if (options.timeoutMs) opts.timeoutMs = options.timeoutMs;
-      if (options.onAktiv) opts.onAktiv = options.onAktiv;
-      return runReemax(opts.args, opts);
-    },
-    async sync(request) {
-      const { peer, direction } = assertSyncRequest(request && request.peer, request && request.direction);
-      const rootReal = fs.realpathSync(root);
-      const opts = { cwd: rootReal };
-      if (options.spawnImpl) opts.spawnImpl = options.spawnImpl;
-      if (options.env) opts.env = options.env;
-      if (options.timeoutMs) opts.timeoutMs = options.timeoutMs;
-      if (options.onAktiv) opts.onAktiv = options.onAktiv;
-      return runReemax(["sync", direction, peer], opts);
-    },
-  };
 }
 
 // Gültige Aktionsarten. Nur ein JSON-Objekt mit einem dieser Werte gilt als
@@ -2556,16 +2486,13 @@ async function listIndexedOrHidden(indexedNames, diskHost, rel) {
 // module to access the filesystem outside of the Obsidian vault API. Can read
 // and write any file on the system."
 //
-// Der Vorwurf trifft zu, und für Dateien im Tresor ist node:fs unnötig. Die
-// Adapter-API leistet dasselbe und kann den Tresor nicht verlassen — sie
-// kennt keine absoluten Pfade. Nach der Umstellung bleibt node:fs nur noch
-// dort, wo ohnehin eine Shell startet: beim Ausführen einer Quelldatei und
-// beim Suchen des reemax-Programms. Diese Warnung lässt sich nicht wegbauen,
-// ohne die Funktion aufzugeben; der Dateizugriff schon.
+// Dateien bleiben im Tresor. Die Adapter-API kennt keine absoluten Pfade und
+// kann ihn nicht verlassen. Die ausgelieferte Datei bindet das Node-Modul fs
+// nicht. Ein Skript oder reemax startet erst, nachdem der Adapter die Datei
+// bestätigt hat. Den absoluten Pfad dafür liefert getFullPath oder getBasePath.
 //
-// Gleiche Form wie fsVaultHost, damit die Aufrufer unverändert bleiben —
-// insbesondere liefert list() NAMEN, nicht Pfade: readdirSync tat das, die
-// Adapter-API liefert dagegen volle Pfade in {files, folders}.
+// list() liefert NAMEN, nicht Pfade. Die Adapter-API gibt volle Pfade in
+// {files, folders} zurück.
 
 function adapterVaultHost(adapter) {
   if (!adapter) return null;
@@ -3359,6 +3286,1846 @@ async function generateImage({
   return { mime: bildAusBytes(bytes, header), b64: b64FromBytes(bytes), prompt: text };
 }
 
+// iCloud-Erkennung: nur Pfad-Muster, kein Netz-/Dateizugriff -- rein und
+// synchron testbar. Erkennt den von macOS/iOS gemeinsam genutzten
+// iCloud-Drive-Container fuer Obsidian ("iCloud~md~obsidian"). Liegt der
+// Tresor dort, synct ihn das Betriebssystem selbst zwischen allen Geraeten
+// mit demselben iCloud-Konto -- das Plugin muss dafuer nichts tun, nur
+// anzeigen, dass es bereits laeuft.
+const ICLOUD_MUSTER = /Mobile Documents\/iCloud~md~obsidian|\/CloudDocs\/iCloud~md~obsidian/i;
+
+function erkenneICloudTresor(pfad) {
+  const text = String(pfad || "");
+  return ICLOUD_MUSTER.test(text);
+}
+
+// Class maxima, compared with a margin. An absolute cosine does not transfer
+// across bge-m3, nomic and embeddinggemma.
+const ABSICHT_MARGE = 0.04;
+const ABSICHT_BEIDE = 0.12;
+const ABSICHT_BEISPIELE = [
+  { klasse: "bild", text: "zeichne eine rote kugel auf weißem grund" },
+  { klasse: "bild", text: "male mir die nordfassade bei nacht" },
+  { klasse: "bild", text: "ein bild von einem wohnhaus" },
+  { klasse: "bild", text: "skizziere den grundriss der wohnung" },
+  { klasse: "bild", text: "foto einer katze auf dem fensterbrett" },
+  { klasse: "bild", text: "illustration eines einzelnen baums" },
+  { klasse: "bild", text: "render die ansicht von oben" },
+  { klasse: "bild", text: "16:9 von der fassade im abendlicht" },
+  { klasse: "text", text: "was steht in der notiz" },
+  { klasse: "text", text: "erkläre den fehler in diesem abschnitt" },
+  { klasse: "text", text: "wie spät ist es" },
+  { klasse: "text", text: "was ist eine did" },
+  { klasse: "text", text: "fass das gespräch zusammen" },
+  { klasse: "text", text: "welche datei meint der pfad" },
+  { klasse: "text", text: "warum schlägt der aufruf fehl" },
+  { klasse: "text", text: "schreibe die antwort an den cursor" },
+  { klasse: "nie", text: "zeichne ein sequenzdiagramm" },
+  { klasse: "nie", text: "mermaid ablauf der anfrage" },
+  { klasse: "nie", text: "beschreibe das bild in der notiz" },
+  { klasse: "nie", text: "wie binde ich ein png ein" },
+  { klasse: "nie", text: "was kostet ein bild" },
+  { klasse: "nie", text: "zeige die graphansicht" },
+  { klasse: "nie", text: "ein diagramm der schnittstelle" },
+  { klasse: "nie", text: "flussdiagramm mit drei schritten" },
+];
+const BILD_VERHAELTNISSE = [
+  ["21", "9", 1344, 576],
+  ["16", "9", 1024, 576],
+  ["9", "16", 576, 1024],
+  ["4", "3", 1024, 768],
+  ["3", "2", 1152, 768],
+  ["1", "1", 1024, 1024],
+];
+const BILD_BEFEHL = /^(?:bitte\s+)?(?:zeichne|male|skizziere|illustriere|visualisiere|generiere|erzeuge|rendere|render|mache|mach)\b(?:\s+mir)?(?:\s+(?:ein|eine|einen))?(?:\s+(?:bild|foto|skizze|illustration))?(?:\s+(?:von\s+der|von\s+dem|vom|von))?\s+(.+)$/i;
+const BILD_NENNUNG = /^(?:bitte\s+)?(?:ein|eine|einen)?\s*(?:bild|foto|skizze|illustration)\s+(?:von\s+der|von\s+dem|vom|von)\s+(.+)$/i;
+const TEXT_DANACH = /^(?:bitte\s+)?(?:nenne|nenn|erkläre|erklaer|erklär|sage|sag|beschreibe|beschreib|schreibe|schreib|was|wie|warum|welche|wer|wann|wo|rechne|übersetz|uebersetz|gib)(?=$|[\s.,!?])/i;
+const FRAGE_ANFANG = /^(?:was|wie|warum|weshalb|wieso|welche[rs]?|wer|wann|woher|wohin|wo|ist|sind|kann|kannst|könnte|koennte|erkläre|erklaer|erklär|beschreibe|beschreib|nenn|sag|schreib)(?=$|[\s.,!?])/i;
+const HART_PHRASEN = [
+  "mermaid",
+  "sequenzdiagramm",
+  "flussdiagramm",
+  "ablaufdiagramm",
+  "beschreibe das bild",
+  "bild in der notiz",
+  "was kostet ein bild",
+  "wie binde ich",
+  "einbetten",
+];
+
+function absichtBeispiele() {
+  return ABSICHT_BEISPIELE;
+}
+
+function hartNegativ(lower) {
+  const text = String(lower || "");
+  if (HART_PHRASEN.some((phrase) => text.includes(phrase))) return true;
+  return /\bdiagramme?\b/.test(text) || /\bpng ein\b/.test(text);
+}
+
+function satzIstFrage(text) {
+  return FRAGE_ANFANG.test(String(text || "").trim());
+}
+
+function findeVerhaeltnis(text) {
+  const quelle = String(text || "");
+  for (const [links, rechts, breite, hoehe] of BILD_VERHAELTNISSE) {
+    const match = new RegExp(`(^|[^\\d])(${links}\\s*[:/]\\s*${rechts})(?!\\d)`, "i").exec(quelle);
+    if (!match) continue;
+    return {
+      index: match.index + match[1].length,
+      length: match[2].length,
+      breite,
+      hoehe,
+    };
+  }
+  return null;
+}
+
+function teileAnUnd(capture) {
+  const text = String(capture || "").trim();
+  const re = /\s+und\s+/gi;
+  let match = re.exec(text);
+  while (match) {
+    const left = text.slice(0, match.index).trim();
+    const right = text.slice(match.index + match[0].length).trim();
+    if (left && right && TEXT_DANACH.test(right)) return { bildPrompt: left, textPrompt: right };
+    match = re.exec(text);
+  }
+  return { bildPrompt: text, textPrompt: "" };
+}
+
+function auftragSpalten(text) {
+  const original = String(text || "").replace(/\s+/g, " ").trim();
+  const nurText = () => ({ bild: false, text: true, bildPrompt: "", textPrompt: original });
+  if (!original || hartNegativ(original.toLocaleLowerCase("de"))) return nurText();
+  const fund = findeVerhaeltnis(original);
+  const ohne = fund
+    ? `${original.slice(0, fund.index)} ${original.slice(fund.index + fund.length)}`.replace(/\s+/g, " ").trim()
+    : original;
+  const befehl = ohne.match(BILD_BEFEHL) || ohne.match(BILD_NENNUNG);
+  if (befehl) {
+    const teile = teileAnUnd(befehl[1]);
+    if (!teile.bildPrompt) return nurText();
+    const plan = {
+      bild: true,
+      text: Boolean(teile.textPrompt),
+      bildPrompt: teile.bildPrompt,
+      textPrompt: teile.textPrompt,
+    };
+    if (fund) {
+      plan.breite = fund.breite;
+      plan.hoehe = fund.hoehe;
+    }
+    return plan;
+  }
+  if (!fund) return nurText();
+  const prompt = ohne.replace(/^(?:von\s+der|von\s+dem|vom|von|ein|eine|einen)\s+/i, "").trim();
+  if (!prompt || prompt.length < 3 || satzIstFrage(prompt)) return nurText();
+  return {
+    bild: true,
+    text: false,
+    bildPrompt: prompt,
+    textPrompt: "",
+    breite: fund.breite,
+    hoehe: fund.hoehe,
+  };
+}
+
+function absichtAusNaehe(frageVektor, beispiele) {
+  const scores = { bild: -1, text: -1, nie: -1 };
+  for (const beispiel of beispiele || []) {
+    if (!beispiel || !Object.prototype.hasOwnProperty.call(scores, beispiel.klasse)) continue;
+    const score = cosine(frageVektor, beispiel.vektor);
+    if (score > scores[beispiel.klasse]) scores[beispiel.klasse] = score;
+  }
+  const bildKlar = scores.bild >= scores.nie + ABSICHT_MARGE && scores.bild >= scores.text + ABSICHT_MARGE;
+  if (bildKlar && scores.text >= scores.nie + ABSICHT_MARGE && scores.bild - scores.text <= ABSICHT_BEIDE) {
+    return { bild: true, text: true };
+  }
+  if (bildKlar) return { bild: true, text: false };
+  return { bild: false, text: true };
+}
+
+function bildTextAusAntwort(raw) {
+  const text = String(raw || "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  let data = null;
+  try {
+    data = JSON.parse(text.slice(start, end + 1));
+  } catch (_err) {
+    return null;
+  }
+  if (!data || typeof data.bild !== "string" || typeof data.text !== "string") return null;
+  const bild = data.bild.trim();
+  const rest = data.text.trim();
+  if (!bild || !rest || hartNegativ(bild.toLocaleLowerCase("de"))) return null;
+  return { bild, text: rest };
+}
+
+function bildPromptRein(satz) {
+  const text = String(satz || "").replace(/\s+/g, " ").trim();
+  const fund = findeVerhaeltnis(text);
+  if (!fund) return { prompt: text, fund: null };
+  const rest = `${text.slice(0, fund.index)} ${text.slice(fund.index + fund.length)}`.replace(/\s+/g, " ").trim();
+  return {
+    prompt: rest.replace(/^(?:von\s+der|von\s+dem|vom|von|ein|eine|einen)\s+/i, "").trim(),
+    fund,
+  };
+}
+
+function textAbsicht(satz, moderator) {
+  return {
+    bild: false,
+    text: true,
+    bildPrompt: "",
+    textPrompt: String(satz || "").trim(),
+    moderator,
+    auftrag: "text",
+  };
+}
+
+async function lokalText({ origin, model, prompt, fetchImpl, timeoutMs }) {
+  const basis = assertLoopbackEmbedUrl(origin || DEFAULT_EMBED_URL);
+  const name = String(model || "").trim();
+  if (!name) return "";
+  const data = await fetchLocalJson({
+    url: `${basis}/api/generate`,
+    method: "POST",
+    body: { model: name, prompt: String(prompt || ""), stream: false },
+    timeoutMs,
+    fetchImpl,
+  });
+  return data && typeof data.response === "string" ? data.response : "";
+}
+
+async function prototypeVektoren({ basis, model, fetchImpl, timeoutMs, cache }) {
+  const beispiele = absichtBeispiele();
+  const identitaet = beispiele.map((row) => `${row.klasse}\t${row.text}`).join("\n");
+  const key = `${basis}\n${model}\n${identitaet}`;
+  if (cache && typeof cache === "object" && Array.isArray(cache[key])) return cache[key];
+  const vectors = await embedTexts({
+    origin: basis,
+    model,
+    texts: beispiele.map((row) => row.text),
+    fetchImpl,
+    timeoutMs,
+  });
+  const rows = beispiele.map((row, index) => ({ klasse: row.klasse, vektor: vectors[index] }));
+  if (cache && typeof cache === "object") cache[key] = rows;
+  return rows;
+}
+
+async function absichtLokal({ frage, origin, model, fetchImpl, timeoutMs, umformen, cache }) {
+  const basis = assertLoopbackEmbedUrl(origin || DEFAULT_EMBED_URL);
+  const names = await localModelNames({ origin: basis, fetchImpl, timeoutMs });
+  const embedModel = pickEmbedModel(names, model);
+  if (!embedModel) return null;
+  const prototypen = await prototypeVektoren({
+    basis,
+    model: embedModel,
+    fetchImpl,
+    timeoutMs,
+    cache,
+  });
+  const satz = String(frage || "").replace(/\s+/g, " ").trim();
+  const frageVektoren = await embedTexts({
+    origin: basis,
+    model: embedModel,
+    texts: [satz],
+    fetchImpl,
+    timeoutMs,
+  });
+  const entscheidung = absichtAusNaehe(frageVektoren[0], prototypen);
+  if (!entscheidung.bild) return textAbsicht(satz, embedModel);
+  if (entscheidung.text) {
+    if (typeof umformen !== "function") return null;
+    let raw = "";
+    try {
+      raw = await umformen(satz);
+    } catch (_err) {
+      return null;
+    }
+    const getrennt = bildTextAusAntwort(raw);
+    if (!getrennt) return null;
+    const plan = {
+      bild: true,
+      text: true,
+      bildPrompt: getrennt.bild,
+      textPrompt: getrennt.text,
+      moderator: embedModel,
+      auftrag: "beide",
+    };
+    const fund = findeVerhaeltnis(satz);
+    if (fund) {
+      plan.breite = fund.breite;
+      plan.hoehe = fund.hoehe;
+    }
+    return plan;
+  }
+  if (hartNegativ(satz.toLocaleLowerCase("de")) || satzIstFrage(satz)) return textAbsicht(satz, embedModel);
+  const rein = bildPromptRein(satz);
+  if (!rein.prompt || satzIstFrage(rein.prompt) || rein.prompt.length < 3) return textAbsicht(satz, embedModel);
+  if (rein.prompt.length < 8 && !rein.fund) return textAbsicht(satz, embedModel);
+  const plan = {
+    bild: true,
+    text: false,
+    bildPrompt: rein.prompt,
+    textPrompt: "",
+    moderator: embedModel,
+    auftrag: "bild",
+  };
+  if (rein.fund) {
+    plan.breite = rein.fund.breite;
+    plan.hoehe = rein.fund.hoehe;
+  }
+  return plan;
+}
+
+// -- Peer-Sync-Plan (Mesh, kein iCloud) --------------------------------------
+// Baustein fuer den Abgleich zwischen Mobilgeraet und Desktop ueber das
+// Tailscale/Headscale-Mesh. Diese drei Funktionen sind reine Vergleichslogik:
+// kein Netzwerk, kein Dateisystem -- Dateiliste, Inhalt und Existenzpruefung
+// kommen immer von aussen injiziert (siehe fetchImpl/spawnImpl-Stil weiter
+// oben in dieser Datei). Der HTTP-Listener selbst folgt in einem spaeteren
+// Schritt und baut auf diesen drei Funktionen auf.
+
+// Nicht-kryptographische Pruefsumme (FNV-1a, 32 Bit) ueber den Dateiinhalt.
+// Zweck ist reine Aenderungserkennung uebers Netz ("hat sich die Datei seit
+// dem letzten bekannten Stand geaendert?"), keine Sicherheits- oder
+// Integritaetsgarantie -- dafuer reicht die Kollisionswahrscheinlichkeit bei
+// Notizgroesse voellig aus, und FNV-1a ist um Groessenordnungen schneller als
+// sha256 und kommt ohne das crypto-Modul aus.
+function syncInhaltsPruefsumme(inhalt) {
+  let hash = 0x811c9dc5;
+  const bytes = Buffer.from(String(inhalt ?? ""), "utf8");
+  for (let i = 0; i < bytes.length; i += 1) {
+    hash ^= bytes[i];
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+// Baut aus einer Liste von {pfad, mtime, groesse} (injiziert, kein echter
+// Dateizugriff) ein Manifest {[pfad]: {mtime, groesse, hash}}. Der Inhalt je
+// Datei kommt ueber den Callback inhaltLesen(pfad), ebenfalls injiziert.
+function baueSyncManifest(dateien, inhaltLesen) {
+  const manifest = {};
+  for (const eintrag of dateien || []) {
+    if (!eintrag || !eintrag.pfad) continue;
+    const inhalt = typeof inhaltLesen === "function" ? inhaltLesen(eintrag.pfad) : "";
+    manifest[eintrag.pfad] = {
+      mtime: eintrag.mtime,
+      groesse: eintrag.groesse,
+      hash: syncInhaltsPruefsumme(inhalt),
+    };
+  }
+  return manifest;
+}
+
+// Vergleicht zwei Manifeste (lokal, fern) gegen den zuletzt bekannten
+// gemeinsamen Stand und liefert einen Plan {push, pull, konflikt}.
+// Loeschungen werden NIE propagiert: fehlt eine Datei komplett auf einer
+// Seite, wird sie wie eine neue Datei von der anderen Seite behandelt (push
+// bzw. pull) -- unabhaengig davon, ob sie im letzten Stand vorkam oder dort
+// unveraendert war. Ein Konflikt entsteht nur, wenn beide Seiten die Datei
+// (noch) haben und beide sie seit dem letzten Stand unterschiedlich
+// geaendert haben.
+function planeSyncAbgleich(lokal, fern, letzterStand) {
+  const l = lokal || {};
+  const f = fern || {};
+  const b = letzterStand || {};
+  const pfade = Array.from(new Set([...Object.keys(l), ...Object.keys(f)])).sort();
+  const plan = { push: [], pull: [], konflikt: [] };
+  for (const pfad of pfade) {
+    const lokalEintrag = l[pfad];
+    const fernEintrag = f[pfad];
+    if (!lokalEintrag && !fernEintrag) continue;
+    if (!lokalEintrag) {
+      plan.pull.push(pfad);
+      continue;
+    }
+    if (!fernEintrag) {
+      plan.push.push(pfad);
+      continue;
+    }
+    if (lokalEintrag.hash === fernEintrag.hash) continue;
+    const basisEintrag = b[pfad];
+    const lokalGeaendert = !basisEintrag || lokalEintrag.hash !== basisEintrag.hash;
+    const fernGeaendert = !basisEintrag || fernEintrag.hash !== basisEintrag.hash;
+    if (lokalGeaendert && !fernGeaendert) plan.push.push(pfad);
+    else if (fernGeaendert && !lokalGeaendert) plan.pull.push(pfad);
+    else plan.konflikt.push(pfad);
+  }
+  return plan;
+}
+
+// Erzeugt einen Konflikt-Dateinamen nach Obsidian-Sync-Vorbild:
+// "Notiz.md" -> "Notiz (Konflikt).md", falls das schon existiert
+// "Notiz (Konflikt 2).md" usw. Existenzpruefung kommt injiziert, entweder
+// als Funktion(pfad) => boolean oder als Set vorhandener Pfade.
+function konfliktDateiname(pfad, existiert) {
+  const pruefe =
+    typeof existiert === "function"
+      ? existiert
+      : (kandidat) => Boolean(existiert && typeof existiert.has === "function" && existiert.has(kandidat));
+  const raw = String(pfad ?? "");
+  const slash = raw.lastIndexOf("/");
+  const ordner = slash === -1 ? "" : raw.slice(0, slash + 1);
+  const basisName = slash === -1 ? raw : raw.slice(slash + 1);
+  const punkt = basisName.lastIndexOf(".");
+  const hatEndung = punkt > 0;
+  const stamm = hatEndung ? basisName.slice(0, punkt) : basisName;
+  const endung = hatEndung ? basisName.slice(punkt) : "";
+  let zaehler = 1;
+  let kandidat;
+  do {
+    const zusatz = zaehler === 1 ? "(Konflikt)" : `(Konflikt ${zaehler})`;
+    kandidat = `${ordner}${stamm} ${zusatz}${endung}`;
+    zaehler += 1;
+  } while (pruefe(kandidat));
+  return kandidat;
+}
+
+// Pruefsumme-Konstante fuer eine plausible Tailscale-Adresse. Tailscale
+// vergibt Geraete-Adressen aus 100.64.0.0/10 (CGNAT-Bereich, RFC 6598) --
+// erstes Byte 100, zweites Byte 64..127. Reine Pruefung, kein Netzzugriff:
+// ob die Adresse tatsaechlich zu diesem Rechner gehoert, bleibt Sache des
+// Nutzers (das Feld wird von Hand eingetragen, nicht automatisch abgefragt).
+const TAILSCALE_ADRESSE_ERROR = "Nur eine Tailscale-Adresse (Bereich 100.64.0.0/10) wird akzeptiert.";
+
+function assertTailscaleAdresse(input) {
+  const raw = String(input ?? "").trim();
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw);
+  if (!match) throw new UnitedShareError(TAILSCALE_ADRESSE_ERROR, 0);
+  const teile = match.slice(1, 5).map(Number);
+  if (teile.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    throw new UnitedShareError(TAILSCALE_ADRESSE_ERROR, 0);
+  }
+  const [a, b] = teile;
+  if (a !== 100 || b < 64 || b > 127) throw new UnitedShareError(TAILSCALE_ADRESSE_ERROR, 0);
+  return raw;
+}
+
+// Reine Parse-Funktion: nimmt den rohen stdout/stderr-Text von
+// "tailscale ip -4" entgegen und liefert entweder die erste gueltige
+// 100.64.0.0/10-Zeile (normalisiert ueber assertTailscaleAdresse) oder null.
+// Wirft NIEMALS -- das ist eine Erkennung, kein Nutzer-Input, ein
+// Fehlschlag (leer, Fehlertext, nur IPv6) ist ein normaler, erwarteter Fall.
+function tailscaleAdresseAusText(stdout) {
+  const raw = String(stdout ?? "");
+  for (const zeile of raw.split(/\r?\n/)) {
+    const kandidat = zeile.trim();
+    if (!kandidat) continue;
+    try {
+      return assertTailscaleAdresse(kandidat);
+    } catch (_err) {
+      // Diese Zeile ist keine gueltige Tailscale-Adresse (Fehlertext,
+      // IPv6, leer nach Trim) -- die naechste Zeile pruefen.
+    }
+  }
+  return null;
+}
+
+// Echte, injizierbare Erkennung: fuehrt "tailscale ip -4" aus (kurze Frist,
+// damit ein haengender Tailscale-Aufruf nicht die Obsidian-UI einfriert)
+// und schickt die Ausgabe durch tailscaleAdresseAusText(). spawnImpl kommt
+// injiziert (gleiches Muster wie runReemax/runVaultFile), damit sich das
+// ohne echten Tailscale-Prozess testen laesst. Liefert bei jedem Fehler
+// (Befehl nicht gefunden, Timeout, leere/ungueltige Ausgabe) null, wirft nie.
+function erkenneTailscaleAdresse({ spawnImpl, timeoutMs = 3000 } = {}) {
+  const spawn = spawnImpl || nodeSpawn();
+  if (typeof spawn !== "function") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn("tailscale", ["ip", "-4"], { shell: false, windowsHide: true });
+    } catch (_err) {
+      resolve(null);
+      return;
+    }
+    if (!child || !child.stdout || !child.stderr) {
+      resolve(null);
+      return;
+    }
+    const chunks = [];
+    const push = (buf) => {
+      chunks.push(Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf));
+    };
+    child.stdout.on("data", push);
+    child.stderr.on("data", push);
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      if (typeof child.kill === "function") child.kill("SIGKILL");
+      finish(null);
+    }, timeoutMs);
+    child.on("error", () => finish(null));
+    child.on("close", () => finish(tailscaleAdresseAusText(chunks.join(""))));
+  });
+}
+
+// -- Peer-Sync-Server (reiner Request-Handler) -------------------------------
+// bedieneSyncAnfrage nimmt eine bereits geparste Anfrage entgegen und liefert
+// eine Antwort zurueck -- kein echtes fs, kein echtes http in dieser
+// Funktion. Jeder Datei-/Verzeichniszugriff kommt ueber kontext injiziert,
+// damit sich Routing, Token-Pruefung und Pfad-Validierung ohne Netzwerk und
+// ohne echten Tresor testen lassen. Der echte http.createServer-Callback
+// (main.src.js, DESKTOP-Seite) ist nur eine duenne Huelle darueber.
+//
+// anfrage = { methode, pfad, suche, kopfzeilen, textkoerper }
+//   kopfzeilen-Schluessel kommen klein geschrieben an (so liefert Node sie
+//   ueber http.IncomingMessage.headers auch tatsaechlich aus).
+// kontext = {
+//   pruefeToken(token) -> boolean|Promise<boolean>,
+//   schluesselFuerToken(token) -> Buffer(32)|null|Promise<...>,
+//   listeDateien() -> [{pfad, mtime, groesse}, ...]|Promise<...>,
+//   liesInhalt(pfad) -> string|null|Promise<...>  (null/undefined = fehlt),
+//   schreibeInhalt(pfad, inhalt) -> void|Promise<void>,
+//   existiertDatei(pfad) -> boolean|Promise<boolean>,
+// }
+// Antwort = { status, textkoerper, kopfzeilen }
+//
+// Der Token reist im Header "x-unitedshare-token" (PEER_SYNC_TOKEN_HEADER).
+// kontext.pruefeToken entscheidet, ob er zu einem der gepaarten Mobilgeraete
+// passt -- diese Funktion kennt die Geraeteliste selbst nicht.
+//
+// Reihenfolge je Route: zuerst Route/Methode bekannt? (sonst 404, ohne jede
+// weitere Pruefung) -- dann Token pruefen (sonst 401, bevor irgendein
+// Dateizugriff passiert) -- dann den zum Token gehoerenden Sitzungsschluessel
+// holen (sonst 401, bevor irgendein Dateizugriff passiert -- ein Geraet mit
+// gueltigem Token, aber OHNE gespeicherten Schluessel, ist eines, das vor der
+// Verschluesselung gepaart wurde; es bekommt einen klaren Fehlschlag, nie
+// unverschluesselte Daten) -- dann Pfad validieren (sonst 400) -- erst danach
+// der injizierte Dateizugriff.
+//
+// Jeder Nutzdaten-Response-Body (Manifest, Dateiinhalt) UND der Request-Body
+// beim Schreiben reisen ab hier als {nonce, ciphertext, tag}
+// (pairingVerschluesseln/pairingEntschluesseln, AES-256-GCM mit dem beim
+// Pairing abgeleiteten Sitzungsschluessel) -- NIE mehr als Klartext-JSON mit
+// echtem Notizinhalt. Fehlermeldungen (404/400/401) bleiben Klartext, sie
+// tragen keinen Notizinhalt.
+const PEER_SYNC_TOKEN_HEADER = "x-unitedshare-token";
+const PEER_SYNC_KEIN_SCHLUESSEL_MELDUNG =
+  "Kein Sitzungsschluessel fuer dieses Geraet gespeichert -- bitte erneut koppeln.";
+
+function peerSyncJson(status, body) {
+  return {
+    status,
+    textkoerper: JSON.stringify(body),
+    kopfzeilen: { "content-type": "application/json; charset=utf-8" },
+  };
+}
+
+// Verschluesselt daten mit schluessel und verpackt das Ergebnis als JSON-
+// Antwort -- das Gegenstueck zu peerSyncJson() fuer jede Route, die echten
+// Notizinhalt im Response-Body trägt.
+async function peerSyncVerschluesselteJson(status, daten, schluessel) {
+  const verschluesselt = await pairingVerschluesseln(JSON.stringify(daten), schluessel);
+  return {
+    status,
+    textkoerper: JSON.stringify(verschluesselt),
+    kopfzeilen: { "content-type": "application/json; charset=utf-8" },
+  };
+}
+
+// Gegenstueck beim Empfang: textkoerper ist das JSON eines
+// {nonce, ciphertext, tag}-Objekts; liefert das entschluesselte, geparste
+// JSON-Objekt oder null bei JEDEM Fehler (kaputtes JSON, falscher Schluessel,
+// manipulierte Daten) -- der Aufrufer unterscheidet nicht weiter, alle Faelle
+// enden gleich: 400, kein Dateizugriff.
+async function peerSyncEntschluesselterKoerper(textkoerper, schluessel) {
+  let verschluesselt;
+  try {
+    verschluesselt = JSON.parse(String(textkoerper || "{}"));
+  } catch (_err) {
+    return null;
+  }
+  try {
+    const klartext = await pairingEntschluesseln(verschluesselt, schluessel);
+    return JSON.parse(klartext.toString("utf8"));
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function bedieneSyncAnfrage(anfrage, kontext) {
+  const req = anfrage || {};
+  const methode = String(req.methode || "GET").toUpperCase();
+  const pfad = String(req.pfad || "");
+  const suche = req.suche || {};
+  const kopfzeilen = req.kopfzeilen || {};
+  const ctx = kontext || {};
+
+  let route = null;
+  if (methode === "GET" && pfad === "/manifest") route = "manifest";
+  else if (methode === "GET" && pfad === "/datei") route = "datei-lesen";
+  else if (methode === "POST" && pfad === "/datei") route = "datei-schreiben";
+  if (!route) return peerSyncJson(404, { fehler: "unbekannte Route" });
+
+  const token = String(kopfzeilen[PEER_SYNC_TOKEN_HEADER] ?? "");
+  const tokenOk = token && typeof ctx.pruefeToken === "function" ? await ctx.pruefeToken(token) : false;
+  if (!tokenOk) return peerSyncJson(401, { fehler: "kein gueltiges Token" });
+
+  const schluessel =
+    typeof ctx.schluesselFuerToken === "function" ? await ctx.schluesselFuerToken(token) : null;
+  if (!schluessel) return peerSyncJson(401, { fehler: PEER_SYNC_KEIN_SCHLUESSEL_MELDUNG });
+
+  if (route === "manifest") {
+    const dateien = typeof ctx.listeDateien === "function" ? await ctx.listeDateien() : [];
+    const inhalte = {};
+    for (const eintrag of dateien || []) {
+      if (!eintrag || !eintrag.pfad) continue;
+      inhalte[eintrag.pfad] = typeof ctx.liesInhalt === "function" ? await ctx.liesInhalt(eintrag.pfad) : "";
+    }
+    const manifest = baueSyncManifest(dateien, (p) => inhalte[p]);
+    return await peerSyncVerschluesselteJson(200, manifest, schluessel);
+  }
+
+  if (route === "datei-lesen") {
+    let safe;
+    try {
+      safe = assertVaultRelative(suche.pfad);
+    } catch (_err) {
+      return peerSyncJson(400, { fehler: "ungueltiger Pfad" });
+    }
+    if (typeof ctx.existiertDatei === "function" && !(await ctx.existiertDatei(safe))) {
+      return peerSyncJson(404, { fehler: "nicht gefunden" });
+    }
+    const inhalt = typeof ctx.liesInhalt === "function" ? await ctx.liesInhalt(safe) : null;
+    if (inhalt === null || inhalt === undefined) return peerSyncJson(404, { fehler: "nicht gefunden" });
+    return await peerSyncVerschluesselteJson(200, { pfad: safe, inhalt }, schluessel);
+  }
+
+  // route === "datei-schreiben" -- der Request-Body ist hier bereits
+  // verschluesselt angekommen (Gegenstueck zu den Response-Bodies oben).
+  const body = await peerSyncEntschluesselterKoerper(req.textkoerper, schluessel);
+  if (!body) return peerSyncJson(400, { fehler: "ungueltiger Textkoerper" });
+  let safe;
+  try {
+    safe = assertVaultRelative(body.pfad);
+  } catch (_err) {
+    return peerSyncJson(400, { fehler: "ungueltiger Pfad" });
+  }
+  if (typeof ctx.schreibeInhalt !== "function") return peerSyncJson(500, { fehler: "kein Schreibzugriff" });
+  await ctx.schreibeInhalt(safe, String(body.inhalt ?? ""));
+  return await peerSyncVerschluesselteJson(200, { pfad: safe, geschrieben: true }, schluessel);
+}
+
+// -- Peer-Sync-Client (Mobile-Seite, reine Orchestrierung) -------------------
+// fuehreSyncDurch() ist der GESAMTE Ablauf eines Sync-Durchlaufs auf dem
+// Mobilgeraet. Nichts darin greift direkt auf fetch/requestUrl oder Obsidians
+// Vault-API zu -- jede Ein-/Ausgabe kommt injiziert (sync oder
+// Promise). Der echte Client in main.src.js (Mobile-Seite) ist nur eine
+// duenne Huelle darueber: requestUrl gegen den Desktop-Host fuer die
+// fern*-Callbacks, adapterVaultHost(...)/this.app.vault fuer die lokal*-
+// Callbacks -- genau wie bedieneSyncAnfrage() es serverseitig schon tut.
+//
+// Ablauf je Lauf (planeSyncAbgleich entscheidet push/pull/konflikt):
+//   1. lokales Manifest bauen (Inhalt je Datei einmal vorab lesen, siehe
+//      bedieneSyncAnfrage oben -- baueSyncManifest selbst erwartet einen
+//      SYNCHRONEN Lookup, kein await, darum erst alles einsammeln).
+//   2. fernes Manifest holen.
+//   3. Plan bilden.
+//   4. push: der lokale Inhalt wurde in Schritt 1 schon gelesen, direkt an
+//      fernDateiSchreiben(pfad, inhalt) geben.
+//   5. pull: fernDateiHolen(pfad), Ergebnis lokal schreiben.
+//   6. konflikt: fernDateiHolen(pfad), ueber konfliktNameFrei(pfad) einen
+//      freien Namen bestimmen, NUR diesen Namen lokal schreiben -- das
+//      lokale Original bleibt unveraendert, fern bleibt unveraendert (kein
+//      fernDateiSchreiben fuer diesen Pfad).
+//
+// Rueckgabe { push, pull, konflikt, konfliktPfade, letzterStand }:
+// letzterStand ist das Manifest, das der Aufrufer fuer den naechsten Lauf
+// abspeichert. Fuer push/pull/schon gleiche Pfade ist der Eintrag danach auf
+// beiden Seiten identisch (ein Hash). Fuer einen Konflikt gibt es keinen
+// gemeinsamen Hash -- hier wird bewusst der LOKALE Stand als neue Basis
+// uebernommen (die Originaldatei blieb unangetastet, die fremde Fassung
+// existiert bereits unter dem Konfliktnamen). Ohne einen Eintrag fuer den
+// konfliktbehafteten Pfad wuerde planeSyncAbgleich ihn beim naechsten Lauf
+// erneut als "seit der Basis veraendert" auf BEIDEN Seiten lesen und wieder
+// in den Konflikt-Zweig fallen -- bei unveraenderten Dateien auf beiden
+// Seiten also bei jedem weiteren Lauf eine zusaetzliche Konfliktkopie
+// anlegen, statt sich beim naechsten Mal (lokal unveraendert, fern weicht ab)
+// Richtung "pull" aufzuloesen.
+async function fuehreSyncDurch({
+  fernManifestHolen,
+  fernDateiHolen,
+  fernDateiSchreiben,
+  lokalDateien,
+  lokalInhaltLesen,
+  lokalInhaltSchreiben,
+  letzterStand,
+  konfliktNameFrei,
+} = {}) {
+  const dateien = lokalDateien || [];
+  const lokalInhalte = {};
+  for (const eintrag of dateien) {
+    if (!eintrag || !eintrag.pfad) continue;
+    lokalInhalte[eintrag.pfad] =
+      typeof lokalInhaltLesen === "function" ? await lokalInhaltLesen(eintrag.pfad) : "";
+  }
+  const lokal = baueSyncManifest(dateien, (pfad) => lokalInhalte[pfad]);
+  const fern = (typeof fernManifestHolen === "function" ? await fernManifestHolen() : {}) || {};
+  const plan = planeSyncAbgleich(lokal, fern, letzterStand);
+
+  for (const pfad of plan.push) {
+    if (typeof fernDateiSchreiben === "function") {
+      await fernDateiSchreiben(pfad, lokalInhalte[pfad]);
+    }
+  }
+
+  for (const pfad of plan.pull) {
+    const inhalt = typeof fernDateiHolen === "function" ? await fernDateiHolen(pfad) : "";
+    if (typeof lokalInhaltSchreiben === "function") await lokalInhaltSchreiben(pfad, inhalt);
+  }
+
+  const konfliktPfade = [];
+  for (const pfad of plan.konflikt) {
+    const inhalt = typeof fernDateiHolen === "function" ? await fernDateiHolen(pfad) : "";
+    const kopie =
+      typeof konfliktNameFrei === "function" ? await konfliktNameFrei(pfad) : konfliktDateiname(pfad);
+    if (typeof lokalInhaltSchreiben === "function") await lokalInhaltSchreiben(kopie, inhalt);
+    konfliktPfade.push({ original: pfad, kopie });
+  }
+
+  const pushSet = new Set(plan.push);
+  const pullSet = new Set(plan.pull);
+  const konfliktSet = new Set(plan.konflikt);
+  const letzterStandNeu = {};
+  for (const pfad of new Set([...Object.keys(lokal), ...Object.keys(fern)])) {
+    if (pullSet.has(pfad)) letzterStandNeu[pfad] = fern[pfad];
+    else if (pushSet.has(pfad)) letzterStandNeu[pfad] = lokal[pfad];
+    else if (konfliktSet.has(pfad)) letzterStandNeu[pfad] = lokal[pfad];
+    else letzterStandNeu[pfad] = lokal[pfad] || fern[pfad];
+  }
+
+  return {
+    push: plan.push.length,
+    pull: plan.pull.length,
+    konflikt: plan.konflikt.length,
+    konfliktPfade,
+    letzterStand: letzterStandNeu,
+  };
+}
+
+// -- Pairing-Protokoll --------------------------------------------------------
+// Vorbild (NUR gelesen, nicht veraendert):
+//   unitedshare-enterprise/Shared/PairingProtocol.swift + PairingServer.swift
+// Ablauf: Host erzeugt ECDH-Schluesselpaar (P-256) + 6-stelligen Code, zeigt
+// beides; Mobilgeraet gibt den Code ein, erzeugt sein eigenes Schluesselpaar
+// und schickt {clientPublicKey, codeProof, deviceName}; codeProof ist
+// HMAC-SHA256(key=Code, message=eigener_public_key_base64). Host prueft den
+// Proof und leitet mit ECDH+HKDF(SHA-256, Salt "unitedshare-pairing-v1",
+// Info "aes-256-gcm", 32 Byte) denselben AES-256-GCM-Schluessel ab wie das
+// Mobilgeraet.
+//
+// WICHTIG: Diese gesamte Sektion laeuft auf der Web-Crypto-API
+// (globalThis.crypto.subtle / .getRandomValues / .randomUUID), NICHT auf
+// Nodes eingebautem Krypto-Modul (laedt man ueber require, Namensteil
+// "crypto"). Grund: Obsidians mobile WebView (iOS/Android) kennt dieses
+// Node-Modul gar nicht -- ein echtes Diagnose-Log auf einem iPhone zeigte
+// genau diesen Absturz beim Koppeln. Web Crypto ist ein Browser-Standard
+// (seit Jahren in WKWebView) UND seit Node 19 global verfuegbar -- derselbe
+// Codepfad beweist darum mit der bestehenden Node-Testsuite auch mobile
+// Kompatibilitaet, nicht nur "laeuft unter Node".
+// subtle.* ist komplett Promise-basiert, darum ist praktisch jede Funktion
+// hier async geworden (Ausnahme: erzeugePairingCode, siehe dort).
+//
+// Entscheidungen, die hier (noch ohne HTTP/UI) getroffen wurden:
+//   - Feldnamen in Angebot/Anfrage/Session (host, port, publicKey, codeHash,
+//     expiresAt, deviceName, clientPublicKey, codeProof, sessionId,
+//     symmetricKey, peerDeviceName, erstelltAm) sind bewusst wie im
+//     Schwester-Protokoll benannt -- das ist die Grundlage fuer den
+//     spaeteren echten Handshake mit der iOS/macOS-App, kein Stilbruch.
+//   - Oeffentliche Schluessel reisen jetzt als Base64(raw/X9.63) statt
+//     Base64(SPKI/DER): subtle.exportKey("raw", ...) liefert genau die
+//     unkomprimierte EC-Punkt-Darstellung (0x04||X||Y, 65 Byte fuer P-256),
+//     die auch Apple CryptoKit mit x963Representation erzeugt -- kuerzer
+//     als SPKI/DER und naeher am echten iOS-Interop-Format als vorher.
+//   - pairingSessionSchluesselAbleiten() liefert die rohen 32 Byte
+//     Schluesselmaterial zurueck, NICHT einen fertigen AES-GCM-CryptoKey:
+//     main.src.js haengt diesen Wert dauerhaft als Base64-String in
+//     settings/data.json ab (peerSyncGeraete[].symmetricKey,
+//     mobilSyncSchluessel) -- ein CryptoKey laesst sich nicht synchron so
+//     serialisieren. pairingVerschluesseln/pairingEntschluesseln importieren
+//     die rohen Bytes bei jedem Aufruf selbst zu einem CryptoKey.
+//   - pairingProofsGleich() (vorher: Proof erneut berechnen, dann
+//     zeitkonstant vergleichen) ist ersatzlos aufgeloest: subtle.verify()
+//     vergleicht intern bereits zeitkonstant, darum prueft akzeptierePairing
+//     den codeProof jetzt direkt per subtle.verify() gegen einen aus dem
+//     erwarteten Code importierten HMAC-Schluessel -- eine Stufe weniger,
+//     dieselbe Eigenschaft.
+//   - PAIRING_MAX_VERSUCHE = 5 Fehlversuche, danach ist der Code verbraucht
+//     (eigene Wahl -- 10^6 Moeglichkeiten sind sonst in akzeptabler Zeit
+//     erratbar).
+//   - akzeptierePairing() gibt bei JEDEM Fehler (falscher Proof, falscher
+//     Public Key, abgelaufenes Angebot) dieselbe neutrale Meldung -- kein
+//     Hinweis, was genau falsch war.
+const PAIRING_GUELTIGKEIT_MS = 5 * 60 * 1000; // 5 Minuten, wie PairingServer.swift (300s)
+const PAIRING_MAX_VERSUCHE = 5; // eigene Wahl, siehe Kommentar oben
+const PAIRING_FEHLER_MELDUNG = "Pairing fehlgeschlagen.";
+
+// getRandomValues ist SYNCHRON (anders als subtle.*) -- diese eine Funktion
+// bleibt darum synchron, auch wenn jede aufrufende Funktion (z. B.
+// erzeugePairingAngebot) ohnehin schon async ist. Rejection-Sampling gegen
+// Modulo-Bias: 2^32 ist kein Vielfaches von 1.000.000, ein nacktes
+// "% 1000000" wuerde die untersten Reste leicht haeufiger ziehen als den
+// Rest; limit ist das groesste Vielfache von 1.000.000 unterhalb 2^32 --
+// Werte darueber werden verworfen und neu gezogen.
+function erzeugePairingCode() {
+  const crypto = globalThis.crypto;
+  const limit = Math.floor(0x100000000 / 1000000) * 1000000;
+  let wert;
+  do {
+    wert = crypto.getRandomValues(new Uint32Array(1))[0];
+  } while (wert >= limit);
+  return String(wert % 1000000).padStart(6, "0");
+}
+
+async function erzeugeEcdhSchluesselpaar() {
+  const { publicKey, privateKey } = await globalThis.crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveBits"],
+  );
+  return { publicKey, privateKey };
+}
+
+async function pairingOeffentlichenSchluesselKodieren(publicKeyObjekt) {
+  const roh = await globalThis.crypto.subtle.exportKey("raw", publicKeyObjekt);
+  return Buffer.from(roh).toString("base64");
+}
+
+async function pairingOeffentlichenSchluesselDekodieren(base64) {
+  try {
+    const roh = Buffer.from(String(base64 ?? ""), "base64");
+    return await globalThis.crypto.subtle.importKey("raw", roh, { name: "ECDH", namedCurve: "P-256" }, true, []);
+  } catch (_err) {
+    throw new UnitedShareError(PAIRING_FEHLER_MELDUNG, 0);
+  }
+}
+
+// Importiert den Klartext-Code als HMAC-SHA256-Schluessel -- gemeinsamer
+// Schritt fuer pairingCodeProofBerechnen() (Client: Proof erzeugen) UND
+// akzeptierePairing() (Host: Proof per subtle.verify() pruefen), damit beide
+// Seiten garantiert denselben Schluessel aus demselben Code importieren.
+async function pairingCodeHmacSchluessel(code) {
+  return globalThis.crypto.subtle.importKey(
+    "raw",
+    Buffer.from(String(code ?? ""), "utf8"),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+}
+
+async function pairingCodeProofBerechnen(code, clientPublicKeyBase64) {
+  const schluessel = await pairingCodeHmacSchluessel(code);
+  const signatur = await globalThis.crypto.subtle.sign(
+    "HMAC",
+    schluessel,
+    Buffer.from(String(clientPublicKeyBase64 ?? ""), "utf8"),
+  );
+  return Buffer.from(signatur).toString("base64");
+}
+
+async function pairingSessionSchluesselAbleiten(privaterSchluessel, oeffentlicherSchluessel) {
+  const subtle = globalThis.crypto.subtle;
+  const sharedSecret = await subtle.deriveBits(
+    { name: "ECDH", public: oeffentlicherSchluessel },
+    privaterSchluessel,
+    256,
+  );
+  const ikmSchluessel = await subtle.importKey("raw", sharedSecret, "HKDF", false, ["deriveBits"]);
+  const abgeleitet = await subtle.deriveBits(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new TextEncoder().encode("unitedshare-pairing-v1"),
+      info: new TextEncoder().encode("aes-256-gcm"),
+    },
+    ikmSchluessel,
+    256,
+  );
+  return Buffer.from(abgeleitet);
+}
+
+// Host-Seite: erzeugt das Pairing-Angebot (spaeter QR-Inhalt) + den
+// 6-stelligen Code. privaterSchluessel und code bleiben nur im Speicher des
+// Hosts, werden nie ueber die Leitung geschickt.
+async function erzeugePairingAngebot({ host, port, geraetename } = {}) {
+  const { publicKey, privateKey } = await erzeugeEcdhSchluesselpaar();
+  const code = erzeugePairingCode();
+  const codeHashRoh = await globalThis.crypto.subtle.digest("SHA-256", Buffer.from(code, "utf8"));
+  const codeHash = Buffer.from(codeHashRoh).toString("hex");
+  const angebot = {
+    host: String(host ?? ""),
+    port: Number(port),
+    publicKey: await pairingOeffentlichenSchluesselKodieren(publicKey),
+    codeHash,
+    expiresAt: Date.now() + PAIRING_GUELTIGKEIT_MS,
+    deviceName: String(geraetename ?? ""),
+  };
+  return { angebot, privaterSchluessel: privateKey, code };
+}
+
+// Client-Seite: erzeugt aus dem Angebot + dem vom Menschen eingegebenen Code
+// die Pairing-Anfrage. Der eigene privaterSchluessel bleibt lokal.
+async function erzeugePairingAnfrage({ angebot, code, geraetename } = {}) {
+  const { publicKey, privateKey } = await erzeugeEcdhSchluesselpaar();
+  const clientPublicKey = await pairingOeffentlichenSchluesselKodieren(publicKey);
+  const anfrage = {
+    clientPublicKey,
+    codeProof: await pairingCodeProofBerechnen(code, clientPublicKey),
+    deviceName: String(geraetename ?? ""),
+  };
+  return { anfrage, privaterSchluessel: privateKey };
+}
+
+// Host-Seite: prueft die Anfrage gegen den erwarteten Klartext-Code
+// (per subtle.verify(), intern zeitkonstant) und das optional mitgegebene
+// Angebot gegen dessen Ablaufzeit. Wirft bei JEDEM Fehlschlag dieselbe
+// neutrale Meldung -- liefert bei Erfolg eine neue Session mit dem per
+// ECDH+HKDF abgeleiteten AES-256-GCM-Schluesselmaterial.
+async function akzeptierePairing({ anfrage, privaterSchluessel, erwarteterCode, angebot } = {}) {
+  const scheitern = () => {
+    throw new UnitedShareError(PAIRING_FEHLER_MELDUNG, 0);
+  };
+
+  if (angebot && Number(angebot.expiresAt) <= Date.now()) scheitern();
+
+  const req = anfrage || {};
+  let clientPublicKey;
+  try {
+    clientPublicKey = await pairingOeffentlichenSchluesselDekodieren(req.clientPublicKey);
+  } catch (_err) {
+    scheitern();
+  }
+
+  const hmacSchluessel = await pairingCodeHmacSchluessel(erwarteterCode);
+  let proofGueltig = false;
+  try {
+    proofGueltig = await globalThis.crypto.subtle.verify(
+      "HMAC",
+      hmacSchluessel,
+      Buffer.from(String(req.codeProof ?? ""), "base64"),
+      Buffer.from(String(req.clientPublicKey ?? ""), "utf8"),
+    );
+  } catch (_err) {
+    proofGueltig = false;
+  }
+  if (!proofGueltig) scheitern();
+
+  const symmetricKey = await pairingSessionSchluesselAbleiten(privaterSchluessel, clientPublicKey);
+  return {
+    sessionId: globalThis.crypto.randomUUID(),
+    symmetricKey,
+    peerDeviceName: String(req.deviceName ?? ""),
+    erstelltAm: Date.now(),
+  };
+}
+
+// Client-Seite: leitet nach akzeptierter Antwort denselben Session-Key ab
+// wie akzeptierePairing auf der Host-Seite (gleiches ECDH+HKDF-Ergebnis bei
+// korrektem Code).
+async function leiteSessionSchluesselAb({ privaterSchluessel, hostOeffentlicherSchluessel } = {}) {
+  const hostPublicKey = await pairingOeffentlichenSchluesselDekodieren(hostOeffentlicherSchluessel);
+  return pairingSessionSchluesselAbleiten(privaterSchluessel, hostPublicKey);
+}
+
+// Reine Entscheidungsfunktionen fuer Versuchszaehler/Ablauf -- kein HTTP
+// hier, nur "ist dieser Versuch bei diesem Zustand noch erlaubt?". Ein
+// Host-Request-Handler (spaeterer Schritt) ruft pairingVersuchErlaubt() vor
+// jedem Handshake-Versuch auf und speichert danach das Ergebnis von
+// pairingVersuchVermerken() als neuen Zustand.
+// zustand = { versuche: number, erfolgreich: boolean, laeuftAbAm: number }
+function pairingVersuchErlaubt(zustand, jetzt = Date.now()) {
+  if (!zustand) return true;
+  if (zustand.erfolgreich) return false;
+  if (Number(zustand.versuche) >= PAIRING_MAX_VERSUCHE) return false;
+  const ablauf = Number(zustand.laeuftAbAm);
+  if (Number.isFinite(ablauf) && jetzt >= ablauf) return false;
+  return true;
+}
+
+function pairingVersuchVermerken(zustand, erfolgreich) {
+  const basis = zustand || { versuche: 0, erfolgreich: false, laeuftAbAm: Infinity };
+  return {
+    versuche: basis.versuche + (erfolgreich ? 0 : 1),
+    erfolgreich: Boolean(basis.erfolgreich || erfolgreich),
+    laeuftAbAm: basis.laeuftAbAm,
+  };
+}
+
+// AES-256-GCM nach Vorbild des Schwester-Protokolls: {nonce, ciphertext, tag}
+// je Base64, fuer die Token-Uebergabe nach dem Handshake und jeden weiteren
+// Sync-Request/-Response. schluessel sind die rohen 32 Byte aus
+// pairingSessionSchluesselAbleiten() -- wird hier erst zum AES-GCM-CryptoKey
+// importiert (siehe Entscheidung am Abschnittsanfang).
+async function pairingVerschluesseln(daten, schluessel) {
+  const subtle = globalThis.crypto.subtle;
+  const klartext = Buffer.isBuffer(daten) ? daten : Buffer.from(String(daten ?? ""), "utf8");
+  const nonce = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const aesSchluessel = await subtle.importKey("raw", schluessel, "AES-GCM", false, ["encrypt"]);
+  const kombiniert = Buffer.from(await subtle.encrypt({ name: "AES-GCM", iv: nonce }, aesSchluessel, klartext));
+  // WebCrypto haengt den 16-Byte-Authentifizierungs-Tag ans Ende des
+  // Ciphertexts an (anders als Nodes crypto.createCipheriv, das ihn separat
+  // liefert via getAuthTag()) -- hier abgetrennt, damit das
+  // {nonce, ciphertext, tag}-Format des Schwester-Protokolls erhalten bleibt.
+  const tag = kombiniert.subarray(kombiniert.length - 16);
+  const ciphertext = kombiniert.subarray(0, kombiniert.length - 16);
+  return {
+    nonce: Buffer.from(nonce).toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+    tag: tag.toString("base64"),
+  };
+}
+
+async function pairingEntschluesseln({ nonce, ciphertext, tag } = {}, schluessel) {
+  try {
+    const subtle = globalThis.crypto.subtle;
+    const nonceBuf = Buffer.from(String(nonce ?? ""), "base64");
+    const ciphertextBuf = Buffer.from(String(ciphertext ?? ""), "base64");
+    const tagBuf = Buffer.from(String(tag ?? ""), "base64");
+    // Gegenstueck zum Abtrennen oben: subtle.decrypt() erwartet Ciphertext
+    // und Tag wieder kombiniert, bevor es sie prueft.
+    const kombiniert = Buffer.concat([ciphertextBuf, tagBuf]);
+    const aesSchluessel = await subtle.importKey("raw", schluessel, "AES-GCM", false, ["decrypt"]);
+    const klartext = await subtle.decrypt({ name: "AES-GCM", iv: nonceBuf }, aesSchluessel, kombiniert);
+    return Buffer.from(klartext);
+  } catch (_err) {
+    throw new UnitedShareError("Die verschluesselten Pairing-Daten konnten nicht entschluesselt werden.", 0);
+  }
+}
+
+// -- LAN-Adresserkennung -------------------------------------------------
+// Reine Funktion: das Ergebnis von require("os").networkInterfaces() wird
+// injiziert, NICHT selbst erfragt (Testbarkeit, gleiches Muster wie
+// tailscaleAdresseAusText). Gesucht ist eine private IPv4-Adresse aus einem
+// der drei klassischen Bereiche (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12),
+// NICHT aus 100.64.0.0/10 -- das ist Tailscales eigener CGNAT-Bereich, der
+// wird separat ueber erkenneTailscaleAdresse() erkannt und zaehlt hier
+// ausdruecklich nicht als LAN, auch wenn er technisch zu den privaten
+// Bereichen gehoert. Interne Adressen (127.0.0.1) fallen ueber das
+// internal-Flag raus.
+//
+// Bei mehreren Treffern gewinnt deterministisch: zuerst alle Interfaces
+// DURCHSUCHEN, deren Name NICHT mit "utun"/"awdl"/"llw" beginnt (virtuelle
+// Tunnel- bzw. Apple-Wireless-Direct-Link-Schnittstellen auf macOS, die
+// ohnehin meist Tailscale oder AirDrop sind, nicht das echte LAN); erst wenn
+// dort nichts Passendes steht, auch diese pruefen. Innerhalb einer Gruppe
+// gilt die Reihenfolge, in der Node die Interfaces liefert.
+function lanAdresseAusInterfaces(interfaces) {
+  if (!interfaces || typeof interfaces !== "object") return null;
+
+  const istPrivatesIpv4 = (ip) => {
+    const teile = String(ip || "").split(".");
+    if (teile.length !== 4) return false;
+    const zahlen = teile.map(Number);
+    if (zahlen.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+    const [a, b] = zahlen;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  };
+  const istTailscaleBereich = (ip) => {
+    const teile = String(ip || "").split(".").map(Number);
+    if (teile.length !== 4) return false;
+    return teile[0] === 100 && teile[1] >= 64 && teile[1] <= 127;
+  };
+  const passt = (eintrag) => {
+    if (!eintrag || eintrag.internal) return false;
+    if (eintrag.family !== "IPv4" && eintrag.family !== 4) return false;
+    if (!istPrivatesIpv4(eintrag.address)) return false;
+    if (istTailscaleBereich(eintrag.address)) return false;
+    return true;
+  };
+
+  const namen = Object.keys(interfaces);
+  const virtuell = (name) => /^(utun|awdl|llw)/.test(name);
+  const reihenfolge = [...namen.filter((name) => !virtuell(name)), ...namen.filter(virtuell)];
+  for (const name of reihenfolge) {
+    const liste = interfaces[name];
+    if (!Array.isArray(liste)) continue;
+    for (const eintrag of liste) {
+      if (passt(eintrag)) return eintrag.address;
+    }
+  }
+  return null;
+}
+
+const VAULT_RAUM = "bge-m3";
+const VAULT_DIM = 1024;
+const VAULT_TOP_K = 4;
+const VAULT_K_MAX = 8;
+const VAULT_BATCH = 16;
+const VAULT_AUSGABE_MAX = 2000000;
+const VAULT_MODELL_FEHLER = "Der Tresor-Index nutzt bge-m3 auf diesem Rechner.";
+const VAULT_RAUM_FEHLER = "Der Tresor-Index bleibt im Raum bge-m3.";
+const VAULT_DESKTOP = "Der Tresor-Index läuft in der Desktop-App.";
+const VAULT_ORT = "Der Tresor-Index liegt neben dem Plugin.";
+const VAULT_DUCK = "DuckDB liegt auf diesem Rechner nicht.";
+const VAULT_SCHREIBEN = "Der Tresor-Index ließ sich nicht schreiben.";
+const VAULT_LESEN = "Der Tresor-Index ließ sich nicht lesen.";
+
+function notizStand(text) {
+  return require("crypto").createHash("sha256").update(String(text ?? ""), "utf8").digest("hex");
+}
+
+function indexPlan(staende, notizen) {
+  const alt = new Map();
+  for (const row of staende || []) {
+    if (!row || row.pfad == null || row.pfad === "") continue;
+    const pfad = String(row.pfad);
+    const stand = String(row.stand || "");
+    if (!alt.has(pfad)) alt.set(pfad, stand);
+    else if (alt.get(pfad) !== stand) alt.set(pfad, "");
+  }
+  const jetzt = new Map();
+  for (const note of notizen || []) {
+    if (!note || note.pfad == null || note.pfad === "") continue;
+    jetzt.set(String(note.pfad), String(note.text ?? ""));
+  }
+  const neu = [];
+  const loeschen = [];
+  let behalten = 0;
+  for (const [pfad, text] of jetzt) {
+    const stand = notizStand(text);
+    const stuecke = chunkNote(pfad, text).map((piece) => ({
+      pfad,
+      stueck: piece.index,
+      text: piece.text,
+      stand,
+    }));
+    if (alt.has(pfad) && alt.get(pfad) === stand && stuecke.length) {
+      behalten += 1;
+      continue;
+    }
+    if (alt.has(pfad)) loeschen.push(pfad);
+    neu.push(...stuecke);
+  }
+  for (const pfad of alt.keys()) {
+    if (!jetzt.has(pfad)) loeschen.push(pfad);
+  }
+  return { behalten, neu, loeschen };
+}
+
+function einheitsvektor(werte) {
+  if (!Array.isArray(werte) || werte.length !== VAULT_DIM) {
+    throw new UnitedShareError(EMBED_BODY_ERROR, 0);
+  }
+  const vektor = [];
+  let norm = 0;
+  for (const wert of werte) {
+    const zahl = Number(wert);
+    if (!Number.isFinite(zahl)) throw new UnitedShareError(EMBED_BODY_ERROR, 0);
+    vektor.push(zahl);
+    norm += zahl * zahl;
+  }
+  if (norm === 0) throw new UnitedShareError(EMBED_BODY_ERROR, 0);
+  const scale = Math.sqrt(norm);
+  return vektor.map((zahl) => zahl / scale);
+}
+
+function zeilenMitVektoren(stuecke, vektoren, modell) {
+  const name = String(modell || "").trim();
+  if (embedStem(name) !== VAULT_RAUM) throw new UnitedShareError(VAULT_MODELL_FEHLER, 0);
+  const rows = stuecke || [];
+  const vectors = vektoren || [];
+  if (rows.length !== vectors.length) throw new UnitedShareError(EMBED_BODY_ERROR, 0);
+  return rows.map((row, index) => ({
+    raum: VAULT_RAUM,
+    modell: name,
+    pfad: String(row.pfad),
+    stueck: row.stueck,
+    text: String(row.text || ""),
+    stand: String(row.stand || ""),
+    vektor: einheitsvektor(vectors[index]),
+  }));
+}
+
+function tresorK(k) {
+  const zahl = Number(k);
+  if (!Number.isInteger(zahl) || zahl < 1) return VAULT_TOP_K;
+  return Math.min(zahl, VAULT_K_MAX);
+}
+
+function sucheStuecke(frageVektor, zeilen, k) {
+  const frage = einheitsvektor(frageVektor);
+  const rows = [];
+  for (const row of zeilen || []) {
+    if (!row || row.raum !== VAULT_RAUM) throw new UnitedShareError(VAULT_RAUM_FEHLER, 0);
+    rows.push({
+      pfad: String(row.pfad),
+      stueck: Number(row.stueck),
+      text: String(row.text || ""),
+      score: cosine(frage, einheitsvektor(row.vektor)),
+    });
+  }
+  rows.sort((a, b) => (b.score - a.score)
+    || String(a.pfad).localeCompare(String(b.pfad), "de")
+    || (a.stueck - b.stueck));
+  return rows.slice(0, tresorK(k));
+}
+
+function dateienAusTreffern(treffer) {
+  const grouped = new Map();
+  const order = [];
+  for (const row of treffer || []) {
+    if (!row || !row.pfad) continue;
+    const pfad = String(row.pfad);
+    if (!grouped.has(pfad)) {
+      grouped.set(pfad, []);
+      order.push(pfad);
+    }
+    grouped.get(pfad).push(String(row.text || ""));
+  }
+  return order.map((pfad) => ({ path: pfad, text: grouped.get(pfad).join("\n\n") }));
+}
+
+function mischeDateien(anhaenge, tresor) {
+  const out = [];
+  const seen = new Set();
+  for (const file of [...(anhaenge || []), ...(tresor || [])]) {
+    if (!file || !file.path || seen.has(file.path)) continue;
+    seen.add(file.path);
+    out.push(file);
+  }
+  return out;
+}
+
+function tresorIndexPfad(dir) {
+  const basis = String(dir ?? "").replace(/\/+$/, "");
+  if (!basis) return "";
+  return `${basis}/vault-index.duckdb`;
+}
+
+function locateDuckdb() {
+  if (!nodePath() || !nodeSpawn()) return null;
+  return "duckdb";
+}
+
+function duckdbWerkzeug(options) {
+  const hasSpawn = Object.hasOwn(options || {}, "spawnImpl");
+  const spawn = hasSpawn ? options.spawnImpl : nodeSpawn();
+  if (typeof spawn !== "function") throw new UnitedShareError(VAULT_DESKTOP, 0);
+  const bin = hasSpawn ? "duckdb" : locateDuckdb();
+  if (!bin) throw new UnitedShareError(VAULT_DUCK, 0);
+  return { spawn, bin };
+}
+
+function jsonAusDuckdb(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return [];
+  const start = raw.indexOf("[");
+  if (start < 0) throw new UnitedShareError(VAULT_LESEN, 0);
+  try {
+    const parsed = JSON.parse(raw.slice(start));
+    if (!Array.isArray(parsed)) throw new Error("kein Array");
+    return parsed;
+  } catch (error) {
+    if (error instanceof UnitedShareError) throw error;
+    throw new UnitedShareError(VAULT_LESEN, 0);
+  }
+}
+
+function duckdbLauf({
+  bin,
+  spawn,
+  dbPath,
+  sql,
+  readonly,
+  json,
+  env,
+  timeoutMs,
+  fehlermeldung,
+}) {
+  const args = ["-batch", "-bail"];
+  if (json) args.push("-json");
+  if (readonly) args.push("-readonly");
+  args.push(dbPath);
+  const childEnv = kindUmgebung(env || (typeof process !== "undefined" ? process.env : {}));
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(bin, args, {
+        shell: false,
+        env: childEnv,
+        windowsHide: true,
+      });
+    } catch (_err) {
+      reject(new UnitedShareError(fehlermeldung, 0));
+      return;
+    }
+    if (!child || !child.stdout || !child.stderr || !child.stdin) {
+      reject(new UnitedShareError(fehlermeldung, 0));
+      return;
+    }
+    const out = [];
+    let size = 0;
+    child.stdout.on("data", (buf) => {
+      if (size >= VAULT_AUSGABE_MAX) return;
+      const textOut = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
+      size += textOut.length;
+      out.push(textOut);
+    });
+    child.stderr.on("data", () => {});
+    let settled = false;
+    let timedOut = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (typeof child.kill === "function") child.kill("SIGKILL");
+    }, timeoutMs || 60000);
+    try {
+      child.stdin.write(sql);
+      child.stdin.end();
+    } catch (_err) {
+      finish(new UnitedShareError(fehlermeldung, 0));
+      return;
+    }
+    child.on("error", () => finish(new UnitedShareError(fehlermeldung, 0)));
+    child.on("close", (code) => {
+      if (timedOut || code !== 0) {
+        finish(new UnitedShareError(fehlermeldung, 0));
+        return;
+      }
+      finish(null, out.join(""));
+    });
+  });
+}
+
+function sqlText(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+// -- DuckDB-WASM-Ansicht (duckdb-ansicht.test.js) --
+// Reine Funktionen für die neue ItemView, die .parquet/.sql/.duckdb-Dateien
+// per DuckDB-WASM lokal öffnet. Getrennt vom CLI-basierten duckdbLauf()
+// oben (Tresor-Index): diese Funktionen fassen nie einen echten Prozess
+// oder DOM an, nur Strings/Arrays -- deshalb ohne Node-spawn testbar.
+const DUCKDB_ANSICHT_ENDUNGEN = Object.freeze(["duckdb", "parquet", "sql"]);
+const DUCKDB_ANSICHT_LIMIT_STANDARD = 100;
+const DUCKDB_ANSICHT_NULL = "∅";
+
+function istDuckdbAnsichtEndung(endung) {
+  const raw = String(endung ?? "").trim().toLowerCase();
+  const normalisiert = raw.startsWith(".") ? raw.slice(1) : raw;
+  if (!normalisiert) return false;
+  return DUCKDB_ANSICHT_ENDUNGEN.includes(normalisiert);
+}
+
+// SELECT * FROM '<pfad>' LIMIT <n> -- der Pfad kommt aus einem echten
+// Dateinamen im Tresor (kann ein einfaches Anführungszeichen enthalten),
+// darum über sqlText() escaped statt per Template-String eingesetzt. n wird
+// auf eine positive ganze Zahl geklemmt; ungültige Werte fallen auf
+// DUCKDB_ANSICHT_LIMIT_STANDARD zurück, damit n selbst nie ein Einfallstor
+// für etwas anderes als eine Zahl im SQL-Text wird.
+function duckdbVorschauAbfrage(pfad, n) {
+  const pfadText = String(pfad ?? "");
+  if (!pfadText) throw new UnitedShareError("Kein Pfad für die DuckDB-Vorschau.", 0);
+  const zahl = Number(n);
+  const limit = Number.isInteger(zahl) && zahl > 0 ? zahl : DUCKDB_ANSICHT_LIMIT_STANDARD;
+  return `SELECT * FROM ${sqlText(pfadText)} LIMIT ${limit}`;
+}
+
+// Generisches Ergebnis (Array von Zeilen-Objekten) -> {spalten, zeilen} für
+// eine HTML-Tabelle. Spalten kommen von der ERSTEN Zeile (Referenz); null
+// wird zu DUCKDB_ANSICHT_NULL (nie zur literalen Zeichenkette "null"),
+// fehlende Schlüssel in späteren Zeilen zu "".
+function duckdbTabelleAusZeilen(zeilen) {
+  const rows = Array.isArray(zeilen) ? zeilen : [];
+  if (!rows.length) return { spalten: [], zeilen: [] };
+  const spalten = Object.keys(rows[0] && typeof rows[0] === "object" ? rows[0] : {});
+  const ausZeile = (row) => spalten.map((spalte) => {
+    if (!row || typeof row !== "object" || !Object.hasOwn(row, spalte)) return "";
+    const wert = row[spalte];
+    return wert === null ? DUCKDB_ANSICHT_NULL : wert;
+  });
+  return { spalten, zeilen: rows.map(ausZeile) };
+}
+
+// Findet String-Literale in einem SQL-Text, die wie ein Dateipfad relativ
+// zum Tresor aussehen (z. B. 'daten.parquet' in FROM 'daten.parquet'),
+// damit der SQL-Codeblock-Prozessor sie VOR der Abfrage per
+// registerFileBuffer() unter genau demselben String registrieren kann, den
+// DuckDB im FROM sieht -- dasselbe Prinzip wie UnitedShareDuckDbView fuer
+// eine einzelne .parquet-Datei (main.src.js, duckdbVorschauAbfrage()), nur
+// hier auf beliebig viele Verweise in frei geschriebenem SQL angewendet.
+// Bewusst NICHT zurückgegeben werden: URLs (enthalten "://" -- DuckDB liest
+// die per HTTP/S3 selbst), absolute Pfade (führendes "/" oder ein
+// Windows-Laufwerksbuchstabe) -- die sind kein Tresor-Pfad -- und
+// Glob-Muster (enthalten "*" oder "?") -- registerFileBuffer() bildet nur
+// einen exakten Namen ab, kein Muster. Eine Heuristik: ein Literal zählt
+// nur als Dateiverweis, wenn es auf ".<Endung>" endet; ein normaler
+// String-Wert ohne Endung (z. B. in einer WHERE-Klausel) wird übersprungen.
+function duckdbDateiverweiseAusSql(sql) {
+  const text = String(sql ?? "");
+  const treffer = text.match(/'(?:[^']|'')*'/g) || [];
+  const gesehen = new Set();
+  const ergebnis = [];
+  for (const roh of treffer) {
+    const pfad = roh.slice(1, -1).replace(/''/g, "'").trim();
+    if (!pfad) continue;
+    if (pfad.includes("://")) continue;
+    if (pfad.startsWith("/") || /^[A-Za-z]:[\\/]/.test(pfad)) continue;
+    if (pfad.includes("*") || pfad.includes("?")) continue;
+    if (!/\.[A-Za-z0-9]{1,10}$/.test(pfad)) continue;
+    if (gesehen.has(pfad)) continue;
+    gesehen.add(pfad);
+    ergebnis.push(pfad);
+  }
+  return ergebnis;
+}
+
+// Bereitet den rohen Inhalt einer .sql-Datei als EINE Abfrage vor (DuckDB
+// verarbeitet mehrere Statements getrennt durch ';' selbst). Liefert "" bei
+// leerem oder reinem Kommentar-Inhalt, damit die Ansicht klar "keine
+// Abfrage" zeigen kann statt eines kryptischen Fehlers von DuckDB selbst.
+// Die Kommentar-Erkennung ist eine Heuristik nur für diese Leer-Prüfung --
+// zurückgegeben wird bei echtem Inhalt immer der UNVERÄNDERTE Originaltext.
+function duckdbSqlAusDatei(text) {
+  const roh = String(text ?? "");
+  const ohneKommentare = roh
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/--[^\n]*/g, "")
+    .trim();
+  if (!ohneKommentare) return "";
+  return roh.trim();
+}
+
+async function modellBge(origin, fetchImpl, timeoutMs) {
+  const names = await localModelNames({ origin, fetchImpl, timeoutMs });
+  const modell = pickEmbedModel(names, VAULT_RAUM);
+  if (!modell || embedStem(modell) !== VAULT_RAUM) {
+    throw new UnitedShareError(VAULT_MODELL_FEHLER, 0);
+  }
+  return modell;
+}
+
+async function tabelleDa(werkzeug, options, dbPath, fehlermeldung) {
+  const text = await duckdbLauf({
+    ...werkzeug,
+    dbPath,
+    sql: "SELECT COUNT(*)::INTEGER AS da FROM information_schema.tables WHERE table_schema = 'main' AND table_name = 'stuecke';",
+    readonly: true,
+    json: true,
+    env: options.env,
+    timeoutMs: options.timeoutMs,
+    fehlermeldung,
+  });
+  const rows = jsonAusDuckdb(text);
+  return Number(rows[0] && rows[0].da) > 0;
+}
+
+async function staendeLesen(werkzeug, options, dbPath) {
+  const text = await duckdbLauf({
+    ...werkzeug,
+    dbPath,
+    sql: "SELECT pfad, MIN(stand) AS stand, COUNT(DISTINCT stand)::INTEGER AS n FROM stuecke WHERE raum = 'bge-m3' GROUP BY pfad;",
+    readonly: true,
+    json: true,
+    env: options.env,
+    timeoutMs: options.timeoutMs,
+    fehlermeldung: VAULT_SCHREIBEN,
+  });
+  const rows = jsonAusDuckdb(text);
+  return rows.map((row) => ({
+    pfad: String(row.pfad),
+    stand: Number(row.n) === 1 ? String(row.stand || "") : "",
+  }));
+}
+
+function dateiNebenIndex(dbPath, name) {
+  const basis = String(dbPath).replace(/\\/g, "/").replace(/\/+$/, "");
+  const slash = basis.lastIndexOf("/");
+  const dir = slash >= 0 ? basis.slice(0, slash) : "";
+  return dir ? `${dir}/${name}` : name;
+}
+
+async function indexSchreiben(dbPath, loeschen, zeilen, disk) {
+  if (!disk || typeof disk.write !== "function" || typeof disk.full !== "function") {
+    throw new UnitedShareError(VAULT_DESKTOP, 0);
+  }
+  const id = require("crypto").randomBytes(8).toString("hex");
+  const dateien = [];
+  const teile = [
+    `CREATE TABLE IF NOT EXISTS stuecke (
+  raum VARCHAR NOT NULL,
+  modell VARCHAR NOT NULL,
+  pfad VARCHAR NOT NULL,
+  stueck INTEGER NOT NULL,
+  text VARCHAR NOT NULL,
+  stand VARCHAR NOT NULL,
+  vektor FLOAT[1024] NOT NULL,
+  PRIMARY KEY (raum, pfad, stueck)
+);`,
+    "DELETE FROM stuecke WHERE raum <> 'bge-m3';",
+  ];
+  if (loeschen.length) {
+    const datei = dateiNebenIndex(dbPath, `vault-index-${id}-pfade.ndjson`);
+    await disk.write(datei, `${loeschen.map((pfad) => JSON.stringify({ pfad })).join("\n")}\n`);
+    dateien.push(datei);
+    const voll = await disk.full(datei);
+    teile.push(`DELETE FROM stuecke WHERE pfad IN (SELECT pfad FROM read_ndjson_auto(${sqlText(voll)}));`);
+  }
+  if (zeilen.length) {
+    const datei = dateiNebenIndex(dbPath, `vault-index-${id}-zeilen.ndjson`);
+    await disk.write(datei, `${zeilen.map((row) => JSON.stringify(row)).join("\n")}\n`);
+    dateien.push(datei);
+    const voll = await disk.full(datei);
+    teile.push(`INSERT INTO stuecke SELECT raum, modell, pfad, stueck, text, stand, vektor::FLOAT[1024] FROM read_ndjson_auto(${sqlText(voll)});`);
+  }
+  return { sql: `${teile.join("\n")}\n`, dateien };
+}
+
+async function indexNachziehen(options = {}) {
+  const dbPath = String(options.dbPath || "");
+  if (!dbPath) throw new UnitedShareError(VAULT_ORT, 0);
+  const origin = assertLoopbackEmbedUrl(options.embedUrl || DEFAULT_EMBED_URL);
+  const modell = await modellBge(origin, options.fetchImpl, options.timeoutMs);
+  const disk = options.disk;
+  if (!disk || typeof disk.exists !== "function" || typeof disk.full !== "function") {
+    throw new UnitedShareError(VAULT_DESKTOP, 0);
+  }
+  let vorhanden = false;
+  let voll = "";
+  try {
+    vorhanden = await disk.exists(dbPath);
+    voll = await disk.full(dbPath);
+  } catch (_err) {
+    throw new UnitedShareError(VAULT_DESKTOP, 0);
+  }
+  if (!voll) throw new UnitedShareError(VAULT_DESKTOP, 0);
+  let tabelle = false;
+  let staende = [];
+  if (vorhanden) {
+    const werkzeug = duckdbWerkzeug(options);
+    tabelle = await tabelleDa(werkzeug, options, voll, VAULT_SCHREIBEN);
+    if (tabelle) staende = await staendeLesen(werkzeug, options, voll);
+  }
+  const plan = indexPlan(staende, options.notizen);
+  const zeilen = [];
+  for (let index = 0; index < plan.neu.length; index += VAULT_BATCH) {
+    const batch = plan.neu.slice(index, index + VAULT_BATCH);
+    const vectors = await embedTexts({
+      origin,
+      model: modell,
+      texts: batch.map((row) => row.text),
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+    });
+    zeilen.push(...zeilenMitVektoren(batch, vectors, modell));
+  }
+  if (zeilen.length || plan.loeschen.length || (vorhanden && tabelle)) {
+    const werkzeug = duckdbWerkzeug(options);
+    const gebaut = await indexSchreiben(dbPath, plan.loeschen, zeilen, disk);
+    try {
+      await duckdbLauf({
+        ...werkzeug,
+        dbPath: voll,
+        sql: gebaut.sql,
+        readonly: false,
+        json: false,
+        env: options.env,
+        timeoutMs: options.timeoutMs,
+        fehlermeldung: VAULT_SCHREIBEN,
+      });
+    } finally {
+      for (const datei of gebaut.dateien) {
+        try {
+          if (typeof disk.remove === "function") await disk.remove(datei);
+        } catch (_err) {
+          /* Die Zwischendatei liegt neben dem Index und wird beim nächsten Lauf nicht mehr gebraucht. */
+        }
+      }
+    }
+  }
+  return {
+    modell,
+    behalten: plan.behalten,
+    neu: new Set(plan.neu.map((row) => row.pfad)).size,
+    weg: plan.loeschen.length,
+  };
+}
+
+async function sucheImTresor(options = {}) {
+  const dbPath = String(options.dbPath || "");
+  const disk = options.disk;
+  if (!dbPath || !disk || typeof disk.exists !== "function") return [];
+  let vorhanden = false;
+  let voll = dbPath;
+  try {
+    vorhanden = await disk.exists(dbPath);
+    if (vorhanden && typeof disk.full === "function") voll = await disk.full(dbPath);
+  } catch (_err) {
+    return [];
+  }
+  if (!vorhanden || !voll) return [];
+  const origin = assertLoopbackEmbedUrl(options.embedUrl || DEFAULT_EMBED_URL);
+  const werkzeug = duckdbWerkzeug(options);
+  const tabelle = await tabelleDa(werkzeug, options, voll, VAULT_LESEN);
+  if (!tabelle) return [];
+  const modell = await modellBge(origin, options.fetchImpl, options.timeoutMs);
+  const vectors = await embedTexts({
+    origin,
+    model: modell,
+    texts: [String(options.frage ?? "")],
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs,
+  });
+  const frage = einheitsvektor(vectors[0]);
+  const k = tresorK(options.k);
+  const text = await duckdbLauf({
+    ...werkzeug,
+    dbPath: voll,
+    sql: `SELECT pfad, stueck, text, list_dot_product(vektor, [${frage.join(",")}]::FLOAT[${VAULT_DIM}]) AS score
+FROM stuecke
+WHERE raum = '${VAULT_RAUM}'
+ORDER BY score DESC, pfad, stueck
+LIMIT ${k};`,
+    readonly: true,
+    json: true,
+    env: options.env,
+    timeoutMs: options.timeoutMs,
+    fehlermeldung: VAULT_LESEN,
+  });
+  return jsonAusDuckdb(text).map((row) => ({
+    pfad: String(row.pfad),
+    stueck: Number(row.stueck),
+    text: String(row.text ?? ""),
+    score: Number(row.score),
+  }));
+}
+
+// -- FluentScript (nur Anzeige) --
+// JS-Port der Referenzgrammatik in BA10_BDH/tools/fluentscript.py ("Der
+// Parser ist die Messlatte"). Tokenizer und Ketten-Grammatik bewusst
+// 1:1 uebernommen; \s/\d bleiben hier ASCII-eng (explizite Zeichenklasse
+// statt \s), weil JS-\s sonst Unicode-Leerraum (U+00A0 etc.) zulaesst,
+// was die Python-Referenz mit re.ASCII bewusst ausschliesst.
+
+const FLUENTSCRIPT_KOPFVERBEN = ["task", "result", "query", "error", "ack"];
+
+const FLUENTSCRIPT_TOKEN_QUELLE =
+  "(?<ws>[ \\t\\r\\n\\f\\v]+)" +
+  '|(?<string>"[^"\\n]*")' +
+  "|(?<zahl>-?\\d+(?:\\.\\d+)?)" +
+  "|(?<ident>[A-Za-zÄÖÜäöüß_][A-Za-z0-9ÄÖÜäöüß_]*)" +
+  "|(?<punkt>\\.)" +
+  "|(?<auf>\\()" +
+  "|(?<zu>\\))" +
+  "|(?<komma>,)" +
+  "|(?<dp>:)" +
+  "|(?<semi>;)";
+
+function _fluentScriptFehler(pos, erwartet, gefunden) {
+  const anzeige = gefunden === "" || gefunden === undefined || gefunden === null ? "<ende>" : gefunden;
+  return new UnitedShareError(
+    `FluentScript Position ${pos}: erwartet ${erwartet}, gefunden ${JSON.stringify(anzeige)}`,
+    0,
+  );
+}
+
+function _fluentScriptTokenisieren(text) {
+  const re = new RegExp(FLUENTSCRIPT_TOKEN_QUELLE, "y");
+  const aus = [];
+  let pos = 0;
+  while (pos < text.length) {
+    re.lastIndex = pos;
+    const m = re.exec(text);
+    if (!m) {
+      throw _fluentScriptFehler(pos, "gueltiges Token", text.slice(pos, pos + 8));
+    }
+    pos = re.lastIndex;
+    const art = Object.keys(m.groups).find((k) => m.groups[k] !== undefined);
+    if (art !== "ws") aus.push({ art, wert: m[0], pos: m.index });
+  }
+  aus.push({ art: "ende", wert: "", pos: text.length });
+  return aus;
+}
+
+function _fluentScriptParser(tokens) {
+  let i = 0;
+  const blick = () => tokens[i];
+  const iss = (art, wert) => {
+    const tok = tokens[i];
+    if (tok.art !== art || (wert !== undefined && tok.wert !== wert)) {
+      throw _fluentScriptFehler(tok.pos, wert !== undefined ? `"${wert}"` : art, tok.wert);
+    }
+    i += 1;
+    return tok.wert;
+  };
+  const wert = () => {
+    const tok = tokens[i];
+    if (tok.art === "string") {
+      i += 1;
+      return tok.wert.slice(1, -1);
+    }
+    if (tok.art === "zahl") {
+      i += 1;
+      return tok.wert.includes(".") ? Number.parseFloat(tok.wert) : Number.parseInt(tok.wert, 10);
+    }
+    if (tok.art === "ident") {
+      i += 1;
+      if (tok.wert === "true") return true;
+      if (tok.wert === "false") return false;
+      return { ident: tok.wert };
+    }
+    throw _fluentScriptFehler(tok.pos, "Wert (String/Zahl/Bool/Ident)", tok.wert);
+  };
+  const aufruf = () => {
+    const name = iss("ident");
+    iss("auf");
+    const args = [];
+    const benannt = {};
+    if (blick().art !== "zu") {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const tok = blick();
+        if (
+          tok.art === "ident" &&
+          tokens[i + 1] &&
+          tokens[i + 1].art === "dp" &&
+          tok.wert !== "true" &&
+          tok.wert !== "false"
+        ) {
+          i += 2;
+          benannt[tok.wert] = wert();
+        } else {
+          args.push(wert());
+        }
+        if (blick().art === "komma") {
+          i += 1;
+          continue;
+        }
+        break;
+      }
+    }
+    iss("zu");
+    return { aufruf: name, args, benannt };
+  };
+  const kette = () => {
+    const kopfTok = blick();
+    if (!FLUENTSCRIPT_KOPFVERBEN.includes(kopfTok.wert)) {
+      throw _fluentScriptFehler(kopfTok.pos, `Kopfverb (${FLUENTSCRIPT_KOPFVERBEN.join("|")})`, kopfTok.wert);
+    }
+    const kopf = iss("ident");
+    iss("auf");
+    let kid = null;
+    if (blick().art === "string") kid = wert();
+    iss("zu");
+    const aufrufe = [];
+    while (blick().art === "punkt") {
+      i += 1;
+      aufrufe.push(aufruf());
+    }
+    return { kopf, id: kid, aufrufe };
+  };
+  return { blick, iss, kette };
+}
+
+function _fluentScriptSemantik(k) {
+  if (k.kopf !== "result") return;
+  const namen = k.aufrufe.map((a) => a.aufruf);
+  const status = namen.filter((n) => n === "ok" || n === "unknown" || n === "failed");
+  if (status.length !== 1) {
+    throw new UnitedShareError(
+      `FluentScript: result("${k.id ?? ""}") erwartet GENAU EINEN Status aus ok|unknown|failed, ` +
+        `gefunden ${status.length} Statusaufrufe${status.length ? ` (${status.join(", ")})` : ""}`,
+      0,
+    );
+  }
+  if (status[0] === "unknown" && !namen.includes("missing")) {
+    throw new UnitedShareError(
+      `FluentScript: result("${k.id ?? ""}").unknown() erwartet zusaetzlich .missing(...) -- ` +
+        "Unbestimmtheit ohne benannte fehlende Evidenz ist ungueltig, gefunden unknown ohne missing",
+      0,
+    );
+  }
+}
+
+// fluentScriptParsen: reine Funktion, FluentScript-Text -> Liste von
+// Ketten ({kopf, id, aufrufe: [{aufruf, args, benannt}, ...]}) oder wirft
+// UnitedShareError mit einer auf die verletzte Regel zeigenden Meldung.
+function fluentScriptParsen(text) {
+  const tokens = _fluentScriptTokenisieren(String(text ?? ""));
+  const p = _fluentScriptParser(tokens);
+  const ketten = [p.kette()];
+  while (p.blick().art === "semi") {
+    p.iss("semi");
+    ketten.push(p.kette());
+  }
+  p.iss("ende");
+  for (const k of ketten) _fluentScriptSemantik(k);
+  return ketten;
+}
+
+function _fluentScriptWertText(wert) {
+  if (wert === null || wert === undefined) return "";
+  if (typeof wert === "boolean") return wert ? "true" : "false";
+  if (typeof wert === "object" && typeof wert.ident === "string") return wert.ident;
+  return String(wert);
+}
+
+function _fluentScriptAufrufText(aufruf) {
+  const teile = [];
+  for (const a of aufruf.args || []) teile.push(_fluentScriptWertText(a));
+  for (const [name, w] of Object.entries(aufruf.benannt || {})) teile.push(`${name}=${_fluentScriptWertText(w)}`);
+  return teile.join(", ");
+}
+
+// fluentScriptKarten: reine Funktion, geparste Kette(n) -> einfache
+// Darstellungsstruktur [{kopfverb, id, felder: [{name, wert}, ...]}, ...]
+// fuer die Anzeige als kleine "Karte". Nimmt eine einzelne Kette oder
+// eine Liste davon (wie von fluentScriptParsen geliefert).
+function fluentScriptKarten(ketten) {
+  const liste = Array.isArray(ketten) ? ketten : [ketten];
+  return liste.map((k) => ({
+    kopfverb: k.kopf,
+    id: k.id,
+    felder: (k.aufrufe || []).map((a) => ({ name: a.aufruf, wert: _fluentScriptAufrufText(a) })),
+  }));
+}
+
+// fluentScriptAlsZeilen: baut aus gleichfoermigen Ketten (gleicher Kopfverb,
+// gleiche Aufrufnamen in gleicher Reihenfolge -- z. B. mehrere
+// result(...).ok().value(...)-Ketten, durch ";" getrennt) Tabellenzeilen im
+// Format, das duckdbTabelleAusZeilen() erwartet: ein Array von
+// {id, <aufrufname>: wert, ...}-Objekten. Sind die Ketten NICHT
+// gleichfoermig (verschiedene Kopfverben oder verschiedene Aufrufnamen),
+// gibt es `null` zurueck -- dann zeigt main.src.js stattdessen die
+// Karten-Ansicht (fluentScriptKarten), eine Tabelle waere dort irrefuehrend,
+// weil es keine gemeinsamen Spalten gaebe.
+function fluentScriptAlsZeilen(ketten) {
+  const liste = Array.isArray(ketten) ? ketten : [ketten];
+  if (!liste.length) return null;
+  const karten = fluentScriptKarten(liste);
+  const schluessel = (karte) => `${karte.kopfverb}|${karte.felder.map((f) => f.name).join(",")}`;
+  const referenz = schluessel(karten[0]);
+  if (!karten.every((k) => schluessel(k) === referenz)) return null;
+  return karten.map((k) => {
+    const zeile = { id: k.id };
+    for (const feld of k.felder) zeile[feld.name] = feld.wert;
+    return zeile;
+  });
+}
+
 module.exports = {
   CHAT_GRENZE,
   CHAT_ORDNER,
@@ -3370,14 +5137,25 @@ module.exports = {
   verbrauchKompakt,
   verbrauchProzent,
   adapterVaultHost,
+  erkenneICloudTresor,
+  erkenneTailscaleAdresse,
   chatAlsText,
   chatAusText,
   chatDateiname,
   chatsLaden,
   chatSpeichern,
   UnitedShareError,
+  absichtAusNaehe,
+  absichtBeispiele,
+  absichtLokal,
+  auftragSpalten,
+  bildTextAusAntwort,
+  lokalText,
   assertLoopbackEmbedUrl,
+  assertTailscaleAdresse,
+  assertSyncRequest,
   assertVaultRelative,
+  tailscaleAdresseAusText,
   aufladenAdresse,
   bildAusKoerper,
   bytesFromB64,
@@ -3395,7 +5173,6 @@ module.exports = {
   viewSitsUnderKeyboard,
   executeVaultAction,
   visibleStreamText,
-  fsVaultHost,
   limitMeldung,
   limitsFromBody,
   limitsFromHeaders,
@@ -3405,6 +5182,22 @@ module.exports = {
   mentionPaths,
   mergeNoteFiles,
   pickEmbedModel,
+  dateienAusTreffern,
+  DUCKDB_ANSICHT_ENDUNGEN,
+  duckdbDateiverweiseAusSql,
+  duckdbSqlAusDatei,
+  duckdbTabelleAusZeilen,
+  duckdbVorschauAbfrage,
+  indexNachziehen,
+  indexPlan,
+  istDuckdbAnsichtEndung,
+  locateDuckdb,
+  mischeDateien,
+  notizStand,
+  sucheImTresor,
+  sucheStuecke,
+  tresorIndexPfad,
+  zeilenMitVektoren,
   prepareContextFiles,
   isObsidianModel,
   listModels,
@@ -3426,7 +5219,7 @@ module.exports = {
   parseAnthropicContent,
   parseContent,
   parseVaultActions,
-  resolveInsideVault,
+  runReemax,
   runVaultFile,
   runVaultInstruction,
   verbrauchZeile,
@@ -3435,4 +5228,25 @@ module.exports = {
   schrittZeichen,
   messageForStatus,
   stripVaultActions,
+  baueSyncManifest,
+  bedieneSyncAnfrage,
+  fuehreSyncDurch,
+  konfliktDateiname,
+  PEER_SYNC_TOKEN_HEADER,
+  planeSyncAbgleich,
+  akzeptierePairing,
+  erzeugePairingAnfrage,
+  erzeugePairingAngebot,
+  erzeugePairingCode,
+  leiteSessionSchluesselAb,
+  PAIRING_GUELTIGKEIT_MS,
+  PAIRING_MAX_VERSUCHE,
+  pairingEntschluesseln,
+  pairingVerschluesseln,
+  pairingVersuchErlaubt,
+  pairingVersuchVermerken,
+  lanAdresseAusInterfaces,
+  fluentScriptAlsZeilen,
+  fluentScriptKarten,
+  fluentScriptParsen,
 };
