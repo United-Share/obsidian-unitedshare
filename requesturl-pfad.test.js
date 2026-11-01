@@ -109,6 +109,33 @@ test("requestUrl-Pfad liest weiterhin einen fertigen JSON-Körper", async () => 
   }
 });
 
+test("gepufferter Einweg-Body wird nach text() nicht erneut gelesen", async () => {
+  let gelesen = false;
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    async text() {
+      if (gelesen) throw new TypeError("Body already read");
+      gelesen = true;
+      return JSON.stringify({ type: "message", content: [{ type: "text", text: "ok" }] });
+    },
+    async json() { throw new TypeError("Body already read"); },
+  });
+  assert.equal(await frage(1, fetchImpl), "ok");
+});
+
+test("leerer oder nur aus Leerzeichen bestehender Einweg-Body ist kein Netzfehler", async () => {
+  for (const raw of ["", "   "]) {
+    let jsonCalls = 0;
+    const fetchImpl = async () => ({ ok: true, status: 200, text: async () => raw, json: async () => { jsonCalls += 1; throw new TypeError("Body already read"); } });
+    await assert.rejects(frage(1, fetchImpl), (error) => {
+      assert.doesNotMatch(error.message, /nicht erreichbar/);
+      return true;
+    });
+    assert.equal(jsonCalls, 0);
+  }
+});
+
 test("unlesbare Antwort heißt nicht 'nicht erreichbar'", async () => {
   const { server, port } = await listen((req, res) => {
     res.writeHead(200, { "content-type": "text/plain" });

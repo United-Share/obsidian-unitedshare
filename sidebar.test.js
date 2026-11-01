@@ -71,6 +71,11 @@ function createNode(tag) {
     addEventListener(type, fn) {
       this.listeners[type] = fn;
     },
+    setAttr(name, value) {
+      if (!this.attrs) this.attrs = {};
+      this.attrs[name] = String(value);
+      return this;
+    },
     set innerHTML(html) {
       this.html = String(html);
       this.children = [];
@@ -352,7 +357,7 @@ function installObsidianMock() {
       }
       return {
         status: 200,
-        text: "Antwort aus messages",
+        text: JSON.stringify({ type: "message", role: "assistant", content: [{ type: "text", text: "Antwort aus messages" }], stop_reason: "end_turn" }),
         json: {
           type: "message",
           role: "assistant",
@@ -434,6 +439,110 @@ function makeApp() {
 
 const mock = installObsidianMock();
 const UnitedSharePlugin = require("./main.src.js");
+
+test("rmxos-Block verwendet Eigenschaften seiner Quelldatei statt der aktiven Notiz", async () => {
+  const app = makeApp();
+  const gefragt = [];
+  app.metadataCache = { getCache: (path) => { gefragt.push(path); return { frontmatter: { date: "31.10.2026" } }; } };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const el = createNode("div");
+  plugin.codeBlockProcessors.find((p) => p.language === "rmxos").handler('result("r").ok().value("Datum {{$date}}")', el, { sourcePath: "eingebettet.md" });
+  assert.deepEqual(gefragt, ["eingebettet.md"]);
+  assert.ok(find(el, (node) => node.tag === "td" && node.text === "Datum 31.10.2026"));
+});
+
+test("eine zusammengesetzte Eigenschaft (owner aus name und surname) wird im Block aufgelöst", async () => {
+  const app = makeApp();
+  app.metadataCache = {
+    getCache: () => ({ frontmatter: { name: "Karina", surname: "Gutman", owner: "{{$name}} {{$surname}}" } }),
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const el = createNode("div");
+  plugin.codeBlockProcessors.find((p) => p.language === "rmxos").handler('result("r").ok().value("von {{$owner}}")', el, { sourcePath: "n.md" });
+  assert.ok(find(el, (node) => node.tag === "td" && node.text === "von Karina Gutman"));
+});
+
+test("unlesbare Eigenschaften mit {{ im Block nennen die Ursache statt nur Platzhalter zu zeigen", async () => {
+  const app = makeApp();
+  // Obsidian liefert bei ungueltigem YAML kein Objekt als frontmatter.
+  app.metadataCache = { getCache: () => ({ frontmatter: undefined }) };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const el = createNode("div");
+  plugin.codeBlockProcessors.find((p) => p.language === "rmxos").handler('result("r").ok().value("{{$owner}}")', el, { sourcePath: "n.md" });
+  const hinweis = find(el, (node) => node.tag === "div" && String(node.text || "").includes("Eigenschaften nicht lesbar"));
+  assert.ok(hinweis, "der Hinweis muss die YAML-Ursache benennen");
+  assert.match(hinweis.text, /Anführungszeichen/u);
+});
+
+test("ein Block ohne Eigenschaftsplatzhalter erhält keinen YAML-Hinweis", async () => {
+  const app = makeApp();
+  app.metadataCache = { getCache: () => ({ frontmatter: undefined }) };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const el = createNode("div");
+  plugin.codeBlockProcessors.find((p) => p.language === "rmxos").handler('result("r").ok().value("ohne Platzhalter")', el, { sourcePath: "n.md" });
+  assert.equal(find(el, (node) => String(node.text || "").includes("Eigenschaften nicht lesbar")), null);
+});
+
+test("Verweise in Eigenschaften werden zu echten Obsidian-Links mit Alias", async () => {
+  const app = makeApp();
+  const geoefnet = [];
+  app.workspace.openLinkText = (verweis, quelle) => geoefnet.push({ verweis, quelle });
+  app.metadataCache = {
+    getCache: () => ({ frontmatter: { link: "[[duckdb-codeblock-test|DuckDB-Testnotiz]]" } }),
+    getFirstLinkpathDest: (ziel, quelle) => (ziel === "duckdb-codeblock-test" && quelle === "eingebettet.md" ? { path: "duckdb-codeblock-test.md" } : null),
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const el = createNode("div");
+  plugin.codeBlockProcessors.find((p) => p.language === "rmxos").handler('result("r").ok().value("Siehe {{$link}}")', el, { sourcePath: "eingebettet.md" });
+  const verweis = find(el, (node) => node.tag === "a" && node.classList.has("internal-link"));
+  assert.ok(verweis, "die Zelle enthält einen echten Link");
+  assert.equal(verweis.text, "DuckDB-Testnotiz");
+  assert.equal(verweis.attrs["data-href"], "duckdb-codeblock-test.md");
+  let verhindert = 0;
+  verweis.listeners.click({ preventDefault() { verhindert += 1; }, stopPropagation() { verhindert += 1; } });
+  assert.deepEqual(geoefnet, [{ verweis: "duckdb-codeblock-test", quelle: "eingebettet.md" }]);
+  assert.equal(verhindert, 2);
+});
+
+test("Unaufgelöste Verweise und Einbettungen bleiben Text und SQL-Ergebnisse unberührt", async () => {
+  const app = makeApp();
+  app.workspace.openLinkText = () => {};
+  app.metadataCache = {
+    getCache: () => ({ frontmatter: { quelle: "[[fehlt-noch]]", einbettung: "![[duckdb-codeblock-test]]" } }),
+    getFirstLinkpathDest: () => null,
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const processor = plugin.codeBlockProcessors.find((p) => p.language === "rmxos");
+  const el = createNode("div");
+  processor.handler('result("r").ok().value("{{$quelle}} {{$einbettung}}")', el, { sourcePath: "n.md" });
+  assert.ok(find(el, (node) => node.tag === "a" && node.classList.has("is-unresolved")), "unbekannte Ziele sind als unresolved markiert");
+  assert.equal(find(el, (node) => node.tag === "a" && String(node.text || "").includes("duckdb")), null, "Einbettungen werden nicht aufgelöst");
+
+  const sql = createNode("div");
+  const { renderDuckdbTabelle, zelltextMitVerweisen } = require("./main.src.js");
+  renderDuckdbTabelle(sql, { spalten: ["text"], zeilen: [["[[duckdb-codeblock-test]]"]] });
+  const zelle = find(sql, (node) => node.tag === "td");
+  assert.equal(zelle.text, "[[duckdb-codeblock-test]]", "SQL-Ergebnisse bleiben reiner Text");
+  assert.equal(find(sql, (node) => node.tag === "a"), null);
+});
+
+test("Auflösung funktioniert auch ohne globales .attrs (echtes Obsidian-DOM)", async () => {
+  const app = makeApp();
+  app.workspace.openLinkText = () => {};
+  app.metadataCache = { getFirstLinkpathDest: () => ({ path: "duckdb-codeblock-test.md" }) };
+  const { zelltextMitVerweisen } = require("./main.src.js");
+  const zelle = createNode("td");
+  delete zelle.attrs; // echtes Obsidian-DOM hat kein .attrs
+  zelltextMitVerweisen(zelle, "[[duckdb-codeblock-test]]", app, "n.md");
+  assert.equal(zelle.children[0].attrs["data-href"], "duckdb-codeblock-test.md");
+  assert.equal(zelle.children[0].classList.has("is-unresolved"), false);
+});
 
 test("onload zeigt UnitedShare in der rechten Seitenleiste und in der linken Leiste", async () => {
   const app = makeApp();
@@ -1893,6 +2002,24 @@ test("die Schritte erscheinen als Kette über der Antwort und schließen sich", 
   assert.equal(view.answer, "Erledigt.");
 });
 
+test("Freigabe und Ablehnung erscheinen als ein einziger Schritt mit eindeutiger Beschriftung", async () => {
+  let wartet;
+  const { view, pending } = await sichtMitSchritten(async (_turns, _onDelta, onSchritt) => {
+    onSchritt({ id: 1, zustand: "geplant", art: "write", text: "Schreibt „b.md“" });
+    onSchritt({ id: 1, zustand: "wartet", art: "write", text: "Schreibt „b.md“" });
+    const zeile = schrittZeilen(view).find((z) => z.classList.has("is-wartet"));
+    wartet = [find(zeile, (n) => n.classList.has("unitedshare-schritt-text")).text, find(zeile, (n) => n.classList.has("unitedshare-schritt-status")).text];
+    onSchritt({ id: 1, zustand: "abgelehnt", art: "write", text: "Schreibt „b.md“", ergebnis: "vom Nutzer abgelehnt" });
+    return "Nicht geschrieben.";
+  });
+  await pending;
+  assert.deepEqual(wartet, ["Schreibvorschlag für „b.md“", "Wartet auf deine Freigabe"]);
+  const zeilen = schrittZeilen(view);
+  assert.equal(zeilen.length, 2);
+  assert.ok(zeilen[1].classList.has("is-abgelehnt"));
+  assert.equal(find(zeilen[1], (n) => n.classList.has("unitedshare-schritt-status")).text, "Abgelehnt");
+});
+
 test("auch ohne Aktionen steht der Denkschritt in der Kette", async () => {
   // Dieser Vertrag war umgekehrt: ohne Aktionen blieb die Kette leer.
   // Geaendert auf Mikes Ansage, dass der Nutzer sehen soll, dass etwas
@@ -1909,7 +2036,7 @@ test("auch ohne Aktionen steht der Denkschritt in der Kette", async () => {
     ["denken:fertig"]);
 });
 
-test("bricht die Antwort ab, bleibt der offene Schritt als abgebrochen stehen", async () => {
+test("bei einem Fehler bleibt der offene Schritt als fehlgeschlagen stehen", async () => {
   const { view, pending } = await sichtMitSchritten(async (_turns, _onDelta, onSchritt) => {
     onSchritt({ zustand: "laeuft", art: "run", text: "Startet „x.py“" });
     throw new Error("weg");
@@ -1921,7 +2048,7 @@ test("bricht die Antwort ab, bleibt der offene Schritt als abgebrochen stehen", 
   // abgebrochen markiert -- nach einem Abbruch alles als erledigt zu zeigen
   // wäre falsch.
   assert.ok(zeilen[0].classList.has("is-fertig"));
-  assert.ok(zeilen[1].classList.has("is-abgebrochen"));
+  assert.ok(zeilen[1].classList.has("is-fehlgeschlagen"));
   assert.equal(view.statusEl.text, "Der Modellaufruf ist fehlgeschlagen.");
 });
 
@@ -2144,6 +2271,89 @@ test("das Budget nennt nur mitgelieferte Grenzen", async () => {
   assert.equal(view.statusEl.text, "Das Tageslimit ist aufgebraucht.");
   assert.equal(view.budgetEl.text, "Tag 0 · Monat 1.200");
   assert.equal(view.budgetEl.classList.has("is-leer"), true);
+});
+
+test("der Stopp-Knopf ist nur während eines Auftrags aktiv und bricht die Laufsteuerung ab", async () => {
+  const { plugin, view } = await offeneSeite();
+  const stopp = knopf(view, "Stopp");
+  assert.ok(stopp, "Stopp-Knopf fehlt");
+  // Ausserhalb eines Auftrags: ausgeblendet und tot.
+  assert.equal(knopf(view, "Fragen").disabled, false);
+  assert.equal(stopp.disabled, true);
+  assert.equal(view.inputWrap.classList.has("is-busy"), false);
+
+  // Waehrend eines Auftrags kippt die Freigabe: alles Fragende wird stumm,
+  // der Stopp-Knopf wach -- und der Wrapper traegt is-busy, was ihn einblendet.
+  view.setAskControls(true);
+  assert.equal(knopf(view, "Fragen").disabled, true);
+  assert.equal(stopp.disabled, false);
+  assert.equal(view.inputWrap.classList.has("is-busy"), true);
+
+  // Der Klick stoppt alle gemeldeten Auftraege.
+  const abgebrochen = [];
+  const steuerA = { abort: () => abgebrochen.push("a") };
+  const steuerB = { abort: () => abgebrochen.push("b") };
+  plugin.laufe = [steuerA, steuerB];
+  await stopp.listeners.click();
+  assert.deepEqual(abgebrochen, ["a", "b"]);
+  // Nach dem Stopp ist die Liste leer -- ein zweiter Klick stoppt nichts mehr.
+  assert.deepEqual(plugin.laufe, []);
+});
+
+test("ein Nutzerabbruch beendet mit klarer Meldung, markiert offene Schritte als abgebrochen und alarmiert nicht doppelt", async () => {
+  const { plugin, view } = await offeneSeite();
+  const { UnitedShareError } = require("./unitedshare-core");
+  plugin.absichtEinbetten = async () => null;
+  plugin.completeThread = async (_turns, onDelta, onSchritt) => {
+    // Ein Schritt laeuft bereits, das Denken steht offen -- dann bricht der
+    // Nutzer ab. Genau die Lage, die vorher stumm haengen blieb.
+    onSchritt({ text: "Liest die Notiz", zustand: "laeuft", id: 1 });
+    const error = new UnitedShareError("Der Auftrag wurde abgebrochen.", 0);
+    error.abgebrochen = true;
+    throw error;
+  };
+
+  const ab = mock.notices.length;
+  view.questionEl.value = "Fasse zusammen.";
+  await knopf(view, "Fragen").listeners.click();
+
+  // Benannte Meldung im Status statt stiller Haenger...
+  assert.equal(view.statusEl.text, "Der Auftrag wurde abgebrochen.");
+  // ...kein zusaetzlicher Alarm fuer einen Abbruch, den der Nutzer selbst wollte.
+  assert.equal(mock.notices.slice(ab).includes("Der Auftrag wurde abgebrochen."), false);
+  // ...und der offene Schritt steht als "abgebrochen" da, nicht "fehlgeschlagen".
+  const tab = view.activeTab();
+  const letzte = tab.messages[tab.messages.length - 1];
+  assert.equal(letzte.streaming, false);
+  const zustaende = (letzte.schritte || []).map((s) => s.zustand);
+  assert.ok(zustaende.includes("abgebrochen"), `Zustaende: ${zustaende.join(", ")}`);
+  assert.equal(zustaende.includes("fehlgeschlagen"), false);
+  // Die Freigabe ist zurueck: der naechste Auftrag darf wieder starten.
+  assert.equal(knopf(view, "Fragen").disabled, false);
+  assert.equal(knopf(view, "Stopp").disabled, true);
+});
+
+test("ein fehlgeschlagener Auftrag meldet weiter mit Notice und markiert Schritte als fehlgeschlagen", async () => {
+  const { plugin, view } = await offeneSeite();
+  const { UnitedShareError } = require("./unitedshare-core");
+  plugin.absichtEinbetten = async () => null;
+  plugin.completeThread = async (_turns, _onDelta, onSchritt) => {
+    onSchritt({ text: "Liest die Notiz", zustand: "laeuft", id: 1 });
+    throw new UnitedShareError("API-Key fehlt.", 401);
+  };
+
+  const ab = mock.notices.length;
+  view.questionEl.value = "Fasse zusammen.";
+  await knopf(view, "Fragen").listeners.click();
+
+  assert.equal(view.statusEl.text, "API-Key fehlt.");
+  // Ein echter Fehler alarmiert -- anders als der Nutzerabbruch.
+  assert.ok(mock.notices.slice(ab).includes("API-Key fehlt."));
+  const tab = view.activeTab();
+  const letzte = tab.messages[tab.messages.length - 1];
+  const zustaende = (letzte.schritte || []).map((s) => s.zustand);
+  assert.ok(zustaende.includes("fehlgeschlagen"), `Zustaende: ${zustaende.join(", ")}`);
+  assert.equal(zustaende.includes("abgebrochen"), false);
 });
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -2534,17 +2744,105 @@ test("Schreibfreigabe zeigt den vorgeschlagenen Inhalt als Text", async () => {
   assert.equal(await promise, false);
 });
 
-test("der Schalter für Schreiben-Bestätigung ist aus, bis er eingeschaltet wird", async () => {
+test("Schreibfreigabe zeigt alte und neue Zeilen als Änderung", async () => {
+  const plugin = new UnitedSharePlugin(makeApp());
+  await plugin.onload();
+  const promise = plugin.bestaetigeAktion({ action: "write", path: "Notiz.md", previousContent: "gleich\nalt\nende", content: "gleich\nneu\nende" });
+  const modal = mock.modals[mock.modals.length - 1];
+  const diff = find(modal.contentEl, (n) => n.classList.has("unitedshare-bestaetigung-diff"));
+  assert.equal(diff.text, "− alt\n+ neu");
+  find(modal.contentEl, (n) => n.tag === "button" && n.text === "Ablehnen").listeners.click();
+  assert.equal(await promise, false);
+});
+
+test("private Vorlage sendet erst nach Vorschau nur den freigegebenen Text", async () => {
+  const app = makeApp();
+  app.workspace.getActiveFile = () => ({ path: "privat.md" });
+  app.metadataCache = { getFileCache: () => ({ frontmatter: {
+    unitedshare_privacy: "template", unitedshare_private_felder: ["kunde"], kunde: "Müller GmbH",
+  } }) };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const gesendet = [];
+  plugin.privateVorlageAnfragen = async (text) => { gesendet.push(text); return "Hallo {{VAR_1}}"; };
+  plugin.commands.find((c) => c.id === "private-cloud-vorlage").callback();
+  const modal = mock.modals[mock.modals.length - 1];
+  find(modal.contentEl, (n) => n.tag === "textarea").value = "Plane für {{VAR_1}}";
+  find(modal.contentEl, (n) => n.tag === "button" && n.text === "Versandvorschau").listeners.click();
+  assert.deepEqual(gesendet, []);
+  assert.ok(find(modal.contentEl, (n) => n.tag === "pre" && n.text === "Plane für {{VAR_1}}"));
+  await find(modal.contentEl, (n) => n.tag === "button" && n.text === "Diesen Auftrag senden").listeners.click();
+  assert.deepEqual(gesendet, ["Plane für {{VAR_1}}"]);
+  assert.ok(find(modal.contentEl, (n) => n.tag === "pre" && n.text === "Hallo Müller GmbH"));
+});
+
+test("private Vorlage sendet über den echten Transport keine Properties, Dateinamen oder Historie", async () => {
+  const app = makeApp();
+  app.workspace.getActiveFile = () => ({ path: "vertraulich-geheim.md" });
+  app.metadataCache = { getFileCache: () => ({ frontmatter: {
+    unitedshare_privacy: "template", unitedshare_private_felder: ["kunde"], kunde: "Testgeheimnis GmbH",
+  } }) };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  plugin.settings.apiKey = "test-key";
+  plugin.settings.model = "test-model";
+  const vorher = mock.requests.length;
+  plugin.commands.find((c) => c.id === "private-cloud-vorlage").callback();
+  const modal = mock.modals[mock.modals.length - 1];
+  find(modal.contentEl, (n) => n.tag === "textarea").value = "Prüfe {{VAR_1}}";
+  find(modal.contentEl, (n) => n.tag === "button" && n.text === "Versandvorschau").listeners.click();
+  assert.equal(mock.requests.length, vorher);
+  await find(modal.contentEl, (n) => n.tag === "button" && n.text === "Diesen Auftrag senden").listeners.click();
+  assert.equal(mock.requests.length, vorher + 1);
+  const body = JSON.parse(mock.requests[vorher].body);
+  assert.equal(body.messages.length, 2);
+  assert.equal(body.messages[1].content, "Prüfe {{VAR_1}}");
+  assert.doesNotMatch(JSON.stringify(body), /Testgeheimnis|vertraulich-geheim|kunde/);
+});
+
+test("der Schalter für Schreiben-Bestätigung ist für neue Installationen an", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);
   await plugin.onload();
-  assert.equal(plugin.settings.requireWriteConfirm, false);
+  assert.equal(plugin.settings.requireWriteConfirm, true);
 
   plugin.settingTab.display();
   const setting = lastSetting("Schreiben ebenfalls bestätigen");
   assert.ok(setting, "Schalter fehlt in den Einstellungen");
-  await setting.toggle.change(true);
-  assert.equal(plugin.settings.requireWriteConfirm, true);
+  await setting.toggle.change(false);
+  assert.equal(plugin.settings.requireWriteConfirm, false);
+});
+
+test("Antwortlänge lässt sich in den Einstellungen wählen", async () => {
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  plugin.settingTab.display();
+  const setting = lastSetting("Wie ausführlich darf die Antwort sein?");
+  assert.ok(setting);
+  await setting.dropdown.change("4096");
+  assert.equal(plugin.settings.antwortTokens, 4096);
+});
+
+test("Modellautomatik wählt nur ein eindeutig verfügbares Modell und respektiert manuelle Auswahl", async () => {
+  const plugin = new UnitedSharePlugin(makeApp());
+  await plugin.onload();
+  await plugin.waehleEinzigesModell(["rmxos-sema2026.1"]);
+  assert.equal(plugin.settings.model, "rmxos-sema2026.1");
+  await plugin.waehleEinzigesModell(["rmxos-mega2026.1"]);
+  assert.equal(plugin.settings.model, "rmxos-sema2026.1");
+  plugin.settings.model = "";
+  await plugin.waehleEinzigesModell(["rmxos-sema2026.1", "rmxos-mega2026.1"]);
+  assert.equal(plugin.settings.model, "");
+  await plugin.waehleEinzigesModell(["unbekannt"]);
+  assert.equal(plugin.settings.model, "");
+});
+
+test("ohne eindeutiges Modell erklärt der Auftrag die notwendige Auswahl", async () => {
+  const plugin = new UnitedSharePlugin(makeApp());
+  await plugin.onload();
+  plugin.ensureModels = async () => ["rmxos-sema2026.1", "rmxos-mega2026.1"];
+  await assert.rejects(plugin.completeThread([{ role: "user", content: "Hallo" }]), /Einstellungen ein Modell auswählen/);
 });
 
 function letzteNutzer(turns) {

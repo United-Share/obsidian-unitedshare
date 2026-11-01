@@ -730,3 +730,28 @@ test("cleanProcessEnv lässt Schlüssel weg", () => {
   assert.equal(Object.hasOwn(env, "LITELLM_MASTER_KEY"), false);
   assert.equal(JSON.stringify(env).includes("sekret"), false);
 });
+
+test("bestätigtes Schreiben stoppt bei Änderung während der Vorschau", async () => {
+  let stand = "vorher";
+  let writes = 0;
+  const host = { readForWrite: async () => stand, write: async (_path, text) => { writes += 1; stand = text; } };
+  const result = await executeVaultAction({ action: "write", path: "a.md", content: "vorschlag" }, host, {
+    requireWriteConfirm: true,
+    confirm: async (aktion) => {
+      assert.equal(aktion.previousContent, "vorher");
+      stand = "zwischenzeitlich geändert";
+      return true;
+    },
+  });
+  assert.match(result, /seit der Vorschau geändert/);
+  assert.equal(writes, 0);
+  assert.equal(stand, "zwischenzeitlich geändert");
+});
+
+test("Fehler beim Prüfen des Dateistands blockiert Schreiben", async () => {
+  let writes = 0;
+  const host = { readForWrite: async () => { throw new Error("read failed"); }, write: async () => { writes += 1; } };
+  const result = await executeVaultAction({ action: "write", path: "a.md", content: "x" }, host, { requireWriteConfirm: true, confirm: async () => true });
+  assert.match(result, /fehlgeschlagen/);
+  assert.equal(writes, 0);
+});

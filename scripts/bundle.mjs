@@ -15,7 +15,17 @@ if (!src.includes(needle)) {
   process.exit(1);
 }
 
-const bundled = src.replace(needle, core.trim());
+const privacy = readFileSync(join(root, "privacy-template.js"), "utf8")
+  .replace(/^"use strict";\n+/, "")
+  .replace(/\nmodule\.exports\s*=\s*\{[^}]*\};\s*$/, "\n");
+const privacyNeedle = 'const { privateVorlageVorbereiten, privateAntwortAufloesen } = require("./privacy-template");';
+if (!src.includes(privacyNeedle)) throw new Error("bundle: privacy-template Require fehlt");
+const rmxos = readFileSync(join(root, "rmxos-template.js"), "utf8")
+  .replace(/^"use strict";\n+/, "")
+  .replace(/\nmodule\.exports\s*=\s*\{[^}]*\};\s*$/, "\n");
+const rmxosNeedle = 'const { rmxosEigenschaftenErsetzen } = require("./rmxos-template");';
+if (!src.includes(rmxosNeedle)) throw new Error("bundle: rmxos-template Require fehlt");
+const bundled = src.replace(needle, core.trim()).replace(privacyNeedle, privacy.trim()).replace(rmxosNeedle, rmxos.trim());
 if (bundled.includes("unitedshare-core") || bundled.includes("module.exports = {")) {
   console.error("bundle: main.js wäre nicht eigenständig");
   process.exit(1);

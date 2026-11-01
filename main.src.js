@@ -1,5 +1,8 @@
 "use strict";
 
+const { privateVorlageVorbereiten, privateAntwortAufloesen } = require("./privacy-template");
+const { rmxosEigenschaftenErsetzen } = require("./rmxos-template");
+
 const { FileView, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
 const { absichtLokal, adapterVaultHost, akzeptierePairing, applyComposerAnswer, assertLoopbackEmbedUrl, assertTailscaleAdresse, assertSyncRequest, assertVaultRelative, auftragSpalten, aufladenAdresse, bedieneSyncAnfrage, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, dateienAusTreffern, DUCKDB_ANSICHT_ENDUNGEN, duckdbDateiverweiseAusSql, duckdbSqlAusDatei, duckdbTabelleAusZeilen, duckdbVorschauAbfrage, erkenneICloudTresor, erkenneTailscaleAdresse, erzeugePairingAnfrage, erzeugePairingAngebot, executeVaultAction, fluentScriptAlsZeilen, fluentScriptKarten, fluentScriptParsen, fuehreSyncDurch, indexNachziehen, isObsidianModel, istDuckdbAnsichtEndung, keyboardCoverPx, konfliktDateiname, lanAdresseAusInterfaces, leiteSessionSchluesselAb, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, lokalText, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, mischeDateien, pairingEntschluesseln, pairingVerschluesseln, pairingVersuchErlaubt, pairingVersuchVermerken, PEER_SYNC_TOKEN_HEADER, prepareContextFiles, readIndexedOrHidden, readMeshInventory, runReemax, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, sucheImTresor, tresorIndexPfad, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
 
@@ -257,10 +260,11 @@ const DEFAULT_SETTINGS = {
   baseUrl: "https://api.unitedshare.ai/v1",
   model: "",
   timeoutMs: 90000,
+  antwortTokens: 1200,
   embedUrl: "http://127.0.0.1:11434",
   embedModel: "",
   absichtModell: "",
-  requireWriteConfirm: false,
+  requireWriteConfirm: true,
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
@@ -450,6 +454,12 @@ function desktopCanStream() {
   }
 }
 
+// Stille-Frist im Chat: bevor das erste Byte kommt, entscheidet sie allein,
+// ob eine nicht in Gang kommende Antwort abbricht. Zwei Minuten ohne ein
+// einziges Zeichen sind keine Denkzeit mehr, sondern ein Haengen, das eine
+// brauchbare Meldung bekommen muss.
+const CHAT_STILLE_MS = 120000;
+
 class AskModal extends Modal {
   constructor(app, onSubmit) {
     super(app);
@@ -489,6 +499,76 @@ class AskModal extends Modal {
   onClose() {
     this.contentEl.empty();
   }
+}
+
+class PrivateVorlageModal extends Modal {
+  constructor(app, plugin, frontmatter) {
+    super(app);
+    this.plugin = plugin;
+    this.frontmatter = frontmatter;
+    this.busy = false;
+  }
+
+  onOpen() {
+    const el = this.contentEl;
+    el.addClass("unitedshare-modal");
+    el.createEl("h2", { text: "Private Cloud-Vorlage" });
+    el.createEl("p", { text: "Nur die Vorlage wird gesendet, nicht der Notiztext oder die Property-Zuordnung. Prüfe die Vorlage selbst: Auch sie kann vertrauliche Informationen enthalten." });
+    const felder = Array.isArray(this.frontmatter && this.frontmatter.unitedshare_private_felder)
+      ? this.frontmatter.unitedshare_private_felder : [];
+    felder.forEach((feld, i) => el.createEl("p", { text: `{{VAR_${i + 1}}} = ${String(feld)} (nur lokal)` }));
+    if (felder.length) {
+      el.createEl("p", { text: "Statt {{VAR_1}} kannst du auch {{$kunde}} schreiben (Name der ersten Eigenschaft). Gesendet wird immer nur {{VAR_1}}; der Name selbst verlässt den Rechner nicht." });
+    }
+    el.createEl("p", { text: "Vorlage für die Cloud:" });
+    this.eingabe = el.createEl("textarea", { cls: "unitedshare-private-vorlage-eingabe", attr: { rows: "8", placeholder: "Auftrag mit {{VAR_1}} oder {{$kunde}} formulieren" } });
+    const pruefen = el.createEl("button", { text: "Versandvorschau", attr: { type: "button" } });
+    this.anzeige = el.createEl("div");
+    pruefen.addEventListener("click", () => this.vorschau());
+  }
+
+  vorschau() {
+    if (this.busy) return;
+    const el = this.anzeige;
+    el.empty();
+    let vorbereitet;
+    try {
+      vorbereitet = privateVorlageVorbereiten(this.frontmatter, this.eingabe.value);
+    } catch (error) {
+      el.createEl("p", { text: error.message });
+      return;
+    }
+    const ziel = { baseUrl: this.plugin.settings.baseUrl, model: this.plugin.settings.model, apiKey: this.plugin.settings.apiKey, timeoutMs: this.plugin.settings.timeoutMs, antwortTokens: this.plugin.settings.antwortTokens };
+    el.createEl("h3", { text: "Dieser Auftrag wird an die Cloud gesendet" });
+    el.createEl("p", { text: `Ziel: ${ziel.baseUrl} · Modell: ${ziel.model || "nicht gewählt"}` });
+    el.createEl("pre", { text: vorbereitet.text });
+    el.createEl("p", { text: "Zusätzlich werden eine feste Format-Anweisung und technische API-Daten übertragen. Die Vorlage kann trotz Platzhaltern Informationen verraten." });
+    const senden = el.createEl("button", { text: "Diesen Auftrag senden", attr: { type: "button" } });
+    senden.addEventListener("click", async () => {
+      if (this.busy) return;
+      this.busy = true;
+      senden.disabled = true;
+      pruefenDeaktivieren(this.eingabe, true);
+      const status = el.createEl("p", { text: "Auftrag läuft …" });
+      try {
+        const antwort = await this.plugin.privateVorlageAnfragen(vorbereitet.text, ziel);
+        const lokal = privateAntwortAufloesen(antwort, vorbereitet.werte);
+        status.setText("Lokale Ergebnisvorschau – es wurde nichts in den Tresor geschrieben:");
+        el.createEl("pre", { text: lokal });
+      } catch (_error) {
+        status.setText("Der Auftrag oder die Prüfung der Antwort ist fehlgeschlagen. Es wurde nichts in den Tresor geschrieben.");
+      } finally {
+        this.busy = false;
+        pruefenDeaktivieren(this.eingabe, false);
+      }
+    });
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
+function pruefenDeaktivieren(element, wert) {
+  if (element) element.disabled = wert;
 }
 
 class AttachmentModal extends Modal {
@@ -562,6 +642,20 @@ class BestaetigungsModal extends Modal {
     const pfad = this.action && typeof this.action.path === "string" ? this.action.path : "";
     if (pfad) contentEl.createEl("p", { cls: "unitedshare-bestaetigung-pfad", text: pfad });
     if (this.action && this.action.action === "write") {
+      if (Object.hasOwn(this.action, "previousContent")) {
+        const vorher = this.action.previousContent;
+        const nachher = typeof this.action.content === "string" ? this.action.content : "";
+        contentEl.createEl("p", { text: vorher === null ? "Neue Datei – diese Zeilen werden hinzugefügt:" : "Änderungen (− vorher, + nachher):" });
+        const alt = vorher === null ? [] : String(vorher).split("\n");
+        const neu = nachher.split("\n");
+        let anfang = 0;
+        while (anfang < alt.length && anfang < neu.length && alt[anfang] === neu[anfang]) anfang += 1;
+        let ende = 0;
+        while (ende < alt.length - anfang && ende < neu.length - anfang && alt[alt.length - 1 - ende] === neu[neu.length - 1 - ende]) ende += 1;
+        const entfernt = alt.slice(anfang, alt.length - ende).map((line) => `− ${line}`);
+        const hinzu = neu.slice(anfang, neu.length - ende).map((line) => `+ ${line}`);
+        contentEl.createEl("pre", { cls: "unitedshare-bestaetigung-diff", text: entfernt.concat(hinzu).join("\n") || "Keine Änderungen." });
+      }
       contentEl.createEl("p", { text: "Vorgeschlagener vollständiger Dateiinhalt:" });
       contentEl.createEl("pre", {
         cls: "unitedshare-bestaetigung-inhalt",
@@ -671,6 +765,16 @@ class UnitedShareView extends ItemView {
     this.bildAnchor = toolbar.createEl("div", { cls: "unitedshare-bild-anchor" });
     this.bildMenu = this.bildAnchor.createEl("div", { cls: "unitedshare-bild-menu" });
     this.bildSteuer = [];
+    // Stopp: nur waehrend eines Auftrags sichtbar und aktiv. Er bricht den
+    // Modellaufruf ab und beendet gestartete Tresor-Programme mit SIGKILL.
+    // Ausserhalb eines Auftrags ein toter Knopf, deshalb per is-busy
+    // ein- und ausgeblendet.
+    this.stoppWrap = toolbar.createEl("div", { cls: "unitedshare-stopp-wrap" });
+    this.stoppButton = this.navButton(this.stoppWrap, "Stopp", "square", () => this.plugin.stoppeLaufe(), true, "Stopp");
+    if (this.stoppButton && typeof this.stoppButton.addClass === "function") {
+      this.stoppButton.addClass("unitedshare-stopp");
+    }
+    if (this.stoppButton) this.stoppButton.disabled = true;
     this.baueWerkzeuge();
     const loader = inputWrap.createEl("div", {
       cls: "unitedshare-loader",
@@ -911,6 +1015,8 @@ class UnitedShareView extends ItemView {
     ]) {
       if (control) control.disabled = disabled;
     }
+    // Stopp ist das Gegenstueck: nur waehrend eines Auftrags aktiv.
+    if (this.stoppButton) this.stoppButton.disabled = !disabled;
     const wrap = this.inputWrap;
     if (!wrap || typeof wrap.addClass !== "function") return;
     if (disabled) wrap.addClass("is-busy");
@@ -1110,7 +1216,16 @@ class UnitedShareView extends ItemView {
         }
       }
       const rechts = zeile.createEl("span", { cls: "unitedshare-schritt-rechts" });
-      rechts.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+      const status = { geplant: "Vorbereitet", wartet: "Wartet auf deine Freigabe", laeuft: "Läuft", fertig: "Abgeschlossen", abgelehnt: "Abgelehnt", fehlgeschlagen: "Fehlgeschlagen", abgebrochen: "Abgebrochen" };
+      let text = schritt.text;
+      if (schritt.zustand === "geplant" || schritt.zustand === "wartet" || schritt.zustand === "abgelehnt") {
+        if (schritt.art === "write") text = text.replace(/^Schreibt/, "Schreibvorschlag für");
+        if (schritt.art === "run") text = text.replace(/^Startet/, "Startvorschlag für");
+        if (schritt.art === "sync") text = text.replace(/^Gleicht ab/, "Abgleichvorschlag");
+        if (schritt.art === "mesh-join") text = text.replace(/^Tritt bei/, "Beitrittsvorschlag");
+      }
+      rechts.createEl("span", { cls: "unitedshare-schritt-text", text });
+      rechts.createEl("span", { cls: "unitedshare-schritt-status", text: status[schritt.zustand] || "" });
       if (schritt.ergebnis) {
         rechts.createEl("span", { cls: "unitedshare-schritt-ergebnis", text: schritt.ergebnis });
       }
@@ -1120,11 +1235,11 @@ class UnitedShareView extends ItemView {
   merkeSchritt(draft, schritt) {
     if (!schritt || typeof schritt.text !== "string") return;
     if (!draft.schritte) draft.schritte = [];
-    if (schritt.zustand === "fertig") {
+    if (schritt.id !== undefined || ["fertig", "abgelehnt", "fehlgeschlagen"].includes(schritt.zustand)) {
       for (let i = draft.schritte.length - 1; i >= 0; i -= 1) {
         const offen = draft.schritte[i];
-        if (offen.zustand === "laeuft" && offen.text === schritt.text) {
-          offen.zustand = "fertig";
+        if (schritt.id !== undefined ? offen.id === schritt.id : (offen.zustand === "laeuft" && offen.text === schritt.text)) {
+          offen.zustand = schritt.zustand;
           if (schritt.ergebnis) offen.ergebnis = schritt.ergebnis;
           this.zeigeSchritte(draft);
           return;
@@ -1136,8 +1251,9 @@ class UnitedShareView extends ItemView {
     if (schritt.art !== "denken") this.denkenAbhaken(draft);
     const eintrag = {
       text: schritt.text,
-      zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft",
+      zustand: schritt.zustand || "laeuft",
     };
+    if (schritt.id !== undefined) eintrag.id = schritt.id;
     if (schritt.art) eintrag.art = schritt.art;
     if (schritt.zeichen) eintrag.zeichen = schritt.zeichen;
     if (schritt.ergebnis) eintrag.ergebnis = schritt.ergebnis;
@@ -1955,6 +2071,19 @@ class UnitedShareView extends ItemView {
         this.zeigeBudget(meta && meta.limits, meta && meta.usage);
       }, (text) => {
         if (this.busy && this.statusEl) this.statusEl.setText(text);
+      }, (runde) => {
+        // Mehrstufige Schleife: sonst bliebe der Chat stumm, sobald die
+        // zweite Runde beginnt -- der Grund fuer das gefuehlte Haengen.
+        // Nur wenn schon etwas gelaufen ist, sonst stoert ein Text die
+        // ruhige Denkpause der ersten Runde.
+        if (!this.busy) return;
+        if (!this.statusEl) return;
+        if (runde && runde.folge) {
+          const sekunden = Number(runde.sekunden) || 0;
+          this.statusEl.setText(`Schritt ${runde.stand} von höchstens ${runde.von} erledigt. Nächste Runde läuft (${sekunden} s).`);
+        } else if (runde && runde.runde > 1) {
+          this.statusEl.setText(`Nächste Runde läuft (${Number(runde.sekunden) || 0} s).`);
+        }
       });
       draft.content = answer;
       draft.streaming = false;
@@ -1968,9 +2097,16 @@ class UnitedShareView extends ItemView {
       await this.renderMessages();
     } catch (error) {
       void protokolliereAufrufFehler(this.chatAdapter(), error);
+      const abgebrochen = Boolean(error && error.abgebrochen);
       const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+      // Das Denken ist vorbei, sobald der Auftrag endet -- auf welchem Weg
+      // auch immer. Wie auf dem Erfolgspfad abgehakt, damit kein "Denkt nach"
+      // als laufend stehen bleibt.
+      this.denkenAbhaken(draft);
       for (const schritt of draft.schritte || []) {
-        if (schritt.zustand === "laeuft") schritt.zustand = "abgebrochen";
+        if (["geplant", "wartet", "laeuft"].includes(schritt.zustand)) {
+          schritt.zustand = abgebrochen ? "abgebrochen" : "fehlgeschlagen";
+        }
       }
       if (!String(draft.content || "") && !(draft.schritte && draft.schritte.length)) {
         const index = tab.messages.indexOf(draft);
@@ -1979,7 +2115,9 @@ class UnitedShareView extends ItemView {
         draft.streaming = false;
       }
       this.statusEl.setText(text);
-      new Notice(text);
+      // Kein doppeltes Alarmieren: der Nutzer hat selbst abgebrochen und
+      // weiss es -- die Sprechblase und der Status sagen es deutlich genug.
+      if (!abgebrochen) new Notice(text);
       if (error && error.limits) this.zeigeBudget(error.limits, null);
       if (error && error.aufladenUrl) this.plugin.aufladenUrl = error.aufladenUrl;
       await this.renderMessages();
@@ -2136,7 +2274,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Schreiben ebenfalls bestätigen")
-      .setDesc("Lesen, Starten, Beitreten und Abgleich fragen immer nach. Mit diesem Schalter fragt auch Schreiben nach, bevor eine Datei angelegt oder geändert wird.")
+      .setDesc("Vor dem Anlegen oder Ändern einer Datei eine Vorschau bestätigen. Für neue Installationen eingeschaltet; bestehende Einstellungen bleiben erhalten. Starten, Beitreten und Abgleich fragen unabhängig davon nach.")
       .addToggle((toggle) => {
         toggle.setValue(Boolean(this.plugin.settings.requireWriteConfirm));
         toggle.onChange(async (value) => {
@@ -2145,12 +2283,27 @@ class UnitedShareSettingTab extends PluginSettingTab {
         });
       });
 
+    new Setting(containerEl)
+      .setName("Wie ausführlich darf die Antwort sein?")
+      .setDesc("Die Voreinstellung passt für kurze Antworten. Für längere Ausarbeitungen eine höhere Grenze wählen. Das Modell kann trotzdem kürzer antworten.")
+      .addDropdown((dropdown) => {
+        for (const [n, label] of [[1200, "Kurz (Standard)"], [2048, "Mittel"], [4096, "Ausführlich"], [8192, "Sehr ausführlich"]]) dropdown.addOption(String(n), label);
+        dropdown.setValue(String(this.plugin.settings.antwortTokens || 1200));
+        dropdown.onChange(async (value) => {
+          const n = Number(value);
+          if (![1200, 2048, 4096, 8192].includes(n)) return;
+          this.plugin.settings.antwortTokens = n;
+          await this.plugin.saveSettings();
+        });
+      });
+
     this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
+    containerEl.createEl("p", { text: "Vertrauliche Inhalte? Nutze den Befehl ‚UnitedShare: Private Cloud-Vorlage‘ und prüfe die Vorschau. Der normale Chat sendet deine Frage und ausgewählte Notizinhalte an den eingestellten Dienst." });
     containerEl.createEl("h3", { text: "Dieser Rechner" });
 
     new Setting(containerEl)
-      .setName("Lokales Embedding")
-      .setDesc("Nur http://127.0.0.1, http://localhost oder http://[::1], mit Port. Voreinstellung http://127.0.0.1:11434. Eine andere Adresse wird nicht aufgerufen.")
+      .setName("Lokale Suche: Dienstadresse")
+      .setDesc("Normalerweise nichts ändern: Das Plugin sucht den lokalen Suchdienst automatisch auf diesem Gerät. Nur lokale Adressen sind erlaubt.")
       .addText((text) => {
         text.setValue(this.plugin.settings.embedUrl);
         text.onChange(async (value) => {
@@ -2170,8 +2323,8 @@ class UnitedShareSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Embedding-Modell")
-      .setDesc("Leer wählt auf diesem Rechner bge-m3, embeddinggemma, nomic-embed-text oder mxbai-embed-large. Ein gesetzter Name muss lokal vorhanden sein.")
+      .setName("Lokale Suche: Modell")
+      .setDesc("Für die automatische Auswahl leer lassen. Das Plugin verwendet ein unterstütztes, bereits installiertes Suchmodell. Die Tresor-Indexsuche benötigt bge-m3. Es wird nichts automatisch installiert.")
       .addText((text) => {
         text.setPlaceholder("automatisch");
         text.setValue(this.plugin.settings.embedModel || "");
@@ -2485,7 +2638,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
     for (const id of known) choices.push(id);
     new Setting(host)
       .setName("Modell")
-      .setDesc("Nur rmxos-mega2026.1, rmxos-sema2026.1 und rmxos-mobil2026.1. Andere Kennungen zeigt dieses Plugin nicht.")
+      .setDesc("Steht genau ein unterstütztes Modell zur Verfügung, wird es automatisch gewählt. Bei mehreren Modellen bitte eines auswählen; bestehende Auswahlen bleiben erhalten.")
       .addDropdown((dropdown) => {
         dropdown.addOption("", "Modell wählen");
         for (const id of choices) dropdown.addOption(id, id);
@@ -2665,7 +2818,10 @@ function cursorKeyboardCover() {
 // einfache HTML-Tabelle -- kein Framework, reines createEl() wie im Rest
 // des Plugins. Reine DOM-Erzeugung, deshalb hier statt im Kernmodul (das
 // bleibt DOM-frei und bleibt dadurch mit node --test testbar).
-function renderDuckdbTabelle(container, tabelle) {
+// Der dritte Parameter ist optional; nur wer ihn setzt, bekommt Verweise
+// in Zelltexten als echte Obsidian-Links (rmxos-Blöcke). SQL-Ergebnisse
+// bleiben Anzeige pur.
+function renderDuckdbTabelle(container, tabelle, verweise) {
   container.empty();
   const spalten = (tabelle && tabelle.spalten) || [];
   const zeilen = (tabelle && tabelle.zeilen) || [];
@@ -2679,8 +2835,82 @@ function renderDuckdbTabelle(container, tabelle) {
   const tbody = table.createEl("tbody");
   for (const zeile of zeilen) {
     const tr = tbody.createEl("tr");
-    for (const wert of zeile) tr.createEl("td", { text: wert === "" || wert == null ? "" : String(wert) });
+    for (const wert of zeile) {
+      const text = wert === "" || wert == null ? "" : String(wert);
+      if (verweise && verweise.app) {
+        zelltextMitVerweisen(tr.createEl("td"), text, verweise.app, verweise.quelle);
+      } else {
+        tr.createEl("td", { text });
+      }
+    }
   }
+}
+
+// Ein Verweis in einem Zelltext, erkannt an [[Notiz|Anzeige]].
+const ZELLEN_VERWEIS_QUELLTEXT = "!?\\[\\[([^\\[\\]]+)\\]\\]";
+
+// Füllt ein Zellen-/Listen-Element, in dem Obsidian-Verweise ([[Notiz]],
+// [[Notiz|Anzeige]], [[Notiz#Kopf]]) zu echten Links werden, die die Notiz
+// öffnen. Nur Anzeige und Navigation: kein Lesen der verlinkten Datei,
+// keine Ausführung. Bewusst nicht unterstützt sind Einbettungen ("![[...]]")
+// -- der Inhalt anderer Dateien gehört nicht still in eine Zelle, er kann
+// groß sein und wird deshalb unverändert als Text gezeigt. Ohne
+// Workspace-API bleibt der Text unverändert wie bei SQL-Ergebnissen.
+function zelltextMitVerweisen(el, text, app, quelle) {
+  const werteText = String(text ?? "");
+  if (!app || !app.workspace || typeof app.workspace.openLinkText !== "function" || !app.metadataCache || typeof app.metadataCache.getFirstLinkpathDest !== "function") {
+    el.setText(werteText);
+    return el;
+  }
+  const muster = new RegExp(ZELLEN_VERWEIS_QUELLTEXT, "g");
+  if (!muster.test(werteText)) {
+    el.setText(werteText);
+    return el;
+  }
+  muster.lastIndex = 0;
+  let cursor = 0;
+  let fund;
+  while ((fund = muster.exec(werteText))) {
+    if (fund.index > cursor) el.createEl("span", { cls: "unitedshare-zelltext", text: werteText.slice(cursor, fund.index) });
+    if (fund[0].startsWith("!")) {
+      // Einbettungen bleiben Text -- siehe Kommentar oben.
+      el.createEl("span", { cls: "unitedshare-zelltext", text: fund[0] });
+    } else {
+      const teile = fund[1].split("|");
+      const ziel = teile[0];
+      const anzeige = teile.length > 1 ? (teile.slice(1).join("|") || ziel) : ziel;
+      const verweis = el.createEl("a", {
+        cls: "internal-link unitedshare-verweis",
+        text: anzeige,
+        attr: { href: "#", "data-href": ziel, tabindex: "-1" },
+      });
+      try {
+        const datei = app.metadataCache.getFirstLinkpathDest(ziel, String(quelle || ""));
+        if (datei && datei.path) {
+          // setAttr statt .attrs: Das Mock in den Tests kennt .attrs,
+          // Obsidians echtes DOM nicht -- damit die Auflösung auch im
+          // echten Lesemodus ankommt.
+          if (typeof verweis.setAttr === "function") verweis.setAttr("data-href", datei.path);
+          else verweis.attrs["data-href"] = datei.path;
+        } else {
+          verweis.addClass("is-unresolved");
+        }
+      } catch (_error) {
+        verweis.addClass("is-unresolved");
+      }
+      verweis.addEventListener("click", (ereignis) => {
+        if (ereignis && typeof ereignis.preventDefault === "function") {
+          ereignis.preventDefault();
+          ereignis.stopPropagation();
+        }
+        app.workspace.openLinkText(ziel, String(quelle || ""));
+      });
+    }
+    cursor = fund.index + fund[0].length;
+  }
+  if (cursor < werteText.length) el.createEl("span", { cls: "unitedshare-zelltext", text: werteText.slice(cursor) });
+  if (!el.children.length) el.setText(werteText);
+  return el;
 }
 
 // Wandelt die Zeilen eines Apache-Arrow-Table-Ergebnisses (conn.query(...)
@@ -2771,6 +3001,9 @@ class UnitedShareDuckDbView extends FileView {
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    // Laeuft gerade: Auftrag-Steuerungen, die der Stopp-Knopf abbricht.
+    // Nach dem Abbrechen raeumt jede Stelle ihre Eintraege selbst ab.
+    this.laufe = [];
     this.statusBarItem = this.addStatusBarItem();
     this.statusBarItem.addClass("unitedshare-statusbar");
     this.addSettingTab(new UnitedShareSettingTab(this.app, this));
@@ -2778,9 +3011,22 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.registerView(DUCKDB_ANSICHT_VIEW_TYPE, (leaf) => new UnitedShareDuckDbView(leaf, this));
     this.registerExtensions([...DUCKDB_ANSICHT_ENDUNGEN], DUCKDB_ANSICHT_VIEW_TYPE);
     this.registerMarkdownCodeBlockProcessor("sql", (source, el) => this.renderSqlCodeBlock(source, el));
-    this.registerMarkdownCodeBlockProcessor("rmxos", (source, el) => this.renderRmxosCodeBlock(source, el));
+    this.registerMarkdownCodeBlockProcessor("rmxos", (source, el, ctx) => this.renderRmxosCodeBlock(source, el, ctx));
     addIcon(UNITEDSHARE_ICON, markInner());
     this.addRibbonIcon(UNITEDSHARE_ICON, "UnitedShare", () => this.openSidebar());
+    this.addCommand({
+      id: "private-cloud-vorlage",
+      name: "UnitedShare: Private Cloud-Vorlage",
+      callback: () => {
+        const file = this.app.workspace.getActiveFile();
+        const cache = file && this.app.metadataCache && this.app.metadataCache.getFileCache(file);
+        if (!cache || !cache.frontmatter || cache.frontmatter.unitedshare_privacy !== "template") {
+          new Notice("Die aktive Notiz benötigt unitedshare_privacy: template und private Eigenschaften.");
+          return;
+        }
+        new PrivateVorlageModal(this.app, this, { ...cache.frontmatter }).open();
+      },
+    });
     this.addCommand({
       id: "open-unitedshare-sidebar",
       name: "UnitedShare in der Seitenleiste",
@@ -2812,6 +3058,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
   }
 
   onunload() {
+    this.stoppeLaufe();
     this.removeCursorComposer();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
     this.app.workspace.detachLeavesOfType(DUCKDB_ANSICHT_VIEW_TYPE);
@@ -2819,6 +3066,21 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.stopPeerSyncHost();
     this.stopMobilSyncAutomatik();
     this.verwirfPairing();
+  }
+
+  // Der Stopp der laufenden Auftraege: jedes gemeldete Steuer schiesst die
+  // eigene Arbeit ab -- der Modellaufruf bricht mit einer benannten Meldung
+  // ab, gestartete Tresor-Programme bekommen SIGKILL. Frueh genug abbrechen
+  // spart die Arbeit danach; ein Abbruch, der nichts abbricht, waere eine
+  // Luege, deshalb wirkt jedes Signal in der Kette.
+  stoppeLaufe() {
+    const laufende = Array.isArray(this.laufe) ? this.laufe.slice() : [];
+    this.laufe = [];
+    for (const steuer of laufende) {
+      if (steuer && typeof steuer.abort === "function") {
+        try { steuer.abort(); } catch (_err) { /* Abbruch bleibt Abbruch. */ }
+      }
+    }
   }
 
   // -- DuckDB-WASM-Ansicht: ein Singleton pro Plugin-Laufzeit (nicht pro
@@ -3089,25 +3351,38 @@ module.exports = class UnitedSharePlugin extends Plugin {
   // rmxos-Codeblöcke: reine Anzeige der FluentScript-Nachricht als Karte(n).
   // Bewusst ohne Ausführung/Netzwerk -- fluentScriptParsen/-Karten sind reine
   // Funktionen, hier nur ins DOM gebracht.
-  renderRmxosCodeBlock(source, el) {
+  renderRmxosCodeBlock(source, el, ctx) {
     el.empty();
     el.addClass("unitedshare-rmxos-block");
     let ketten;
+    let frontmatter = null;
     try {
       ketten = fluentScriptParsen(source || "");
+      const cache = this.app.metadataCache;
+      const datei = ctx && ctx.sourcePath && cache && typeof cache.getCache === "function" ? cache.getCache(ctx.sourcePath) : null;
+      frontmatter = datei && datei.frontmatter;
+      ketten = rmxosEigenschaftenErsetzen(ketten, frontmatter);
     } catch (error) {
       const meldung = error instanceof UnitedShareError ? error.message : String((error && error.message) || error);
       el.createEl("div", { cls: "unitedshare-rmxos-fehler", text: `FluentScript ungültig: ${meldung}` });
       return;
     }
+    // Der Block nennt eine Eigenschaft, Obsidian konnte die Eigenschaften der
+    // Notiz aber nicht als Objekt lesen. Haeufigste Ursache: unquoted Werte,
+    // die mit "{{" beginnen oder ein ":" enthalten, machen das Frontmatter
+    // fuer Obsidians YAML-Analyse ungueltig ("Ungueltige Eigenschaften").
+    // Ohne Hinweis sucht der Nutzer den Fehler im Codeblock statt im Kopf.
+    const nutztEigenschaften = /\{\{\$/u.test(source || "");
+    const frontmatterLesbar = frontmatter && typeof frontmatter === "object" && !Array.isArray(frontmatter);
     // Mehrere gleichfoermige Ketten (gleicher Kopfverb, gleiche Aufrufnamen --
     // z. B. mehrere result(...).ok().value(...)-Ketten durch ";" getrennt)
     // lassen sich als Tabelle lesen, nicht nur als Liste einzelner Karten.
     // fluentScriptAlsZeilen() gibt dafuer `null` zurueck, wenn die Ketten
     // nicht zueinander passen -- dann bleibt es bei der Karten-Ansicht.
     const zeilen = fluentScriptAlsZeilen(ketten);
+    const quelle = ctx && typeof ctx.sourcePath === "string" ? ctx.sourcePath : "";
     if (zeilen) {
-      renderDuckdbTabelle(el, duckdbTabelleAusZeilen(zeilen));
+      renderDuckdbTabelle(el, duckdbTabelleAusZeilen(zeilen), { app: this.app, quelle });
     } else {
       for (const karte of fluentScriptKarten(ketten)) {
         const karteEl = el.createEl("div", { cls: "unitedshare-rmxos-karte" });
@@ -3117,7 +3392,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
         });
         const listeEl = karteEl.createEl("ul", { cls: "unitedshare-rmxos-felder" });
         for (const feld of karte.felder) {
-          listeEl.createEl("li", { text: feld.wert ? `${feld.name}: ${feld.wert}` : feld.name });
+          zelltextMitVerweisen(listeEl.createEl("li"), feld.wert ? `${feld.name}: ${feld.wert}` : feld.name, this.app, quelle);
         }
       }
     }
@@ -3125,6 +3400,14 @@ module.exports = class UnitedSharePlugin extends Plugin {
       cls: "unitedshare-rmxos-hinweis",
       text: "Nur Anzeige -- Ausführung kommt später.",
     });
+    // Nach dem Rendern: renderDuckdbTabelle leert den Container zu Beginn,
+    // ein frueherer Hinweis wuerde also wieder verschwinden.
+    if (nutztEigenschaften && !frontmatterLesbar) {
+      el.createEl("div", {
+        cls: "unitedshare-rmxos-fehler",
+        text: "Eigenschaften nicht lesbar: Die Notiz-Eigenschaften sind kein gültiges YAML (Obsidian meldet „Ungültige Eigenschaften“). Werte, die mit {{ oder einem Doppelpunkt beginnen, in Anführungszeichen setzen, z. B. owner: \"{{$name}} {{$surname}}\".",
+      });
+    }
   }
 
   // -- Peer-Sync-Host (Desktop-Seite, Mobile folgt in einem späteren Schritt) --
@@ -3932,11 +4215,12 @@ module.exports = class UnitedSharePlugin extends Plugin {
       apiKey,
       timeoutMs: 15000,
       fetchImpl: requestUrlAsFetch(),
-    }).then((ids) => {
+    }).then(async (ids) => {
       if (this.modelFlightStamp !== stamp) return ids;
       this.modelIds = ids;
       this.modelError = "";
       this.modelStamp = stamp;
+      await this.waehleEinzigesModell(ids);
       return ids;
     }).catch((error) => {
       if (this.modelFlightStamp === stamp) {
@@ -3950,6 +4234,14 @@ module.exports = class UnitedSharePlugin extends Plugin {
     });
     this.modelFlight = flight;
     return flight;
+  }
+
+  async waehleEinzigesModell(ids) {
+    if (String(this.settings.model || "").trim()) return;
+    const passende = [...new Set((Array.isArray(ids) ? ids : []).filter(isObsidianModel))];
+    if (passende.length !== 1) return;
+    this.settings.model = passende[0];
+    await this.saveSettings();
   }
 
   async applyModel(model) {
@@ -4199,10 +4491,21 @@ module.exports = class UnitedSharePlugin extends Plugin {
   vaultHost() {
     return {
       read: (rel) => this.readVaultNote(rel),
+      readForWrite: async (rel) => {
+        const safe = assertVaultRelative(rel);
+        const adapter = this.vaultAdapter();
+        if (!adapter || typeof adapter.exists !== "function" || typeof adapter.read !== "function") {
+          throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        }
+        if (!(await adapter.exists(safe))) return null;
+        const text = await adapter.read(safe);
+        if (typeof text !== "string") throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        return text;
+      },
       list: (rel) => this.listVaultDir(rel),
       write: (rel, content) => this.writeVaultFile(rel, content),
-      run: (rel) => this.runVaultSource(rel),
-      meshJoin: (rel) => this.reemaxHost().meshJoin(rel),
+      run: (rel, laufOptionen) => this.runVaultSource(rel, laufOptionen),
+      meshJoin: (rel, laufOptionen) => this.reemaxHost().meshJoin(rel, laufOptionen),
       sync: (request) => this.reemaxHost().sync(request),
     };
   }
@@ -4213,7 +4516,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     const adapter = this.vaultAdapter();
     if (!root || !adapter) throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
     return {
-      async meshJoin(rel) {
+      async meshJoin(rel, laufOptionen) {
         const safe = assertVaultRelative(rel);
         if (!(await plugin.vaultDatei(safe))) {
           throw new UnitedShareError("Die Einladung liegt nicht im Tresor.", 0);
@@ -4224,6 +4527,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
         return runReemax(["mesh", "join", adapter.getFullPath(safe)], {
           cwd: root,
           onAktiv: (text) => plugin.meldeLauf(text),
+          signal: laufOptionen && laufOptionen.signal ? laufOptionen.signal : null,
         });
       },
       async sync(request) {
@@ -4231,6 +4535,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
         return runReemax(["sync", direction, peer], {
           cwd: root,
           onAktiv: (text) => plugin.meldeLauf(text),
+          signal: request && request.signal ? request.signal : null,
         });
       },
     };
@@ -4385,7 +4690,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     throw new UnitedShareError("Der Pfad bleibt im Tresor.");
   }
 
-  async runVaultSource(rel) {
+  async runVaultSource(rel, laufOptionen) {
     const safe = assertVaultRelative(rel);
     const adapter = this.vaultAdapter();
     if (
@@ -4404,6 +4709,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
       cwd: adapter.getBasePath(),
       relPath: safe,
       onAktiv: (text) => this.meldeLauf(text),
+      signal: laufOptionen && laufOptionen.signal ? laufOptionen.signal : null,
     });
   }
 
@@ -4439,33 +4745,74 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
   }
 
-  async completeThread(turns, onDelta, onSchritt = null, onMeta = null, onWarten = null) {
+  async completeThread(turns, onDelta, onSchritt = null, onMeta = null, onWarten = null, onRunde = null) {
+    if (!String(this.settings.model || "").trim()) {
+      await this.ensureModels();
+      if (!String(this.settings.model || "").trim()) {
+        throw new UnitedShareError("Bitte in den UnitedShare-Einstellungen ein Modell auswählen. Es stehen mehrere oder keine passenden Modelle zur Verfügung.", 0);
+      }
+    }
     const live = desktopCanStream();
     const report = (meta) => {
       if (typeof onMeta === "function") onMeta(meta);
       this.meldeBudget(meta && meta.limits, meta && meta.usage);
     };
-    return runVaultInstruction({
-      turns,
-      host: this.vaultHost(),
-      onSchritt,
-      confirm: (action) => this.bestaetigeAktion(action),
-      requireWriteConfirm: Boolean(this.settings.requireWriteConfirm),
-      complete: (next) => completeMessages({
-        baseUrl: this.settings.baseUrl,
-        apiKey: this.settings.apiKey,
-        model: this.settings.model,
-        timeoutMs: Number(this.settings.timeoutMs) || 90000,
-        dauerMs: 600000,
-        onWarten: typeof onWarten === "function" ? onWarten : null,
-        fetchImpl: requestUrlAsFetch(),
-        live,
-        onDelta,
-        onMeta: report,
-        system: SYSTEM_PROMPT,
-        turns: next,
-        form: "chat",
-      }),
+    // Abbruchsteuerung des Auftrags: angemeldet in plugin.laufe, abgemeldet
+    // sobald der Auftrag endet -- auf welche Weise auch immer. Der Stopp-Knopf
+    // bricht damit Modellaufruf und laufende Programm-Schritte zugleich ab,
+    // statt auf das 10-Minuten-Aus zu warten.
+    const steuer = typeof AbortController === "function" ? new AbortController() : null;
+    if (steuer) {
+      if (!Array.isArray(this.laufe)) this.laufe = [];
+      this.laufe.push(steuer);
+    }
+    try {
+      return await runVaultInstruction({
+        turns,
+        host: this.vaultHost(),
+        onSchritt,
+        onRunde: typeof onRunde === "function" ? onRunde : null,
+        confirm: (action) => this.bestaetigeAktion(action),
+        requireWriteConfirm: Boolean(this.settings.requireWriteConfirm),
+        signal: steuer ? steuer.signal : null,
+        complete: (next) => completeMessages({
+          baseUrl: this.settings.baseUrl,
+          apiKey: this.settings.apiKey,
+          model: this.settings.model,
+          maxTokens: this.settings.antwortTokens || 1200,
+          timeoutMs: Number(this.settings.timeoutMs) || 90000,
+          dauerMs: 600000,
+          stilleMs: CHAT_STILLE_MS,
+          onWarten: typeof onWarten === "function" ? onWarten : null,
+          fetchImpl: requestUrlAsFetch(),
+          live,
+          onDelta,
+          onMeta: report,
+          system: SYSTEM_PROMPT,
+          turns: next,
+          form: "chat",
+          signal: steuer ? steuer.signal : null,
+        }),
+      });
+    } finally {
+      if (steuer && Array.isArray(this.laufe)) {
+        const stelle = this.laufe.indexOf(steuer);
+        if (stelle >= 0) this.laufe.splice(stelle, 1);
+      }
+    }
+  }
+
+  async privateVorlageAnfragen(text, ziel) {
+    return completeMessages({
+      baseUrl: ziel.baseUrl,
+      apiKey: ziel.apiKey,
+      model: ziel.model,
+      maxTokens: ziel.antwortTokens || 1200,
+      timeoutMs: Number(ziel.timeoutMs) || 90000,
+      fetchImpl: requestUrlAsFetch(),
+      system: "Beantworte den Auftrag. Übernimm Platzhalter wie {{VAR_1}} unverändert; erfinde keine Platzhalterwerte.",
+      turns: [{ role: "user", content: text }],
+      form: "chat",
     });
   }
 
@@ -4537,3 +4884,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
   }
 };
+
+// An die exportierte Klasse gehängt, damit Verträge (Tests) die
+// Tabellen-Darstellung direkt prüfen können; im Bundler spielt das keine Rolle.
+module.exports.renderDuckdbTabelle = renderDuckdbTabelle;
+module.exports.zelltextMitVerweisen = zelltextMitVerweisen;

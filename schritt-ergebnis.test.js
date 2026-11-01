@@ -122,6 +122,81 @@ test("ein gescheiterter Schritt meldet den Grund", async () => {
       return "Fertig.";
     },
   });
-  const fertig = gemeldet.find((s) => s.zustand === "fertig");
-  assert.match(fertig.ergebnis, /nicht im Tresor/);
+  const fehlgeschlagen = gemeldet.find((s) => s.zustand === "fehlgeschlagen");
+  assert.match(fehlgeschlagen.ergebnis, /nicht im Tresor/);
+});
+
+test("Freigabe wartet sichtbar und Ablehnung wird nicht als Erfolg gemeldet", async () => {
+  const schritte = [];
+  let aufrufe = 0;
+  let geschrieben = false;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Schreibe" }],
+    host: { async read() { return null; }, async write() { geschrieben = true; } },
+    requireWriteConfirm: true,
+    confirm: async () => { assert.equal(schritte.at(-1).zustand, "wartet"); return false; },
+    onSchritt: (s) => schritte.push(s),
+    complete: async () => ++aufrufe === 1 ? block({ action: "write", path: "a.md", content: "x" }) : "OK",
+  });
+  assert.deepEqual(schritte.map((s) => s.zustand), ["geplant", "wartet", "abgelehnt"]);
+  assert.equal(new Set(schritte.map((s) => s.id)).size, 1);
+  assert.equal(geschrieben, false);
+});
+
+test("nach Freigabe läuft die Aktion und meldet Erfolg", async () => {
+  const schritte = [];
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Schreibe" }],
+    host: { async read() { return null; }, async write() {} },
+    requireWriteConfirm: true,
+    confirm: async () => true,
+    onSchritt: (s) => schritte.push(s),
+    complete: async () => ++aufrufe === 1 ? block({ action: "write", path: "a.md", content: "x" }) : "OK",
+  });
+  assert.deepEqual(schritte.map((s) => s.zustand), ["geplant", "wartet", "laeuft", "fertig"]);
+});
+
+// ------------------------------------------------------------------- Runden
+//
+// ANLASS (2026-11-01): "Der Chat bleibt oft hängen und ich habe keinen Plan
+// was los ist, da keine vernünftige Meldung kommt." Ursache: ab der zweiten
+// Modellrunde einer mehrstufigen Schleife schwieg die Seitenleiste. Nur die
+// allererste Runde meldete etwas ("Die Aufgabe läuft noch."). Jede weitere
+// Runde meldet sich jetzt über onRunde mit Nummer und laufender Zeit.
+
+test("jede Modellrunde meldet sich, auch nach ausgeführten Werkzeugschritten", async () => {
+  const runden = [];
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lies a.md und antworte" }],
+    host: tresor(),
+    onRunde: (r) => runden.push(r),
+    complete: async () => {
+      aufrufe += 1;
+      if (aufrufe === 1) return block({ action: "read", path: "a.md" });
+      return "Fertig.";
+    },
+  });
+  assert.equal(runden.length, 2, "eine Meldung je Modellrunde");
+  assert.deepEqual(runden.map((r) => r.runde), [1, 2]);
+  assert.equal(runden[0].folge, false, "die erste Runde ist noch keine Folgerunde");
+  assert.equal(runden[1].folge, true, "die zweite Runde folgt auf einen Werkzeugschritt");
+  assert.equal(runden[0].von, 6, "die Obergrenze steht als Zahl bereit");
+  assert.equal(runden[1].stand, 1, "ein Werkzeugschritt war erledigt");
+});
+
+test("eine Rückmeldung, die selbst wirft, bricht den Auftrag nicht ab", async () => {
+  let aufrufe = 0;
+  const antwort = await runVaultInstruction({
+    turns: [{ role: "user", content: "Lies a.md" }],
+    host: tresor(),
+    onRunde: () => { throw new Error("kaputte Anzeige"); },
+    complete: async () => {
+      aufrufe += 1;
+      if (aufrufe === 1) return block({ action: "read", path: "a.md" });
+      return "Fertig.";
+    },
+  });
+  assert.equal(antwort, "Fertig.");
 });

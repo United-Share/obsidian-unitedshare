@@ -634,6 +634,27 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   -webkit-text-fill-color: transparent;
 }
 
+/* Stopp: nur waehrend eines Auftrags sichtbar. Ausserhalb waere er ein toter
+   Knopf -- abwesend ist ehrlicher als inaktiv. */
+.unitedshare-input-wrapper .unitedshare-stopp-wrap {
+  display: none;
+  position: relative;
+}
+
+.unitedshare-input-wrapper.is-busy .unitedshare-stopp-wrap {
+  display: block;
+}
+
+.unitedshare-sidebar button.unitedshare-nav-btn.unitedshare-stopp {
+  color: var(--text-error);
+}
+
+.unitedshare-sidebar button.unitedshare-nav-btn.unitedshare-stopp:hover,
+.unitedshare-sidebar button.unitedshare-nav-btn.unitedshare-stopp:focus-visible {
+  color: var(--text-error);
+  background: var(--background-modifier-error);
+}
+
 .unitedshare-sidebar button:disabled,
 .unitedshare-cursor-composer button:disabled,
 .unitedshare-model-select:disabled {
@@ -1018,6 +1039,22 @@ body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
   text-overflow: ellipsis;
 }
 
+.unitedshare-schritt-status {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.unitedshare-schritt.is-wartet .unitedshare-schritt-punkt {
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
+}
+
+.unitedshare-schritt.is-fehlgeschlagen .unitedshare-schritt-punkt,
+.unitedshare-schritt.is-abgelehnt .unitedshare-schritt-punkt {
+  border-color: var(--text-error);
+  color: var(--text-error);
+}
+
 /* Die Verbindung zum nächsten Knoten. */
 .unitedshare-schritt:not(:last-child)::after {
   content: "";
@@ -1139,4 +1176,15 @@ body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
   .unitedshare-schritt.is-laeuft .unitedshare-schritt-punkt {
     animation: none;
   }
+}
+.unitedshare-private-vorlage-eingabe {
+  width: 100%;
+  min-height: 10em;
+}
+
+.unitedshare-modal pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow: auto;
 }

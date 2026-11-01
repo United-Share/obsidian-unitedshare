@@ -160,7 +160,7 @@ function installObsidianMock() {
       const text = state.replies.length ? state.replies.shift() : "Antwort aus messages";
       return {
         status: 200,
-        text,
+        text: JSON.stringify({ type: "message", role: "assistant", content: [{ type: "text", text }], stop_reason: "end_turn" }),
         json: {
           type: "message",
           role: "assistant",
@@ -194,6 +194,10 @@ function diskVault(root) {
       async exists(rel) {
         if (files.has(rel) || folders.has(rel)) return true;
         return fs.existsSync(path.join(root, rel));
+      },
+      async read(rel) {
+        if (files.has(rel)) return files.get(rel);
+        return fs.readFileSync(path.join(root, rel), "utf8");
       },
       async stat(rel) {
         if (files.has(rel)) {
@@ -313,7 +317,8 @@ function bodies() {
 test("Fragen legt hallo.py aus einem Python-Block an und startet sie", async () => {
   const root = tempRoot();
   try {
-    const { view } = await openChat(root);
+    const { view, plugin } = await openChat(root);
+    plugin.bestaetigeAktion = async () => true;
     state.replies.push(
       "Ich lege die Datei an.\n\n```python\nprint('vault-ok')\n```\n",
       "hallo.py ist angelegt und gelaufen.",

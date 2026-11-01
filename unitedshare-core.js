@@ -580,6 +580,10 @@ async function readChunks(onDelta, pump, onUsage, onByte, onFenster) {
     }
     return finishRaw(raw, onDelta, onUsage);
   }
+  // Ein Strom, der mit Text endet, ist eine Antwort -- auch ohne sichtbares
+  // Schlusszeichen. Ein Netzabbruch mitten im Strom liefert das bisher
+  // Gelesene: eine Teilantwort ist mehr wert als ein Fehler (siehe den
+  // entsprechenden Test in strom-ohne-body.test.js).
   const text = visible.trim();
   if (!text) throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
   return text;
@@ -619,6 +623,9 @@ async function readVisible(response, onDelta, onUsage, onByte, onFenster) {
     ? String((await response.text()) ?? "")
     : "";
   if (/^(event|data):/m.test(raw)) return readChunks(onDelta, async (push) => push(raw), onUsage, onByte, onFenster);
+  // Ein echter Fetch-Body ist nach text() verbraucht. Niemals anschließend
+  // json() auf demselben Body aufrufen; den bereits gelesenen Text parsen.
+  if (response && typeof response.text === "function") return finishRaw(raw, onDelta, onUsage);
   if (response && typeof response.json === "function") {
     let parsed;
     try {
@@ -626,8 +633,7 @@ async function readVisible(response, onDelta, onUsage, onByte, onFenster) {
     } catch (error) {
       // Kein JSON, kein SSE: finishRaw meldet "keine Antwort" statt eines
       // SyntaxErrors, der wie ein Netzfehler aussähe.
-      if (!raw.trim()) throw error;
-      return finishRaw(raw, onDelta, onUsage);
+      throw error;
     }
     const text = textAusKoerper(parsed);
     const usage = usageFromMessage(parsed);
@@ -716,11 +722,12 @@ function selectTransport(live, fetchImpl) {
   return globalThis.fetch;
 }
 
-function raceAbort(work, timeoutMs, abortOrExtras) {
+function raceAbort(work, timeoutMs, abortOrExtras, abbruch) {
   work.catch(() => {});
   const extras = abortOrExtras && typeof abortOrExtras === "object" ? abortOrExtras : null;
   const abort = extras ? extras.abort : abortOrExtras;
   const lang = Boolean(extras && Number(extras.dauerMs) > 0);
+  const abbruchListe = abbruch ? [abbruch] : [];
   if (!lang) {
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -731,17 +738,35 @@ function raceAbort(work, timeoutMs, abortOrExtras) {
         reject(error);
       }, timeoutMs);
     });
-    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+    return Promise.race([work, timeout, ...abbruchListe]).finally(() => clearTimeout(timer));
   }
 
   let settled = false;
   let hardTimer;
   let idleTimer;
   let wartenTimer;
+  let stilleTimer = null;
   let idleReject = null;
   const idle = new Promise((_, reject) => {
     idleReject = reject;
   });
+  // Stille-Frist: die Leerlauf-Frist wird erst nach dem ersten Byte armed --
+  // davor haengt eine Anfrage, die nie in Gang kommt, bis zum Hardtimer
+  // (zehn Minuten) ohne brauchbare Meldung fest. Der Stille-Bruch bricht die
+  // Anfrage selbst ab, damit hinterher keine Zombie-Verbindung weiterlaeuft.
+  const stilleMs = Number(extras.stilleMs) > 0 ? Number(extras.stilleMs) : 0;
+  const stille = stilleMs > 0
+    ? new Promise((_, reject) => {
+      stilleTimer = setTimeout(() => {
+        if (settled) return;
+        if (typeof abort === "function") abort();
+        const error = new Error("stille");
+        error.name = "StilleAbbruch";
+        error.stilleMs = stilleMs;
+        reject(error);
+      }, stilleMs);
+    })
+    : null;
   const fireAbort = () => {
     if (settled) return null;
     if (typeof abort === "function") abort();
@@ -770,6 +795,10 @@ function raceAbort(work, timeoutMs, abortOrExtras) {
     if (settled) return;
     clearTimeout(wartenTimer);
     wartenTimer = null;
+    // Erstes Byte da: die Stille-Frist hat ihre Aufgabe erfuellt, danach
+    // entscheidet die Leerlauf-Frist.
+    clearTimeout(stilleTimer);
+    stilleTimer = null;
     armIdle();
   };
   if (typeof extras.onWarten === "function") {
@@ -779,11 +808,13 @@ function raceAbort(work, timeoutMs, abortOrExtras) {
       extras.onWarten("Die Aufgabe läuft noch.");
     }, delay);
   }
-  return Promise.race([work, hard, idle]).finally(() => {
+  const stilleListe = stille ? [stille] : [];
+  return Promise.race([work, hard, idle, ...stilleListe, ...abbruchListe]).finally(() => {
     settled = true;
     clearTimeout(hardTimer);
     clearTimeout(idleTimer);
     clearTimeout(wartenTimer);
+    clearTimeout(stilleTimer);
   });
 }
 
@@ -797,7 +828,7 @@ function transportCode(error) {
   return "";
 }
 
-function mapTransportError(error) {
+function mapTransportError(error, phase = "") {
   if (error instanceof UnitedShareError) throw error;
   if (error && error.name === "AbortError") {
     throw new UnitedShareError("Das Modell hat nicht rechtzeitig geantwortet.", 0);
@@ -808,7 +839,9 @@ function mapTransportError(error) {
     throw new UnitedShareError("Die Antwort von api.unitedshare.ai war nicht lesbar.", 0);
   }
   if (RESET_CODES.has(transportCode(error))) {
-    throw new UnitedShareError("Die Verbindung endete, während die Aufgabe noch lief.", 0);
+    const code = transportCode(error);
+    const stelle = phase ? ` (${phase}; ${code})` : ` (${code})`;
+    throw new UnitedShareError(`Die Verbindung wurde unterbrochen${stelle}. Der Dienst könnte den Auftrag bereits verarbeitet haben. Bitte Ergebnis und ausgeführte Schritte prüfen, bevor du es erneut versuchst.`, 0);
   }
   throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
 }
@@ -911,7 +944,7 @@ async function postJson({
   return typeof response.json === "function" ? response.json() : response;
 }
 
-const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-mobil2026.1"];
+const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-sema-coder2026.1", "rmxos-sema-iso2026.1", "rmxos-mobil2026.1"];
 
 function isObsidianModel(id) {
   return OBSIDIAN_MODELS.includes(String(id || "").trim());
@@ -1022,6 +1055,16 @@ async function completeChat({
   return parseContent(data);
 }
 
+// Ein Auftrag kann von aussen abgebrochen werden -- der Stopp-Knopf in der
+// Chat-Ansicht. Die Meldung wird markiert (abgebrochen), damit die Ansicht
+// offene Schritte als "abgebrochen" statt "fehlgeschlagen" setzt und beim
+// Nutzerabbruc nicht doppelt alarmiert.
+function abgebrochenFehler() {
+  const error = new UnitedShareError("Der Auftrag wurde abgebrochen.", 0);
+  error.abgebrochen = true;
+  return error;
+}
+
 async function completeMessages({
   baseUrl,
   apiKey,
@@ -1030,14 +1073,18 @@ async function completeMessages({
   turns,
   timeoutMs = 90000,
   dauerMs = 0,
+  stilleMs = 0,
   wartenNachMs,
   fetchImpl = globalThis.fetch,
   onDelta,
   onMeta,
   onWarten,
+  signal,
   live = false,
   form,
+  maxTokens = 1200,
 }) {
+  if (signal && signal.aborted) throw abgebrochenFehler();
   if (!model) throw new UnitedShareError("Die Modell-Kennung fehlt.", 0);
   if (!apiKey) throw new UnitedShareError("Der UnitedShare-API-Key fehlt.", 0);
   const transport = selectTransport(live, fetchImpl);
@@ -1045,35 +1092,99 @@ async function completeMessages({
     throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
   }
   const alsChat = form === "chat";
+  const antwortTokens = Number(maxTokens);
+  if (!Number.isInteger(antwortTokens) || antwortTokens < 1 || antwortTokens > 8192) {
+    throw new UnitedShareError("Die Antwortlänge muss zwischen 1 und 8192 Tokens liegen.", 0);
+  }
   const payload = JSON.stringify(alsChat
-    ? buildChatBody({ model, system, turns })
-    : buildAnthropicBody({ model, system, turns }));
+    ? buildChatBody({ model, system, turns, maxTokens: antwortTokens })
+    : buildAnthropicBody({ model, system, turns, maxTokens: antwortTokens }));
+  // Bytes sind eine technische Obergrenze, keine modellgenaue Tokenzählung.
+  // Nicht still abschneiden: sonst könnten Werkzeugergebnisse unvollständig sein.
+  const payloadBytes = utf8ByteLength(payload);
+  if (payloadBytes > 128000) {
+    const liste = Array.isArray(turns) ? turns : [];
+    const letzter = letzterUserTurnIndex(liste);
+    let verlauf = 0;
+    let werkzeuge = 0;
+    let dateien = 0;
+    for (let i = 0; i < liste.length; i += 1) {
+      const turn = liste[i];
+      if (!turn || (turn.role !== "user" && turn.role !== "assistant")) continue;
+      const text = String(turn.content || "");
+      if (turn.role === "user" && text.startsWith("Ergebnis der Tresor-Aktion.")) werkzeuge += utf8ByteLength(text);
+      else verlauf += utf8ByteLength(text);
+      if (i === letzter && turn.role === "user") {
+        for (const file of turn.files || []) if (file && file.path) dateien += utf8ByteLength(linkedNoteText(file));
+      }
+    }
+    const systemBytes = utf8ByteLength(typeof system === "string" ? system : "");
+    throw new UnitedShareError(`Der Auftrag ist zu groß: ${payloadBytes} von maximal 128.000 UTF-8-Bytes. Textanteile ohne JSON-Verpackung: Verlauf ${verlauf}, Dateien ${dateien}, Werkzeugergebnisse ${werkzeuge}, System ${systemBytes} Bytes. Bitte Kontext oder Gespräch verkleinern und erneut versuchen.`, 0);
+  }
 
   const einVersuch = async () => {
+    if (signal && signal.aborted) throw abgebrochenFehler();
+    let phase = "vor Übergabe der Antwort an das Plugin";
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const lang = Number(dauerMs) > 0;
     const frist = {
       dauerMs: Number(dauerMs),
+      stilleMs: Number(stilleMs) > 0 ? Number(stilleMs) : 0,
       wartenNachMs,
       onWarten,
       abort() {
         if (controller) controller.abort();
       },
     };
+    // Der Abbruch von aussen wird in den Wettlauf selbst eingerechnet. Das
+    // innere Abbruchsignal kann eine Übertragung ignorieren (die Anfrage
+    // laeuft weiter), dann haengt der Auftrag trotz Stopp -- deshalb zaehlt
+    // das Signal als eigenes Rennen, nicht nur als Hinweis an den Transport.
+    let abbruchLos = null;
+    const abbruch = signal
+      ? new Promise((_, reject) => {
+        abbruchLos = () => {
+          const error = new Error("abbruch");
+          error.name = "Abgebrochen";
+          reject(error);
+        };
+      })
+      : null;
+    // Zwischen der ersten Pruefung oben und dem Eintragen des Zuhoerers kann
+    // das Signal bereits gefeuert haben: addEventListener faengt ein
+    // vergangenes Ereignis nicht nach. Ohne die Nachpruefung liefe der
+    // Auftrag trotz Stopp bis zur harten Frist weiter -- genau das Haengen,
+    // das hier verschwinden soll. Die Kindprozess-Pfade pruefen aus demselben
+    // Grund unmittelbar vor dem Eintragen.
+    let abbruchZuhoerer = () => {
+      if (controller) controller.abort();
+      if (abbruchLos) abbruchLos();
+    };
+    if (signal && typeof signal.addEventListener === "function") {
+      if (signal.aborted) {
+        abbruchZuhoerer();
+        throw abgebrochenFehler();
+      }
+      signal.addEventListener("abort", abbruchZuhoerer, { once: true });
+    } else {
+      abbruchZuhoerer = null;
+    }
     const work = transport((alsChat ? chatCompletionsUrl : messagesUrl)(baseUrl), {
       method: "POST",
       headers: jsonPostHeaders(apiKey, payload),
       body: payload,
       signal: controller ? controller.signal : undefined,
     }).then(async (response) => {
+      phase = "nach den Antwort-Headern";
       if (!response || !response.ok) await drainError(response);
       let usage = null;
       let fenster = null;
       const text = await readVisible(response, onDelta, (next) => {
         usage = next;
-      }, lang ? () => {
+      }, () => {
+        phase = "beim Lesen der Antwort";
         if (typeof frist.touch === "function") frist.touch();
-      } : undefined, (next) => {
+      }, (next) => {
         fenster = next;
       });
       const limits = mergeLimits(limitsFromHeaders(response && response.headers), fenster && fenster.limits);
@@ -1082,22 +1193,37 @@ async function completeMessages({
       return text;
     });
     try {
-      return await raceAbort(work, timeoutMs, lang ? frist : frist.abort);
+      return await raceAbort(work, timeoutMs, lang ? frist : frist.abort, abbruch);
     } catch (error) {
+      // Reihenfolge ist Pflicht: erst der Abbruch von aussen, dann die
+      // Stille-Frist, erst danach die allgemeine Zeitfrist-Meldung.
+      // 1) Von aussen abgebrochen: Stopp-Knopf. Eigene Meldung, keine Wiederholung.
+      // 2) Stille-Frist: benannte Meldung statt "nicht rechtzeitig geantwortet".
+      if (signal && signal.aborted) throw abgebrochenFehler();
+      if (error && error.name === "StilleAbbruch") {
+        const sekunden = Math.max(1, Math.round(Number(error.stilleMs) / 1000));
+        throw new UnitedShareError(`Die Antwort kam nicht in Gang: ${sekunden} Sekunden lang kam nichts vom Modell. Der Auftrag wurde abgebrochen, bevor das Modell etwas geliefert hat. Bitte erneut versuchen.`, 0);
+      }
       if (controller && controller.signal.aborted) {
         const abortError = new Error("aborted");
         abortError.name = "AbortError";
         mapTransportError(abortError);
       }
-      mapTransportError(error);
+      mapTransportError(error, phase);
+    } finally {
+      // Kein Zuhoerer bleibt am Signal zurueck. Ein Auftrag ruft mehrfach auf
+      // (Runden, Wiederholungen), und jeder liegengebliebene Zuhoerer feuerte
+      // beim spaeteren Stopp mit.
+      if (abbruchZuhoerer && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", abbruchZuhoerer);
+      }
     }
   };
 
   // Null Bytes auf der Leitung sind von einem Verbindungsabbruch waehrend
   // der Denkpause nicht zu unterscheiden (readChunks markiert diesen Fall
-  // als wiederholbar). Ein einziger stiller zweiter Versuch kostet nichts,
-  // weil nichts erzeugt wurde, und behebt einen reinen Netz-Zufall, statt
-  // ihn als "das Modell hat nicht geantwortet" zu melden.
+  // als wiederholbar). Ein zweiter Versuch kann serverseitig dennoch bereits
+  // Arbeit oder Kosten auslösen; ein leeres Ergebnis beweist das Gegenteil nicht.
   try {
     return await einVersuch();
   } catch (error) {
@@ -1513,7 +1639,7 @@ function ohneErwaehnung(rel) {
 // Injection. Deshalb fragen alle drei vor der Ausfuehrung ueber options.confirm
 // nach, mit der vollen Aktion als Argument (Pfad, Inhalt, Ziel-Peer, Richtung).
 // write ist haeufiger und bekommt die gleiche Nachfrage nur, wenn der Aufrufer
-// options.requireWriteConfirm setzt (vom Einstellungs-Schalter, Standard aus).
+// options.requireWriteConfirm setzt (bei neuen Plugin-Installationen Standard an).
 //
 // Fail-closed: ohne options.confirm wird abgelehnt, nicht erlaubt. Ein Aufrufer
 // muss Zustimmung ausdruecklich herstellen -- eine "Bestaetigung", die ohne
@@ -1527,8 +1653,20 @@ async function keineBestaetigung() {
 async function executeVaultAction(action, host, options) {
   const kind = action && action.action;
   const rawPath = action && typeof action.path === "string" ? action.path : "";
-  const confirm = options && typeof options.confirm === "function" ? options.confirm : keineBestaetigung;
+  const originalConfirm = options && typeof options.confirm === "function" ? options.confirm : keineBestaetigung;
+  let ausgang = "fertig";
+  const confirm = async (aktion) => {
+    if (options && typeof options.onWartet === "function") options.onWartet();
+    const erlaubt = await originalConfirm(aktion);
+    if (!erlaubt) ausgang = "abgelehnt";
+    else if (options && typeof options.onFreigegeben === "function") options.onFreigegeben();
+    return erlaubt;
+  };
   const requireWriteConfirm = Boolean(options && options.requireWriteConfirm);
+  // Ein Signal vom Auftraggeber (Stopp-Knopf) reicht an die laufenden
+  // Programme durch. Lesen/Schreiben behandeln es nicht -- sie sind schnell
+  // und im Tresor; gestartete Programme und reemax-Laeufe sterben hart.
+  const laufSignal = options && options.signal ? options.signal : null;
   try {
     if (!host) throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
     if (kind === "list") {
@@ -1545,18 +1683,19 @@ async function executeVaultAction(action, host, options) {
       const rel = assertVaultRelative(rawPath);
       if (typeof host.meshJoin !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       if (!(await confirm(action))) return `Ergebnis mesh-join ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
-      const output = await host.meshJoin(rel);
-      return `Ergebnis mesh-join ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
+        const output = await host.meshJoin(rel, { signal: laufSignal });
+        return `Ergebnis mesh-join ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
     if (kind === "sync") {
       if (typeof host.sync !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const peer = action && typeof action.peer === "string" ? action.peer : "";
       const direction = action && typeof action.direction === "string" ? action.direction : "";
       if (!(await confirm(action))) return `Ergebnis sync ${direction} ${peer}:\n${BESTAETIGUNG_ABGELEHNT}`;
-      const output = await host.sync({ peer, direction });
+      const output = await host.sync({ peer, direction, signal: laufSignal });
       return `Ergebnis sync ${direction} ${peer}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
     if (kind !== "read" && kind !== "write" && kind !== "run") {
+      ausgang = "fehlgeschlagen";
       return "Ergebnis: unbekannte Aktion.";
     }
     const rel = assertVaultRelative(rawPath);
@@ -1575,14 +1714,26 @@ async function executeVaultAction(action, host, options) {
           return `Ergebnis read ${ohneAt}:\n${clipText(zweiter, READ_LIMIT)}`;
         }
       }
+      ausgang = "fehlgeschlagen";
       return `Ergebnis read ${rel}:\nDie Datei liegt nicht im Tresor.`;
     }
     if (kind === "write") {
       if (typeof host.write !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const content = typeof action.content === "string" ? action.content : "";
-      if (content.length > WRITE_LIMIT) return `Ergebnis write ${rel}:\nDer Inhalt ist zu lang.`;
-      if (requireWriteConfirm && !(await confirm(action))) {
-        return `Ergebnis write ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
+      if (content.length > WRITE_LIMIT) { ausgang = "fehlgeschlagen"; return `Ergebnis write ${rel}:\nDer Inhalt ist zu lang.`; }
+      if (requireWriteConfirm) {
+        const lesen = typeof host.readForWrite === "function" ? host.readForWrite.bind(host)
+          : typeof host.read === "function" ? host.read.bind(host) : null;
+        if (!lesen) throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        const vorher = await lesen(rel);
+        if (vorher !== null && typeof vorher !== "string") throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        if (!(await confirm({ ...action, path: rel, previousContent: vorher }))) {
+          return `Ergebnis write ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
+        }
+        if (await lesen(rel) !== vorher) {
+          ausgang = "fehlgeschlagen";
+          return `Ergebnis write ${rel}:\nDie Datei wurde seit der Vorschau geändert. Es wurde nichts geschrieben; bitte erneut prüfen.`;
+        }
       }
       await host.write(rel, content);
       return `Ergebnis write ${rel}:\ngeschrieben, ${content.length} Zeichen.`;
@@ -1591,21 +1742,26 @@ async function executeVaultAction(action, host, options) {
     if (!(await confirm(action))) return `Ergebnis run ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
     const ohneAt = ohneErwaehnung(rel);
     if (!ohneAt) {
-      const output = await host.run(rel);
+      const output = await host.run(rel, { signal: laufSignal });
       return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
     try {
-      const output = await host.run(rel);
+      const output = await host.run(rel, { signal: laufSignal });
       return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     } catch (_err) {
       // Wie beim Lesen: das @ kann aus der Eingabe stammen. Der Pfad mit @
       // hat Vorrang, erst wenn er scheitert, zaehlt der ohne.
-      const output = await host.run(ohneAt);
+      const output = await host.run(ohneAt, { signal: laufSignal });
       return `Ergebnis run ${ohneAt}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
   } catch (error) {
+    ausgang = error && error.abgebrochen ? "abgebrochen" : "fehlgeschlagen";
     const message = error instanceof UnitedShareError ? error.message : "Die Aktion ist fehlgeschlagen.";
     return `Ergebnis ${kind || "aktion"} ${rawPath}:\n${message}`;
+  } finally {
+    if (options && typeof options.onAusgang === "function") {
+      try { options.onAusgang(ausgang); } catch (_err) { /* Anzeige ist Beiwerk. */ }
+    }
   }
 }
 
@@ -1619,21 +1775,44 @@ function programmStarten({
   onAktiv,
   startFehler,
   fristFehler,
+  signal,
 }) {
   return new Promise((resolve, reject) => {
     let index = 0;
     let settled = false;
     let aktivGemeldet = false;
+    let child = null;
+    let timer = null;
     const finish = (err, value) => {
       if (settled) return;
       settled = true;
       if (err) reject(err);
       else resolve(value);
     };
+    // Abbruch von aussen (Stopp-Knopf): das Kindprogramm stirbt unverzueglich
+    // mit SIGKILL -- ein Kind, das auf einen langen Ausgang wartet, wuerde
+    // sonst weiterlaufen und weiter in den Tresor schreiben. Nach dem Abbruch
+    // zaehlt nichts mehr, was das Programm noch schafft.
+    const externAbbrechen = () => {
+      if (settled) return;
+      if (timer) clearTimeout(timer);
+      if (child && typeof child.kill === "function") {
+        try { child.kill("SIGKILL"); } catch (_err) { /* Tot ist tot. */ }
+      }
+      finish(abgebrochenFehler());
+    };
+    if (signal) {
+      if (signal.aborted) {
+        externAbbrechen();
+        return;
+      }
+      if (typeof signal.addEventListener === "function") {
+        signal.addEventListener("abort", externAbbrechen, { once: true });
+      }
+    }
     const versuch = () => {
       if (settled) return;
       const runner = kandidaten[index];
-      let child;
       try {
         child = spawn(runner, [datei], {
           cwd,
@@ -1662,7 +1841,7 @@ function programmStarten({
       let timedOut = false;
       let weiter = false;
       const frist = timeoutMs == null ? SCRIPT_DAUER_MS : timeoutMs;
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         timedOut = true;
         if (typeof child.kill === "function") child.kill("SIGKILL");
       }, frist);
@@ -1701,6 +1880,7 @@ function runVaultFile({
   spawnImpl,
   env,
   onAktiv,
+  signal,
 } = {}) {
   let datei = "";
   let ext = "";
@@ -1729,6 +1909,7 @@ function runVaultFile({
     childEnv,
     timeoutMs,
     onAktiv,
+    signal,
     startFehler: "Das Programm ließ sich nicht starten.",
     fristFehler: "Das Programm wurde nach der Frist beendet.",
   });
@@ -1753,6 +1934,7 @@ function runReemax(args, {
   spawnImpl,
   env,
   onAktiv,
+  signal,
 } = {}) {
   const spawn = spawnImpl || nodeSpawn();
   if (typeof spawn !== "function") throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
@@ -1760,7 +1942,35 @@ function runReemax(args, {
   const childEnv = kindUmgebung(sourceEnv);
   const command = "reemax";
   return new Promise((resolve, reject) => {
-    let child;
+    let child = null;
+    let timer = null;
+    let settled = false;
+    let timedOut = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    // Abbruch von aussen (Stopp-Knopf): dasselbe Verfahren wie in
+    // programmStarten -- SIGKILL, bevor das Programm weiterschreiben kann.
+    const externAbbrechen = () => {
+      if (settled) return;
+      if (child && typeof child.kill === "function") {
+        try { child.kill("SIGKILL"); } catch (_err) { /* Tot ist tot. */ }
+      }
+      finish(abgebrochenFehler());
+    };
+    if (signal) {
+      if (signal.aborted) {
+        externAbbrechen();
+        return;
+      }
+      if (typeof signal.addEventListener === "function") {
+        signal.addEventListener("abort", externAbbrechen, { once: true });
+      }
+    }
     try {
       child = spawn(command, args, {
         cwd,
@@ -1783,17 +1993,8 @@ function runReemax(args, {
     };
     child.stdout.on("data", push);
     child.stderr.on("data", push);
-    let settled = false;
-    let timedOut = false;
-    const finish = (err, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) reject(err);
-      else resolve(value);
-    };
     const frist = timeoutMs == null ? SCRIPT_DAUER_MS : timeoutMs;
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
       if (typeof child.kill === "function") child.kill("SIGKILL");
     }, frist);
@@ -1906,7 +2107,7 @@ function ergebnisKurz(text) {
   return `${einzeilig.slice(0, ERGEBNIS_LAENGE - 1)}…`;
 }
 
-function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
+function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined, id = undefined) {
   if (typeof onSchritt !== "function") return;
   try {
     const meldung = {
@@ -1915,6 +2116,7 @@ function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
       text: schrittText(action),
       zeichen: schrittZeichen(action && action.action),
     };
+    if (id !== undefined) meldung.id = id;
     // Nur die Fertig-Meldung traegt ein Ergebnis -- vorher gibt es nichts zu
     // melden, und ein leeres Feld waere ein Versprechen ohne Deckung.
     if (ergebnis !== undefined) meldung.ergebnis = ergebnisKurz(ergebnis);
@@ -1925,7 +2127,7 @@ function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
 }
 
 async function runVaultInstruction({
-  turns, complete, host, maxSteps = 6, onSchritt = null, confirm = null, requireWriteConfirm = false,
+  turns, complete, host, maxSteps = 6, onSchritt = null, onRunde = null, confirm = null, requireWriteConfirm = false, signal = null,
 }) {
   const thread = [];
   for (const turn of turns || []) {
@@ -1939,8 +2141,35 @@ async function runVaultInstruction({
   const done = new Set();
   let hinweisGegeben = false;
   let last = "";
+  let werkzeugSchritte = 0;
+  let schrittId = 0;
+  // Jede Runde meldet sich vor dem Modellaufruf: erst nach einer
+  // ausgeführten Werkzeugaktion sichtbar ("Runde n"), sonst bleibt es bei der
+  // ruhigen Stille-Frist der ersten Runde. So weiss der Nutzer in einer
+  // mehrstufigen Schleife, dass es weitergeht, und wie lange schon.
+  const start = Date.now();
   for (let step = 0; step < limit; step += 1) {
-    const reply = await complete(thread);
+    if (typeof onRunde === "function") {
+      const runde = step + 1;
+      const sekunden = Math.round((Date.now() - start) / 1000);
+      try {
+        onRunde({ runde, stand: runde - 1, von: limit, sekunden, folge: werkzeugSchritte > 0 });
+      } catch (_err) {
+        /* Die Rueckmeldung darf den Auftrag nie unterbrechen. */
+      }
+    }
+    let reply;
+    try {
+      reply = await complete(thread);
+    } catch (error) {
+      // Der Hinweis gilt einem Fehlschlag, nicht einem Nutzerabbruch: wer
+      // selbst stoppt, weiss, dass Vorarbeit stehenbleibt -- ein angehaengter
+      // Warnsatz machte die klare Meldung nur unscharf.
+      if (werkzeugSchritte > 0 && error instanceof Error && !error.abgebrochen) {
+        error.message += " Achtung: Werkzeugschritte wurden bereits bearbeitet und nicht automatisch rückgängig gemacht. Vor erneutem Versuch den Tresor und die Schrittliste prüfen.";
+      }
+      throw error;
+    }
     last = typeof reply === "string" ? reply : "";
     const protocol = parseVaultActions(last);
     const actions = protocol.length
@@ -1969,10 +2198,20 @@ async function runVaultInstruction({
     }
     const results = [];
     for (const action of actions) {
-      meldeSchritt(onSchritt, "laeuft", action);
-      const ergebnis = await executeVaultAction(action, host, { confirm, requireWriteConfirm });
+      const id = ++schrittId;
+      const brauchtFreigabe = ["run", "mesh-join", "sync"].includes(action.action) || (action.action === "write" && requireWriteConfirm);
+      meldeSchritt(onSchritt, brauchtFreigabe ? "geplant" : "laeuft", action, undefined, id);
+      let ausgang = "fehlgeschlagen";
+      const ergebnis = await executeVaultAction(action, host, {
+        confirm, requireWriteConfirm,
+        signal,
+        onWartet: () => meldeSchritt(onSchritt, "wartet", action, undefined, id),
+        onFreigegeben: () => meldeSchritt(onSchritt, "laeuft", action, undefined, id),
+        onAusgang: (zustand) => { ausgang = zustand; },
+      });
+      werkzeugSchritte += 1;
       results.push(ergebnis);
-      meldeSchritt(onSchritt, "fertig", action, ergebnis);
+      meldeSchritt(onSchritt, ausgang, action, ergebnis, id);
     }
     thread.push({ role: "assistant", content: last });
     thread.push({
@@ -5064,7 +5303,18 @@ function _fluentScriptSemantik(k) {
 // Ketten ({kopf, id, aufrufe: [{aufruf, args, benannt}, ...]}) oder wirft
 // UnitedShareError mit einer auf die verletzte Regel zeigenden Meldung.
 function fluentScriptParsen(text) {
-  const tokens = _fluentScriptTokenisieren(String(text ?? ""));
+  const quelle = String(text ?? "");
+  // Häufiger Schreibfehler (Grammatik: root ::= kette (";" kette)*): hinter
+  // dem letzten Aufruf darf kein Semikolon stehen. Vor dem Tokenisieren
+  // abgefangen, damit die Meldung den Fehler benennt statt "Kopfverb
+  // erwartet". Ein ; in Anführungszeichen bleibt unberührt -- der lauteste
+  // Text endet mit ")".
+  if (/;\s*$/.test(quelle)) {
+    throw new UnitedShareError(
+      "FluentScript: Hinter dem letzten Aufruf steht ein Semikolon -- nach jedem ; muss eine weitere Kette folgen. Entferne das letzte Semikolon.",
+    );
+  }
+  const tokens = _fluentScriptTokenisieren(quelle);
   const p = _fluentScriptParser(tokens);
   const ketten = [p.kette()];
   while (p.blick().art === "semi") {

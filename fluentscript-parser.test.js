@@ -11,6 +11,26 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { fluentScriptAlsZeilen, fluentScriptParsen, fluentScriptKarten, UnitedShareError } = require("./unitedshare-core");
 
+test("eine Quelle mit mehreren Ketten bleibt gleichbedeutend, Leerzeilen trennen nicht", () => {
+  assert.deepEqual(fluentScriptAlsZeilen(fluentScriptParsen('result("a").ok().value("x"); result("b").ok().value("y"); result("c").ok().value("z")')).map((z) => z.id), ["a", "b", "c"]);
+});
+
+test("hinter dem letzten Aufruf ist ein Semikolon ein benannter Fehler", () => {
+  assert.throws(
+    () => fluentScriptParsen('result("a").ok().value("x");\n\n'),
+    (error) => {
+      assert.match(error.message, /Semikolon/);
+      assert.doesNotMatch(error.message, /Kopfverb/);
+      return true;
+    },
+  );
+  // Recht häufig: Semikolon nur am Zeilenende des letzten Aufrufs.
+  assert.throws(() => fluentScriptParsen('result("a").ok().value("x") ;'), /Semikolon/);
+  assert.throws(() => fluentScriptParsen(";"), /Semikolon/);
+  // Ein Semikolon in Anführungszeichen ist Daten, kein Trenner.
+  assert.equal(fluentScriptParsen('result("r").ok().value("a;")')[0].kopf, "result");
+});
+
 test("fluentScriptParsen: Kette mit ID, benannten und positionalen Argumenten", () => {
   const ketten = fluentScriptParsen('task("t1").goal("x").give(a: "b", n: 3).to(cortex)');
   assert.equal(ketten.length, 1);

@@ -1,5 +1,137 @@
 "use strict";
 
+// Nur ausdrücklich benannte, einfache Properties werden lokal aufgelöst.
+function privateVorlageVorbereiten(frontmatter, vorlage) {
+  if (!frontmatter || frontmatter.unitedshare_privacy !== "template") {
+    throw new Error("Diese Notiz muss unitedshare_privacy: template setzen.");
+  }
+  const felder = frontmatter.unitedshare_private_felder;
+  if (!Array.isArray(felder) || !felder.length || felder.length > 100) {
+    throw new Error("unitedshare_private_felder muss eine nichtleere Liste sein.");
+  }
+  const werte = new Map();
+  const namen = new Set();
+  for (const [index, feld] of felder.entries()) {
+    if (typeof feld !== "string" || !feld || namen.has(feld) || feld.startsWith("unitedshare_") || !Object.hasOwn(frontmatter, feld)) {
+      throw new Error("Die Liste privater Eigenschaften ist ungültig.");
+    }
+    namen.add(feld);
+    const wert = frontmatter[feld];
+    if (!(typeof wert === "string" || typeof wert === "boolean" || (typeof wert === "number" && Number.isFinite(wert)))) {
+      throw new Error("Private Eigenschaften müssen Text, Zahlen oder Wahrheitswerte sein.");
+    }
+    if (String(wert).includes("{{") || String(wert).includes("}}")) {
+      throw new Error("Private Werte dürfen keine Platzhalter-Klammern enthalten.");
+    }
+    werte.set(`VAR_${index + 1}`, String(wert));
+  }
+  const rohtext = String(vorlage || "").trim();
+  if (!rohtext) throw new Error("Bitte eine Cloud-Vorlage eingeben.");
+  const text = eigenschaftsPlatzhalterNormalisieren(rohtext, felder);
+  pruefePlatzhalter(text, werte);
+  // Dies ist nur eine Zusatzprüfung, keine automatische Anonymisierung.
+  for (const wert of werte.values()) {
+    if (wert.length >= 3 && text.includes(wert)) throw new Error("Die Vorlage enthält einen privaten Wert. Bitte durch einen Platzhalter ersetzen.");
+  }
+  return { text, werte };
+}
+
+function pruefePlatzhalter(text, werte) {
+  const rest = String(text).replace(/\{\{([^{}]+)\}\}/g, (_ganz, name) => {
+    if (!werte.has(name)) throw new Error("Unbekannter Platzhalter: " + name);
+    return "";
+  });
+  if (rest.includes("{{") || rest.includes("}}")) throw new Error("Ungültiger Platzhalter.");
+}
+
+// {{$kunde}} wird nur lokal zu {{VAR_n}} umgezeichnet: Der Name der
+// Eigenschaft verlässt den Rechner nie, gesendet wird allein die Nummer.
+// Form wie in rmxos-Codeblöcken; Lesefehlern (unbekannter Eigenschaft) wird
+// hier nicht mit Schweigen begegnet, sondern abgelehnt.
+function eigenschaftsPlatzhalterNormalisieren(text, felder) {
+  return String(text).replace(/\{\{\$\s*([^{}]+?)\s*\}\}/gu, (original, roh) => {
+    const name = roh.trim();
+    const stelle = felder.indexOf(name);
+    if (stelle === -1) {
+      throw new Error(
+        "Unbekannter Eigenschafts-Platzhalter: {{$" + name +
+        "}}. Erlaubt sind die Namen aus unitedshare_private_felder.",
+      );
+    }
+    return `{{VAR_${stelle + 1}}}`;
+  });
+}
+
+function privateAntwortAufloesen(antwort, werte) {
+  const text = String(antwort || "");
+  pruefePlatzhalter(text, werte);
+  return text.replace(/\{\{([^{}]+)\}\}/g, (_ganz, name) => werte.get(name));
+}
+// Erst nach dem Parsen ersetzen: Eigenschaften sind Daten, kein FluentScript.
+//
+// Eigenschaften duerfen auf andere Eigenschaften verweisen. Beispiel:
+//   name: Mike
+//   surname: Baumgart
+//   owner: "{{$name}} {{$surname}}"
+// Dann loest "{{$owner}}" spaeter "Mike Baumgart" auf -- auch innerhalb des
+// Codeblocks. Die Aufloesung ist rekursiv, aber begrenzt: Zyklen
+// (a -> b -> a) und zu tiefe Ketten fallen sichtbar auf den Platzhalter
+// zurueck, statt still zu verschwinden oder endlos zu laufen.
+const MAX_TIEFE = 8;
+
+function istEinfach(value) {
+  return (
+    typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function rmxosEigenschaftenErsetzen(ketten, frontmatter) {
+  const eigenschaften = frontmatter && typeof frontmatter === "object" ? frontmatter : {};
+
+  // Loest den Platzhaltertext eines Frontmatter-Werts auf, mit Schutz vor
+  // Zyklen und vor zu tiefer Verschachtelung. `gesehen` traegt die bereits
+  // betretenen Eigenschaftsnamen; `tiefe` zaehlt die Stufen.
+  const loese = (name, gesehen, tiefe) => {
+    if (!Object.hasOwn(eigenschaften, name)) return null;
+    if (gesehen.has(name)) return null;
+    if (tiefe >= MAX_TIEFE) return null;
+    const value = eigenschaften[name];
+    if (typeof value === "string") {
+      const naechste = new Set(gesehen);
+      naechste.add(name);
+      return value.replace(/\{\{\$\s*([^{}]+?)\s*\}\}/gu, (original, inner) => {
+        const inName = inner.trim();
+        const aufgeloest = loese(inName, naechste, tiefe + 1);
+        return aufgeloest === null ? original : aufgeloest;
+      });
+    }
+    if (istEinfach(value)) return String(value);
+    // null, Arrays, Objekte: komplexe oder fehlende Werte bleiben sichtbar.
+    return null;
+  };
+
+  const ersetze = (wert) => {
+    if (typeof wert !== "string") return wert;
+    return wert.replace(/\{\{\$\s*([^{}]+?)\s*\}\}/gu, (original, name) => {
+      const key = name.trim();
+      const aufgeloest = loese(key, new Set(), 0);
+      return aufgeloest === null ? original : aufgeloest;
+    });
+  };
+
+  return ketten.map((kette) => ({
+    ...kette,
+    id: ersetze(kette.id),
+    aufrufe: kette.aufrufe.map((aufruf) => ({
+      ...aufruf,
+      args: aufruf.args.map(ersetze),
+      benannt: Object.fromEntries(Object.entries(aufruf.benannt).map(([name, wert]) => [name, ersetze(wert)])),
+    })),
+  }));
+}
+
 const { FileView, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
 class UnitedShareError extends Error {
   constructor(message, status, options = {}) {
@@ -581,6 +713,10 @@ async function readChunks(onDelta, pump, onUsage, onByte, onFenster) {
     }
     return finishRaw(raw, onDelta, onUsage);
   }
+  // Ein Strom, der mit Text endet, ist eine Antwort -- auch ohne sichtbares
+  // Schlusszeichen. Ein Netzabbruch mitten im Strom liefert das bisher
+  // Gelesene: eine Teilantwort ist mehr wert als ein Fehler (siehe den
+  // entsprechenden Test in strom-ohne-body.test.js).
   const text = visible.trim();
   if (!text) throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
   return text;
@@ -620,6 +756,9 @@ async function readVisible(response, onDelta, onUsage, onByte, onFenster) {
     ? String((await response.text()) ?? "")
     : "";
   if (/^(event|data):/m.test(raw)) return readChunks(onDelta, async (push) => push(raw), onUsage, onByte, onFenster);
+  // Ein echter Fetch-Body ist nach text() verbraucht. Niemals anschließend
+  // json() auf demselben Body aufrufen; den bereits gelesenen Text parsen.
+  if (response && typeof response.text === "function") return finishRaw(raw, onDelta, onUsage);
   if (response && typeof response.json === "function") {
     let parsed;
     try {
@@ -627,8 +766,7 @@ async function readVisible(response, onDelta, onUsage, onByte, onFenster) {
     } catch (error) {
       // Kein JSON, kein SSE: finishRaw meldet "keine Antwort" statt eines
       // SyntaxErrors, der wie ein Netzfehler aussähe.
-      if (!raw.trim()) throw error;
-      return finishRaw(raw, onDelta, onUsage);
+      throw error;
     }
     const text = textAusKoerper(parsed);
     const usage = usageFromMessage(parsed);
@@ -717,11 +855,12 @@ function selectTransport(live, fetchImpl) {
   return globalThis.fetch;
 }
 
-function raceAbort(work, timeoutMs, abortOrExtras) {
+function raceAbort(work, timeoutMs, abortOrExtras, abbruch) {
   work.catch(() => {});
   const extras = abortOrExtras && typeof abortOrExtras === "object" ? abortOrExtras : null;
   const abort = extras ? extras.abort : abortOrExtras;
   const lang = Boolean(extras && Number(extras.dauerMs) > 0);
+  const abbruchListe = abbruch ? [abbruch] : [];
   if (!lang) {
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -732,17 +871,35 @@ function raceAbort(work, timeoutMs, abortOrExtras) {
         reject(error);
       }, timeoutMs);
     });
-    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+    return Promise.race([work, timeout, ...abbruchListe]).finally(() => clearTimeout(timer));
   }
 
   let settled = false;
   let hardTimer;
   let idleTimer;
   let wartenTimer;
+  let stilleTimer = null;
   let idleReject = null;
   const idle = new Promise((_, reject) => {
     idleReject = reject;
   });
+  // Stille-Frist: die Leerlauf-Frist wird erst nach dem ersten Byte armed --
+  // davor haengt eine Anfrage, die nie in Gang kommt, bis zum Hardtimer
+  // (zehn Minuten) ohne brauchbare Meldung fest. Der Stille-Bruch bricht die
+  // Anfrage selbst ab, damit hinterher keine Zombie-Verbindung weiterlaeuft.
+  const stilleMs = Number(extras.stilleMs) > 0 ? Number(extras.stilleMs) : 0;
+  const stille = stilleMs > 0
+    ? new Promise((_, reject) => {
+      stilleTimer = setTimeout(() => {
+        if (settled) return;
+        if (typeof abort === "function") abort();
+        const error = new Error("stille");
+        error.name = "StilleAbbruch";
+        error.stilleMs = stilleMs;
+        reject(error);
+      }, stilleMs);
+    })
+    : null;
   const fireAbort = () => {
     if (settled) return null;
     if (typeof abort === "function") abort();
@@ -771,6 +928,10 @@ function raceAbort(work, timeoutMs, abortOrExtras) {
     if (settled) return;
     clearTimeout(wartenTimer);
     wartenTimer = null;
+    // Erstes Byte da: die Stille-Frist hat ihre Aufgabe erfuellt, danach
+    // entscheidet die Leerlauf-Frist.
+    clearTimeout(stilleTimer);
+    stilleTimer = null;
     armIdle();
   };
   if (typeof extras.onWarten === "function") {
@@ -780,11 +941,13 @@ function raceAbort(work, timeoutMs, abortOrExtras) {
       extras.onWarten("Die Aufgabe läuft noch.");
     }, delay);
   }
-  return Promise.race([work, hard, idle]).finally(() => {
+  const stilleListe = stille ? [stille] : [];
+  return Promise.race([work, hard, idle, ...stilleListe, ...abbruchListe]).finally(() => {
     settled = true;
     clearTimeout(hardTimer);
     clearTimeout(idleTimer);
     clearTimeout(wartenTimer);
+    clearTimeout(stilleTimer);
   });
 }
 
@@ -798,7 +961,7 @@ function transportCode(error) {
   return "";
 }
 
-function mapTransportError(error) {
+function mapTransportError(error, phase = "") {
   if (error instanceof UnitedShareError) throw error;
   if (error && error.name === "AbortError") {
     throw new UnitedShareError("Das Modell hat nicht rechtzeitig geantwortet.", 0);
@@ -809,7 +972,9 @@ function mapTransportError(error) {
     throw new UnitedShareError("Die Antwort von api.unitedshare.ai war nicht lesbar.", 0);
   }
   if (RESET_CODES.has(transportCode(error))) {
-    throw new UnitedShareError("Die Verbindung endete, während die Aufgabe noch lief.", 0);
+    const code = transportCode(error);
+    const stelle = phase ? ` (${phase}; ${code})` : ` (${code})`;
+    throw new UnitedShareError(`Die Verbindung wurde unterbrochen${stelle}. Der Dienst könnte den Auftrag bereits verarbeitet haben. Bitte Ergebnis und ausgeführte Schritte prüfen, bevor du es erneut versuchst.`, 0);
   }
   throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
 }
@@ -912,7 +1077,7 @@ async function postJson({
   return typeof response.json === "function" ? response.json() : response;
 }
 
-const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-mobil2026.1"];
+const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-sema-coder2026.1", "rmxos-sema-iso2026.1", "rmxos-mobil2026.1"];
 
 function isObsidianModel(id) {
   return OBSIDIAN_MODELS.includes(String(id || "").trim());
@@ -1023,6 +1188,16 @@ async function completeChat({
   return parseContent(data);
 }
 
+// Ein Auftrag kann von aussen abgebrochen werden -- der Stopp-Knopf in der
+// Chat-Ansicht. Die Meldung wird markiert (abgebrochen), damit die Ansicht
+// offene Schritte als "abgebrochen" statt "fehlgeschlagen" setzt und beim
+// Nutzerabbruc nicht doppelt alarmiert.
+function abgebrochenFehler() {
+  const error = new UnitedShareError("Der Auftrag wurde abgebrochen.", 0);
+  error.abgebrochen = true;
+  return error;
+}
+
 async function completeMessages({
   baseUrl,
   apiKey,
@@ -1031,14 +1206,18 @@ async function completeMessages({
   turns,
   timeoutMs = 90000,
   dauerMs = 0,
+  stilleMs = 0,
   wartenNachMs,
   fetchImpl = globalThis.fetch,
   onDelta,
   onMeta,
   onWarten,
+  signal,
   live = false,
   form,
+  maxTokens = 1200,
 }) {
+  if (signal && signal.aborted) throw abgebrochenFehler();
   if (!model) throw new UnitedShareError("Die Modell-Kennung fehlt.", 0);
   if (!apiKey) throw new UnitedShareError("Der UnitedShare-API-Key fehlt.", 0);
   const transport = selectTransport(live, fetchImpl);
@@ -1046,35 +1225,99 @@ async function completeMessages({
     throw new UnitedShareError("api.unitedshare.ai ist nicht erreichbar.", 0);
   }
   const alsChat = form === "chat";
+  const antwortTokens = Number(maxTokens);
+  if (!Number.isInteger(antwortTokens) || antwortTokens < 1 || antwortTokens > 8192) {
+    throw new UnitedShareError("Die Antwortlänge muss zwischen 1 und 8192 Tokens liegen.", 0);
+  }
   const payload = JSON.stringify(alsChat
-    ? buildChatBody({ model, system, turns })
-    : buildAnthropicBody({ model, system, turns }));
+    ? buildChatBody({ model, system, turns, maxTokens: antwortTokens })
+    : buildAnthropicBody({ model, system, turns, maxTokens: antwortTokens }));
+  // Bytes sind eine technische Obergrenze, keine modellgenaue Tokenzählung.
+  // Nicht still abschneiden: sonst könnten Werkzeugergebnisse unvollständig sein.
+  const payloadBytes = utf8ByteLength(payload);
+  if (payloadBytes > 128000) {
+    const liste = Array.isArray(turns) ? turns : [];
+    const letzter = letzterUserTurnIndex(liste);
+    let verlauf = 0;
+    let werkzeuge = 0;
+    let dateien = 0;
+    for (let i = 0; i < liste.length; i += 1) {
+      const turn = liste[i];
+      if (!turn || (turn.role !== "user" && turn.role !== "assistant")) continue;
+      const text = String(turn.content || "");
+      if (turn.role === "user" && text.startsWith("Ergebnis der Tresor-Aktion.")) werkzeuge += utf8ByteLength(text);
+      else verlauf += utf8ByteLength(text);
+      if (i === letzter && turn.role === "user") {
+        for (const file of turn.files || []) if (file && file.path) dateien += utf8ByteLength(linkedNoteText(file));
+      }
+    }
+    const systemBytes = utf8ByteLength(typeof system === "string" ? system : "");
+    throw new UnitedShareError(`Der Auftrag ist zu groß: ${payloadBytes} von maximal 128.000 UTF-8-Bytes. Textanteile ohne JSON-Verpackung: Verlauf ${verlauf}, Dateien ${dateien}, Werkzeugergebnisse ${werkzeuge}, System ${systemBytes} Bytes. Bitte Kontext oder Gespräch verkleinern und erneut versuchen.`, 0);
+  }
 
   const einVersuch = async () => {
+    if (signal && signal.aborted) throw abgebrochenFehler();
+    let phase = "vor Übergabe der Antwort an das Plugin";
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const lang = Number(dauerMs) > 0;
     const frist = {
       dauerMs: Number(dauerMs),
+      stilleMs: Number(stilleMs) > 0 ? Number(stilleMs) : 0,
       wartenNachMs,
       onWarten,
       abort() {
         if (controller) controller.abort();
       },
     };
+    // Der Abbruch von aussen wird in den Wettlauf selbst eingerechnet. Das
+    // innere Abbruchsignal kann eine Übertragung ignorieren (die Anfrage
+    // laeuft weiter), dann haengt der Auftrag trotz Stopp -- deshalb zaehlt
+    // das Signal als eigenes Rennen, nicht nur als Hinweis an den Transport.
+    let abbruchLos = null;
+    const abbruch = signal
+      ? new Promise((_, reject) => {
+        abbruchLos = () => {
+          const error = new Error("abbruch");
+          error.name = "Abgebrochen";
+          reject(error);
+        };
+      })
+      : null;
+    // Zwischen der ersten Pruefung oben und dem Eintragen des Zuhoerers kann
+    // das Signal bereits gefeuert haben: addEventListener faengt ein
+    // vergangenes Ereignis nicht nach. Ohne die Nachpruefung liefe der
+    // Auftrag trotz Stopp bis zur harten Frist weiter -- genau das Haengen,
+    // das hier verschwinden soll. Die Kindprozess-Pfade pruefen aus demselben
+    // Grund unmittelbar vor dem Eintragen.
+    let abbruchZuhoerer = () => {
+      if (controller) controller.abort();
+      if (abbruchLos) abbruchLos();
+    };
+    if (signal && typeof signal.addEventListener === "function") {
+      if (signal.aborted) {
+        abbruchZuhoerer();
+        throw abgebrochenFehler();
+      }
+      signal.addEventListener("abort", abbruchZuhoerer, { once: true });
+    } else {
+      abbruchZuhoerer = null;
+    }
     const work = transport((alsChat ? chatCompletionsUrl : messagesUrl)(baseUrl), {
       method: "POST",
       headers: jsonPostHeaders(apiKey, payload),
       body: payload,
       signal: controller ? controller.signal : undefined,
     }).then(async (response) => {
+      phase = "nach den Antwort-Headern";
       if (!response || !response.ok) await drainError(response);
       let usage = null;
       let fenster = null;
       const text = await readVisible(response, onDelta, (next) => {
         usage = next;
-      }, lang ? () => {
+      }, () => {
+        phase = "beim Lesen der Antwort";
         if (typeof frist.touch === "function") frist.touch();
-      } : undefined, (next) => {
+      }, (next) => {
         fenster = next;
       });
       const limits = mergeLimits(limitsFromHeaders(response && response.headers), fenster && fenster.limits);
@@ -1083,22 +1326,37 @@ async function completeMessages({
       return text;
     });
     try {
-      return await raceAbort(work, timeoutMs, lang ? frist : frist.abort);
+      return await raceAbort(work, timeoutMs, lang ? frist : frist.abort, abbruch);
     } catch (error) {
+      // Reihenfolge ist Pflicht: erst der Abbruch von aussen, dann die
+      // Stille-Frist, erst danach die allgemeine Zeitfrist-Meldung.
+      // 1) Von aussen abgebrochen: Stopp-Knopf. Eigene Meldung, keine Wiederholung.
+      // 2) Stille-Frist: benannte Meldung statt "nicht rechtzeitig geantwortet".
+      if (signal && signal.aborted) throw abgebrochenFehler();
+      if (error && error.name === "StilleAbbruch") {
+        const sekunden = Math.max(1, Math.round(Number(error.stilleMs) / 1000));
+        throw new UnitedShareError(`Die Antwort kam nicht in Gang: ${sekunden} Sekunden lang kam nichts vom Modell. Der Auftrag wurde abgebrochen, bevor das Modell etwas geliefert hat. Bitte erneut versuchen.`, 0);
+      }
       if (controller && controller.signal.aborted) {
         const abortError = new Error("aborted");
         abortError.name = "AbortError";
         mapTransportError(abortError);
       }
-      mapTransportError(error);
+      mapTransportError(error, phase);
+    } finally {
+      // Kein Zuhoerer bleibt am Signal zurueck. Ein Auftrag ruft mehrfach auf
+      // (Runden, Wiederholungen), und jeder liegengebliebene Zuhoerer feuerte
+      // beim spaeteren Stopp mit.
+      if (abbruchZuhoerer && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", abbruchZuhoerer);
+      }
     }
   };
 
   // Null Bytes auf der Leitung sind von einem Verbindungsabbruch waehrend
   // der Denkpause nicht zu unterscheiden (readChunks markiert diesen Fall
-  // als wiederholbar). Ein einziger stiller zweiter Versuch kostet nichts,
-  // weil nichts erzeugt wurde, und behebt einen reinen Netz-Zufall, statt
-  // ihn als "das Modell hat nicht geantwortet" zu melden.
+  // als wiederholbar). Ein zweiter Versuch kann serverseitig dennoch bereits
+  // Arbeit oder Kosten auslösen; ein leeres Ergebnis beweist das Gegenteil nicht.
   try {
     return await einVersuch();
   } catch (error) {
@@ -1514,7 +1772,7 @@ function ohneErwaehnung(rel) {
 // Injection. Deshalb fragen alle drei vor der Ausfuehrung ueber options.confirm
 // nach, mit der vollen Aktion als Argument (Pfad, Inhalt, Ziel-Peer, Richtung).
 // write ist haeufiger und bekommt die gleiche Nachfrage nur, wenn der Aufrufer
-// options.requireWriteConfirm setzt (vom Einstellungs-Schalter, Standard aus).
+// options.requireWriteConfirm setzt (bei neuen Plugin-Installationen Standard an).
 //
 // Fail-closed: ohne options.confirm wird abgelehnt, nicht erlaubt. Ein Aufrufer
 // muss Zustimmung ausdruecklich herstellen -- eine "Bestaetigung", die ohne
@@ -1528,8 +1786,20 @@ async function keineBestaetigung() {
 async function executeVaultAction(action, host, options) {
   const kind = action && action.action;
   const rawPath = action && typeof action.path === "string" ? action.path : "";
-  const confirm = options && typeof options.confirm === "function" ? options.confirm : keineBestaetigung;
+  const originalConfirm = options && typeof options.confirm === "function" ? options.confirm : keineBestaetigung;
+  let ausgang = "fertig";
+  const confirm = async (aktion) => {
+    if (options && typeof options.onWartet === "function") options.onWartet();
+    const erlaubt = await originalConfirm(aktion);
+    if (!erlaubt) ausgang = "abgelehnt";
+    else if (options && typeof options.onFreigegeben === "function") options.onFreigegeben();
+    return erlaubt;
+  };
   const requireWriteConfirm = Boolean(options && options.requireWriteConfirm);
+  // Ein Signal vom Auftraggeber (Stopp-Knopf) reicht an die laufenden
+  // Programme durch. Lesen/Schreiben behandeln es nicht -- sie sind schnell
+  // und im Tresor; gestartete Programme und reemax-Laeufe sterben hart.
+  const laufSignal = options && options.signal ? options.signal : null;
   try {
     if (!host) throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
     if (kind === "list") {
@@ -1546,18 +1816,19 @@ async function executeVaultAction(action, host, options) {
       const rel = assertVaultRelative(rawPath);
       if (typeof host.meshJoin !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       if (!(await confirm(action))) return `Ergebnis mesh-join ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
-      const output = await host.meshJoin(rel);
-      return `Ergebnis mesh-join ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
+        const output = await host.meshJoin(rel, { signal: laufSignal });
+        return `Ergebnis mesh-join ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
     if (kind === "sync") {
       if (typeof host.sync !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const peer = action && typeof action.peer === "string" ? action.peer : "";
       const direction = action && typeof action.direction === "string" ? action.direction : "";
       if (!(await confirm(action))) return `Ergebnis sync ${direction} ${peer}:\n${BESTAETIGUNG_ABGELEHNT}`;
-      const output = await host.sync({ peer, direction });
+      const output = await host.sync({ peer, direction, signal: laufSignal });
       return `Ergebnis sync ${direction} ${peer}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
     if (kind !== "read" && kind !== "write" && kind !== "run") {
+      ausgang = "fehlgeschlagen";
       return "Ergebnis: unbekannte Aktion.";
     }
     const rel = assertVaultRelative(rawPath);
@@ -1576,14 +1847,26 @@ async function executeVaultAction(action, host, options) {
           return `Ergebnis read ${ohneAt}:\n${clipText(zweiter, READ_LIMIT)}`;
         }
       }
+      ausgang = "fehlgeschlagen";
       return `Ergebnis read ${rel}:\nDie Datei liegt nicht im Tresor.`;
     }
     if (kind === "write") {
       if (typeof host.write !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const content = typeof action.content === "string" ? action.content : "";
-      if (content.length > WRITE_LIMIT) return `Ergebnis write ${rel}:\nDer Inhalt ist zu lang.`;
-      if (requireWriteConfirm && !(await confirm(action))) {
-        return `Ergebnis write ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
+      if (content.length > WRITE_LIMIT) { ausgang = "fehlgeschlagen"; return `Ergebnis write ${rel}:\nDer Inhalt ist zu lang.`; }
+      if (requireWriteConfirm) {
+        const lesen = typeof host.readForWrite === "function" ? host.readForWrite.bind(host)
+          : typeof host.read === "function" ? host.read.bind(host) : null;
+        if (!lesen) throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        const vorher = await lesen(rel);
+        if (vorher !== null && typeof vorher !== "string") throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        if (!(await confirm({ ...action, path: rel, previousContent: vorher }))) {
+          return `Ergebnis write ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
+        }
+        if (await lesen(rel) !== vorher) {
+          ausgang = "fehlgeschlagen";
+          return `Ergebnis write ${rel}:\nDie Datei wurde seit der Vorschau geändert. Es wurde nichts geschrieben; bitte erneut prüfen.`;
+        }
       }
       await host.write(rel, content);
       return `Ergebnis write ${rel}:\ngeschrieben, ${content.length} Zeichen.`;
@@ -1592,21 +1875,26 @@ async function executeVaultAction(action, host, options) {
     if (!(await confirm(action))) return `Ergebnis run ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
     const ohneAt = ohneErwaehnung(rel);
     if (!ohneAt) {
-      const output = await host.run(rel);
+      const output = await host.run(rel, { signal: laufSignal });
       return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
     try {
-      const output = await host.run(rel);
+      const output = await host.run(rel, { signal: laufSignal });
       return `Ergebnis run ${rel}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     } catch (_err) {
       // Wie beim Lesen: das @ kann aus der Eingabe stammen. Der Pfad mit @
       // hat Vorrang, erst wenn er scheitert, zaehlt der ohne.
-      const output = await host.run(ohneAt);
+      const output = await host.run(ohneAt, { signal: laufSignal });
       return `Ergebnis run ${ohneAt}:\n${clipText(output, RUN_OUTPUT_LIMIT)}`;
     }
   } catch (error) {
+    ausgang = error && error.abgebrochen ? "abgebrochen" : "fehlgeschlagen";
     const message = error instanceof UnitedShareError ? error.message : "Die Aktion ist fehlgeschlagen.";
     return `Ergebnis ${kind || "aktion"} ${rawPath}:\n${message}`;
+  } finally {
+    if (options && typeof options.onAusgang === "function") {
+      try { options.onAusgang(ausgang); } catch (_err) { /* Anzeige ist Beiwerk. */ }
+    }
   }
 }
 
@@ -1620,21 +1908,44 @@ function programmStarten({
   onAktiv,
   startFehler,
   fristFehler,
+  signal,
 }) {
   return new Promise((resolve, reject) => {
     let index = 0;
     let settled = false;
     let aktivGemeldet = false;
+    let child = null;
+    let timer = null;
     const finish = (err, value) => {
       if (settled) return;
       settled = true;
       if (err) reject(err);
       else resolve(value);
     };
+    // Abbruch von aussen (Stopp-Knopf): das Kindprogramm stirbt unverzueglich
+    // mit SIGKILL -- ein Kind, das auf einen langen Ausgang wartet, wuerde
+    // sonst weiterlaufen und weiter in den Tresor schreiben. Nach dem Abbruch
+    // zaehlt nichts mehr, was das Programm noch schafft.
+    const externAbbrechen = () => {
+      if (settled) return;
+      if (timer) clearTimeout(timer);
+      if (child && typeof child.kill === "function") {
+        try { child.kill("SIGKILL"); } catch (_err) { /* Tot ist tot. */ }
+      }
+      finish(abgebrochenFehler());
+    };
+    if (signal) {
+      if (signal.aborted) {
+        externAbbrechen();
+        return;
+      }
+      if (typeof signal.addEventListener === "function") {
+        signal.addEventListener("abort", externAbbrechen, { once: true });
+      }
+    }
     const versuch = () => {
       if (settled) return;
       const runner = kandidaten[index];
-      let child;
       try {
         child = spawn(runner, [datei], {
           cwd,
@@ -1663,7 +1974,7 @@ function programmStarten({
       let timedOut = false;
       let weiter = false;
       const frist = timeoutMs == null ? SCRIPT_DAUER_MS : timeoutMs;
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         timedOut = true;
         if (typeof child.kill === "function") child.kill("SIGKILL");
       }, frist);
@@ -1702,6 +2013,7 @@ function runVaultFile({
   spawnImpl,
   env,
   onAktiv,
+  signal,
 } = {}) {
   let datei = "";
   let ext = "";
@@ -1730,6 +2042,7 @@ function runVaultFile({
     childEnv,
     timeoutMs,
     onAktiv,
+    signal,
     startFehler: "Das Programm ließ sich nicht starten.",
     fristFehler: "Das Programm wurde nach der Frist beendet.",
   });
@@ -1754,6 +2067,7 @@ function runReemax(args, {
   spawnImpl,
   env,
   onAktiv,
+  signal,
 } = {}) {
   const spawn = spawnImpl || nodeSpawn();
   if (typeof spawn !== "function") throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
@@ -1761,7 +2075,35 @@ function runReemax(args, {
   const childEnv = kindUmgebung(sourceEnv);
   const command = "reemax";
   return new Promise((resolve, reject) => {
-    let child;
+    let child = null;
+    let timer = null;
+    let settled = false;
+    let timedOut = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    // Abbruch von aussen (Stopp-Knopf): dasselbe Verfahren wie in
+    // programmStarten -- SIGKILL, bevor das Programm weiterschreiben kann.
+    const externAbbrechen = () => {
+      if (settled) return;
+      if (child && typeof child.kill === "function") {
+        try { child.kill("SIGKILL"); } catch (_err) { /* Tot ist tot. */ }
+      }
+      finish(abgebrochenFehler());
+    };
+    if (signal) {
+      if (signal.aborted) {
+        externAbbrechen();
+        return;
+      }
+      if (typeof signal.addEventListener === "function") {
+        signal.addEventListener("abort", externAbbrechen, { once: true });
+      }
+    }
     try {
       child = spawn(command, args, {
         cwd,
@@ -1784,17 +2126,8 @@ function runReemax(args, {
     };
     child.stdout.on("data", push);
     child.stderr.on("data", push);
-    let settled = false;
-    let timedOut = false;
-    const finish = (err, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) reject(err);
-      else resolve(value);
-    };
     const frist = timeoutMs == null ? SCRIPT_DAUER_MS : timeoutMs;
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
       if (typeof child.kill === "function") child.kill("SIGKILL");
     }, frist);
@@ -1907,7 +2240,7 @@ function ergebnisKurz(text) {
   return `${einzeilig.slice(0, ERGEBNIS_LAENGE - 1)}…`;
 }
 
-function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
+function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined, id = undefined) {
   if (typeof onSchritt !== "function") return;
   try {
     const meldung = {
@@ -1916,6 +2249,7 @@ function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
       text: schrittText(action),
       zeichen: schrittZeichen(action && action.action),
     };
+    if (id !== undefined) meldung.id = id;
     // Nur die Fertig-Meldung traegt ein Ergebnis -- vorher gibt es nichts zu
     // melden, und ein leeres Feld waere ein Versprechen ohne Deckung.
     if (ergebnis !== undefined) meldung.ergebnis = ergebnisKurz(ergebnis);
@@ -1926,7 +2260,7 @@ function meldeSchritt(onSchritt, zustand, action, ergebnis = undefined) {
 }
 
 async function runVaultInstruction({
-  turns, complete, host, maxSteps = 6, onSchritt = null, confirm = null, requireWriteConfirm = false,
+  turns, complete, host, maxSteps = 6, onSchritt = null, onRunde = null, confirm = null, requireWriteConfirm = false, signal = null,
 }) {
   const thread = [];
   for (const turn of turns || []) {
@@ -1940,8 +2274,35 @@ async function runVaultInstruction({
   const done = new Set();
   let hinweisGegeben = false;
   let last = "";
+  let werkzeugSchritte = 0;
+  let schrittId = 0;
+  // Jede Runde meldet sich vor dem Modellaufruf: erst nach einer
+  // ausgeführten Werkzeugaktion sichtbar ("Runde n"), sonst bleibt es bei der
+  // ruhigen Stille-Frist der ersten Runde. So weiss der Nutzer in einer
+  // mehrstufigen Schleife, dass es weitergeht, und wie lange schon.
+  const start = Date.now();
   for (let step = 0; step < limit; step += 1) {
-    const reply = await complete(thread);
+    if (typeof onRunde === "function") {
+      const runde = step + 1;
+      const sekunden = Math.round((Date.now() - start) / 1000);
+      try {
+        onRunde({ runde, stand: runde - 1, von: limit, sekunden, folge: werkzeugSchritte > 0 });
+      } catch (_err) {
+        /* Die Rueckmeldung darf den Auftrag nie unterbrechen. */
+      }
+    }
+    let reply;
+    try {
+      reply = await complete(thread);
+    } catch (error) {
+      // Der Hinweis gilt einem Fehlschlag, nicht einem Nutzerabbruch: wer
+      // selbst stoppt, weiss, dass Vorarbeit stehenbleibt -- ein angehaengter
+      // Warnsatz machte die klare Meldung nur unscharf.
+      if (werkzeugSchritte > 0 && error instanceof Error && !error.abgebrochen) {
+        error.message += " Achtung: Werkzeugschritte wurden bereits bearbeitet und nicht automatisch rückgängig gemacht. Vor erneutem Versuch den Tresor und die Schrittliste prüfen.";
+      }
+      throw error;
+    }
     last = typeof reply === "string" ? reply : "";
     const protocol = parseVaultActions(last);
     const actions = protocol.length
@@ -1970,10 +2331,20 @@ async function runVaultInstruction({
     }
     const results = [];
     for (const action of actions) {
-      meldeSchritt(onSchritt, "laeuft", action);
-      const ergebnis = await executeVaultAction(action, host, { confirm, requireWriteConfirm });
+      const id = ++schrittId;
+      const brauchtFreigabe = ["run", "mesh-join", "sync"].includes(action.action) || (action.action === "write" && requireWriteConfirm);
+      meldeSchritt(onSchritt, brauchtFreigabe ? "geplant" : "laeuft", action, undefined, id);
+      let ausgang = "fehlgeschlagen";
+      const ergebnis = await executeVaultAction(action, host, {
+        confirm, requireWriteConfirm,
+        signal,
+        onWartet: () => meldeSchritt(onSchritt, "wartet", action, undefined, id),
+        onFreigegeben: () => meldeSchritt(onSchritt, "laeuft", action, undefined, id),
+        onAusgang: (zustand) => { ausgang = zustand; },
+      });
+      werkzeugSchritte += 1;
       results.push(ergebnis);
-      meldeSchritt(onSchritt, "fertig", action, ergebnis);
+      meldeSchritt(onSchritt, ausgang, action, ergebnis, id);
     }
     thread.push({ role: "assistant", content: last });
     thread.push({
@@ -5065,7 +5436,18 @@ function _fluentScriptSemantik(k) {
 // Ketten ({kopf, id, aufrufe: [{aufruf, args, benannt}, ...]}) oder wirft
 // UnitedShareError mit einer auf die verletzte Regel zeigenden Meldung.
 function fluentScriptParsen(text) {
-  const tokens = _fluentScriptTokenisieren(String(text ?? ""));
+  const quelle = String(text ?? "");
+  // Häufiger Schreibfehler (Grammatik: root ::= kette (";" kette)*): hinter
+  // dem letzten Aufruf darf kein Semikolon stehen. Vor dem Tokenisieren
+  // abgefangen, damit die Meldung den Fehler benennt statt "Kopfverb
+  // erwartet". Ein ; in Anführungszeichen bleibt unberührt -- der lauteste
+  // Text endet mit ")".
+  if (/;\s*$/.test(quelle)) {
+    throw new UnitedShareError(
+      "FluentScript: Hinter dem letzten Aufruf steht ein Semikolon -- nach jedem ; muss eine weitere Kette folgen. Entferne das letzte Semikolon.",
+    );
+  }
+  const tokens = _fluentScriptTokenisieren(quelle);
   const p = _fluentScriptParser(tokens);
   const ketten = [p.kette()];
   while (p.blick().art === "semi") {
@@ -5381,10 +5763,11 @@ const DEFAULT_SETTINGS = {
   baseUrl: "https://api.unitedshare.ai/v1",
   model: "",
   timeoutMs: 90000,
+  antwortTokens: 1200,
   embedUrl: "http://127.0.0.1:11434",
   embedModel: "",
   absichtModell: "",
-  requireWriteConfirm: false,
+  requireWriteConfirm: true,
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
@@ -5574,6 +5957,12 @@ function desktopCanStream() {
   }
 }
 
+// Stille-Frist im Chat: bevor das erste Byte kommt, entscheidet sie allein,
+// ob eine nicht in Gang kommende Antwort abbricht. Zwei Minuten ohne ein
+// einziges Zeichen sind keine Denkzeit mehr, sondern ein Haengen, das eine
+// brauchbare Meldung bekommen muss.
+const CHAT_STILLE_MS = 120000;
+
 class AskModal extends Modal {
   constructor(app, onSubmit) {
     super(app);
@@ -5613,6 +6002,76 @@ class AskModal extends Modal {
   onClose() {
     this.contentEl.empty();
   }
+}
+
+class PrivateVorlageModal extends Modal {
+  constructor(app, plugin, frontmatter) {
+    super(app);
+    this.plugin = plugin;
+    this.frontmatter = frontmatter;
+    this.busy = false;
+  }
+
+  onOpen() {
+    const el = this.contentEl;
+    el.addClass("unitedshare-modal");
+    el.createEl("h2", { text: "Private Cloud-Vorlage" });
+    el.createEl("p", { text: "Nur die Vorlage wird gesendet, nicht der Notiztext oder die Property-Zuordnung. Prüfe die Vorlage selbst: Auch sie kann vertrauliche Informationen enthalten." });
+    const felder = Array.isArray(this.frontmatter && this.frontmatter.unitedshare_private_felder)
+      ? this.frontmatter.unitedshare_private_felder : [];
+    felder.forEach((feld, i) => el.createEl("p", { text: `{{VAR_${i + 1}}} = ${String(feld)} (nur lokal)` }));
+    if (felder.length) {
+      el.createEl("p", { text: "Statt {{VAR_1}} kannst du auch {{$kunde}} schreiben (Name der ersten Eigenschaft). Gesendet wird immer nur {{VAR_1}}; der Name selbst verlässt den Rechner nicht." });
+    }
+    el.createEl("p", { text: "Vorlage für die Cloud:" });
+    this.eingabe = el.createEl("textarea", { cls: "unitedshare-private-vorlage-eingabe", attr: { rows: "8", placeholder: "Auftrag mit {{VAR_1}} oder {{$kunde}} formulieren" } });
+    const pruefen = el.createEl("button", { text: "Versandvorschau", attr: { type: "button" } });
+    this.anzeige = el.createEl("div");
+    pruefen.addEventListener("click", () => this.vorschau());
+  }
+
+  vorschau() {
+    if (this.busy) return;
+    const el = this.anzeige;
+    el.empty();
+    let vorbereitet;
+    try {
+      vorbereitet = privateVorlageVorbereiten(this.frontmatter, this.eingabe.value);
+    } catch (error) {
+      el.createEl("p", { text: error.message });
+      return;
+    }
+    const ziel = { baseUrl: this.plugin.settings.baseUrl, model: this.plugin.settings.model, apiKey: this.plugin.settings.apiKey, timeoutMs: this.plugin.settings.timeoutMs, antwortTokens: this.plugin.settings.antwortTokens };
+    el.createEl("h3", { text: "Dieser Auftrag wird an die Cloud gesendet" });
+    el.createEl("p", { text: `Ziel: ${ziel.baseUrl} · Modell: ${ziel.model || "nicht gewählt"}` });
+    el.createEl("pre", { text: vorbereitet.text });
+    el.createEl("p", { text: "Zusätzlich werden eine feste Format-Anweisung und technische API-Daten übertragen. Die Vorlage kann trotz Platzhaltern Informationen verraten." });
+    const senden = el.createEl("button", { text: "Diesen Auftrag senden", attr: { type: "button" } });
+    senden.addEventListener("click", async () => {
+      if (this.busy) return;
+      this.busy = true;
+      senden.disabled = true;
+      pruefenDeaktivieren(this.eingabe, true);
+      const status = el.createEl("p", { text: "Auftrag läuft …" });
+      try {
+        const antwort = await this.plugin.privateVorlageAnfragen(vorbereitet.text, ziel);
+        const lokal = privateAntwortAufloesen(antwort, vorbereitet.werte);
+        status.setText("Lokale Ergebnisvorschau – es wurde nichts in den Tresor geschrieben:");
+        el.createEl("pre", { text: lokal });
+      } catch (_error) {
+        status.setText("Der Auftrag oder die Prüfung der Antwort ist fehlgeschlagen. Es wurde nichts in den Tresor geschrieben.");
+      } finally {
+        this.busy = false;
+        pruefenDeaktivieren(this.eingabe, false);
+      }
+    });
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
+function pruefenDeaktivieren(element, wert) {
+  if (element) element.disabled = wert;
 }
 
 class AttachmentModal extends Modal {
@@ -5686,6 +6145,20 @@ class BestaetigungsModal extends Modal {
     const pfad = this.action && typeof this.action.path === "string" ? this.action.path : "";
     if (pfad) contentEl.createEl("p", { cls: "unitedshare-bestaetigung-pfad", text: pfad });
     if (this.action && this.action.action === "write") {
+      if (Object.hasOwn(this.action, "previousContent")) {
+        const vorher = this.action.previousContent;
+        const nachher = typeof this.action.content === "string" ? this.action.content : "";
+        contentEl.createEl("p", { text: vorher === null ? "Neue Datei – diese Zeilen werden hinzugefügt:" : "Änderungen (− vorher, + nachher):" });
+        const alt = vorher === null ? [] : String(vorher).split("\n");
+        const neu = nachher.split("\n");
+        let anfang = 0;
+        while (anfang < alt.length && anfang < neu.length && alt[anfang] === neu[anfang]) anfang += 1;
+        let ende = 0;
+        while (ende < alt.length - anfang && ende < neu.length - anfang && alt[alt.length - 1 - ende] === neu[neu.length - 1 - ende]) ende += 1;
+        const entfernt = alt.slice(anfang, alt.length - ende).map((line) => `− ${line}`);
+        const hinzu = neu.slice(anfang, neu.length - ende).map((line) => `+ ${line}`);
+        contentEl.createEl("pre", { cls: "unitedshare-bestaetigung-diff", text: entfernt.concat(hinzu).join("\n") || "Keine Änderungen." });
+      }
       contentEl.createEl("p", { text: "Vorgeschlagener vollständiger Dateiinhalt:" });
       contentEl.createEl("pre", {
         cls: "unitedshare-bestaetigung-inhalt",
@@ -5795,6 +6268,16 @@ class UnitedShareView extends ItemView {
     this.bildAnchor = toolbar.createEl("div", { cls: "unitedshare-bild-anchor" });
     this.bildMenu = this.bildAnchor.createEl("div", { cls: "unitedshare-bild-menu" });
     this.bildSteuer = [];
+    // Stopp: nur waehrend eines Auftrags sichtbar und aktiv. Er bricht den
+    // Modellaufruf ab und beendet gestartete Tresor-Programme mit SIGKILL.
+    // Ausserhalb eines Auftrags ein toter Knopf, deshalb per is-busy
+    // ein- und ausgeblendet.
+    this.stoppWrap = toolbar.createEl("div", { cls: "unitedshare-stopp-wrap" });
+    this.stoppButton = this.navButton(this.stoppWrap, "Stopp", "square", () => this.plugin.stoppeLaufe(), true, "Stopp");
+    if (this.stoppButton && typeof this.stoppButton.addClass === "function") {
+      this.stoppButton.addClass("unitedshare-stopp");
+    }
+    if (this.stoppButton) this.stoppButton.disabled = true;
     this.baueWerkzeuge();
     const loader = inputWrap.createEl("div", {
       cls: "unitedshare-loader",
@@ -6035,6 +6518,8 @@ class UnitedShareView extends ItemView {
     ]) {
       if (control) control.disabled = disabled;
     }
+    // Stopp ist das Gegenstueck: nur waehrend eines Auftrags aktiv.
+    if (this.stoppButton) this.stoppButton.disabled = !disabled;
     const wrap = this.inputWrap;
     if (!wrap || typeof wrap.addClass !== "function") return;
     if (disabled) wrap.addClass("is-busy");
@@ -6234,7 +6719,16 @@ class UnitedShareView extends ItemView {
         }
       }
       const rechts = zeile.createEl("span", { cls: "unitedshare-schritt-rechts" });
-      rechts.createEl("span", { cls: "unitedshare-schritt-text", text: schritt.text });
+      const status = { geplant: "Vorbereitet", wartet: "Wartet auf deine Freigabe", laeuft: "Läuft", fertig: "Abgeschlossen", abgelehnt: "Abgelehnt", fehlgeschlagen: "Fehlgeschlagen", abgebrochen: "Abgebrochen" };
+      let text = schritt.text;
+      if (schritt.zustand === "geplant" || schritt.zustand === "wartet" || schritt.zustand === "abgelehnt") {
+        if (schritt.art === "write") text = text.replace(/^Schreibt/, "Schreibvorschlag für");
+        if (schritt.art === "run") text = text.replace(/^Startet/, "Startvorschlag für");
+        if (schritt.art === "sync") text = text.replace(/^Gleicht ab/, "Abgleichvorschlag");
+        if (schritt.art === "mesh-join") text = text.replace(/^Tritt bei/, "Beitrittsvorschlag");
+      }
+      rechts.createEl("span", { cls: "unitedshare-schritt-text", text });
+      rechts.createEl("span", { cls: "unitedshare-schritt-status", text: status[schritt.zustand] || "" });
       if (schritt.ergebnis) {
         rechts.createEl("span", { cls: "unitedshare-schritt-ergebnis", text: schritt.ergebnis });
       }
@@ -6244,11 +6738,11 @@ class UnitedShareView extends ItemView {
   merkeSchritt(draft, schritt) {
     if (!schritt || typeof schritt.text !== "string") return;
     if (!draft.schritte) draft.schritte = [];
-    if (schritt.zustand === "fertig") {
+    if (schritt.id !== undefined || ["fertig", "abgelehnt", "fehlgeschlagen"].includes(schritt.zustand)) {
       for (let i = draft.schritte.length - 1; i >= 0; i -= 1) {
         const offen = draft.schritte[i];
-        if (offen.zustand === "laeuft" && offen.text === schritt.text) {
-          offen.zustand = "fertig";
+        if (schritt.id !== undefined ? offen.id === schritt.id : (offen.zustand === "laeuft" && offen.text === schritt.text)) {
+          offen.zustand = schritt.zustand;
           if (schritt.ergebnis) offen.ergebnis = schritt.ergebnis;
           this.zeigeSchritte(draft);
           return;
@@ -6260,8 +6754,9 @@ class UnitedShareView extends ItemView {
     if (schritt.art !== "denken") this.denkenAbhaken(draft);
     const eintrag = {
       text: schritt.text,
-      zustand: schritt.zustand === "fertig" ? "fertig" : "laeuft",
+      zustand: schritt.zustand || "laeuft",
     };
+    if (schritt.id !== undefined) eintrag.id = schritt.id;
     if (schritt.art) eintrag.art = schritt.art;
     if (schritt.zeichen) eintrag.zeichen = schritt.zeichen;
     if (schritt.ergebnis) eintrag.ergebnis = schritt.ergebnis;
@@ -7079,6 +7574,19 @@ class UnitedShareView extends ItemView {
         this.zeigeBudget(meta && meta.limits, meta && meta.usage);
       }, (text) => {
         if (this.busy && this.statusEl) this.statusEl.setText(text);
+      }, (runde) => {
+        // Mehrstufige Schleife: sonst bliebe der Chat stumm, sobald die
+        // zweite Runde beginnt -- der Grund fuer das gefuehlte Haengen.
+        // Nur wenn schon etwas gelaufen ist, sonst stoert ein Text die
+        // ruhige Denkpause der ersten Runde.
+        if (!this.busy) return;
+        if (!this.statusEl) return;
+        if (runde && runde.folge) {
+          const sekunden = Number(runde.sekunden) || 0;
+          this.statusEl.setText(`Schritt ${runde.stand} von höchstens ${runde.von} erledigt. Nächste Runde läuft (${sekunden} s).`);
+        } else if (runde && runde.runde > 1) {
+          this.statusEl.setText(`Nächste Runde läuft (${Number(runde.sekunden) || 0} s).`);
+        }
       });
       draft.content = answer;
       draft.streaming = false;
@@ -7092,9 +7600,16 @@ class UnitedShareView extends ItemView {
       await this.renderMessages();
     } catch (error) {
       void protokolliereAufrufFehler(this.chatAdapter(), error);
+      const abgebrochen = Boolean(error && error.abgebrochen);
       const text = error instanceof UnitedShareError ? error.message : "Der Modellaufruf ist fehlgeschlagen.";
+      // Das Denken ist vorbei, sobald der Auftrag endet -- auf welchem Weg
+      // auch immer. Wie auf dem Erfolgspfad abgehakt, damit kein "Denkt nach"
+      // als laufend stehen bleibt.
+      this.denkenAbhaken(draft);
       for (const schritt of draft.schritte || []) {
-        if (schritt.zustand === "laeuft") schritt.zustand = "abgebrochen";
+        if (["geplant", "wartet", "laeuft"].includes(schritt.zustand)) {
+          schritt.zustand = abgebrochen ? "abgebrochen" : "fehlgeschlagen";
+        }
       }
       if (!String(draft.content || "") && !(draft.schritte && draft.schritte.length)) {
         const index = tab.messages.indexOf(draft);
@@ -7103,7 +7618,9 @@ class UnitedShareView extends ItemView {
         draft.streaming = false;
       }
       this.statusEl.setText(text);
-      new Notice(text);
+      // Kein doppeltes Alarmieren: der Nutzer hat selbst abgebrochen und
+      // weiss es -- die Sprechblase und der Status sagen es deutlich genug.
+      if (!abgebrochen) new Notice(text);
       if (error && error.limits) this.zeigeBudget(error.limits, null);
       if (error && error.aufladenUrl) this.plugin.aufladenUrl = error.aufladenUrl;
       await this.renderMessages();
@@ -7260,7 +7777,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Schreiben ebenfalls bestätigen")
-      .setDesc("Lesen, Starten, Beitreten und Abgleich fragen immer nach. Mit diesem Schalter fragt auch Schreiben nach, bevor eine Datei angelegt oder geändert wird.")
+      .setDesc("Vor dem Anlegen oder Ändern einer Datei eine Vorschau bestätigen. Für neue Installationen eingeschaltet; bestehende Einstellungen bleiben erhalten. Starten, Beitreten und Abgleich fragen unabhängig davon nach.")
       .addToggle((toggle) => {
         toggle.setValue(Boolean(this.plugin.settings.requireWriteConfirm));
         toggle.onChange(async (value) => {
@@ -7269,12 +7786,27 @@ class UnitedShareSettingTab extends PluginSettingTab {
         });
       });
 
+    new Setting(containerEl)
+      .setName("Wie ausführlich darf die Antwort sein?")
+      .setDesc("Die Voreinstellung passt für kurze Antworten. Für längere Ausarbeitungen eine höhere Grenze wählen. Das Modell kann trotzdem kürzer antworten.")
+      .addDropdown((dropdown) => {
+        for (const [n, label] of [[1200, "Kurz (Standard)"], [2048, "Mittel"], [4096, "Ausführlich"], [8192, "Sehr ausführlich"]]) dropdown.addOption(String(n), label);
+        dropdown.setValue(String(this.plugin.settings.antwortTokens || 1200));
+        dropdown.onChange(async (value) => {
+          const n = Number(value);
+          if (![1200, 2048, 4096, 8192].includes(n)) return;
+          this.plugin.settings.antwortTokens = n;
+          await this.plugin.saveSettings();
+        });
+      });
+
     this.modelHost = containerEl.createEl("div", { cls: "unitedshare-model-setting" });
+    containerEl.createEl("p", { text: "Vertrauliche Inhalte? Nutze den Befehl ‚UnitedShare: Private Cloud-Vorlage‘ und prüfe die Vorschau. Der normale Chat sendet deine Frage und ausgewählte Notizinhalte an den eingestellten Dienst." });
     containerEl.createEl("h3", { text: "Dieser Rechner" });
 
     new Setting(containerEl)
-      .setName("Lokales Embedding")
-      .setDesc("Nur http://127.0.0.1, http://localhost oder http://[::1], mit Port. Voreinstellung http://127.0.0.1:11434. Eine andere Adresse wird nicht aufgerufen.")
+      .setName("Lokale Suche: Dienstadresse")
+      .setDesc("Normalerweise nichts ändern: Das Plugin sucht den lokalen Suchdienst automatisch auf diesem Gerät. Nur lokale Adressen sind erlaubt.")
       .addText((text) => {
         text.setValue(this.plugin.settings.embedUrl);
         text.onChange(async (value) => {
@@ -7294,8 +7826,8 @@ class UnitedShareSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Embedding-Modell")
-      .setDesc("Leer wählt auf diesem Rechner bge-m3, embeddinggemma, nomic-embed-text oder mxbai-embed-large. Ein gesetzter Name muss lokal vorhanden sein.")
+      .setName("Lokale Suche: Modell")
+      .setDesc("Für die automatische Auswahl leer lassen. Das Plugin verwendet ein unterstütztes, bereits installiertes Suchmodell. Die Tresor-Indexsuche benötigt bge-m3. Es wird nichts automatisch installiert.")
       .addText((text) => {
         text.setPlaceholder("automatisch");
         text.setValue(this.plugin.settings.embedModel || "");
@@ -7609,7 +8141,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
     for (const id of known) choices.push(id);
     new Setting(host)
       .setName("Modell")
-      .setDesc("Nur rmxos-mega2026.1, rmxos-sema2026.1 und rmxos-mobil2026.1. Andere Kennungen zeigt dieses Plugin nicht.")
+      .setDesc("Steht genau ein unterstütztes Modell zur Verfügung, wird es automatisch gewählt. Bei mehreren Modellen bitte eines auswählen; bestehende Auswahlen bleiben erhalten.")
       .addDropdown((dropdown) => {
         dropdown.addOption("", "Modell wählen");
         for (const id of choices) dropdown.addOption(id, id);
@@ -7789,7 +8321,10 @@ function cursorKeyboardCover() {
 // einfache HTML-Tabelle -- kein Framework, reines createEl() wie im Rest
 // des Plugins. Reine DOM-Erzeugung, deshalb hier statt im Kernmodul (das
 // bleibt DOM-frei und bleibt dadurch mit node --test testbar).
-function renderDuckdbTabelle(container, tabelle) {
+// Der dritte Parameter ist optional; nur wer ihn setzt, bekommt Verweise
+// in Zelltexten als echte Obsidian-Links (rmxos-Blöcke). SQL-Ergebnisse
+// bleiben Anzeige pur.
+function renderDuckdbTabelle(container, tabelle, verweise) {
   container.empty();
   const spalten = (tabelle && tabelle.spalten) || [];
   const zeilen = (tabelle && tabelle.zeilen) || [];
@@ -7803,8 +8338,82 @@ function renderDuckdbTabelle(container, tabelle) {
   const tbody = table.createEl("tbody");
   for (const zeile of zeilen) {
     const tr = tbody.createEl("tr");
-    for (const wert of zeile) tr.createEl("td", { text: wert === "" || wert == null ? "" : String(wert) });
+    for (const wert of zeile) {
+      const text = wert === "" || wert == null ? "" : String(wert);
+      if (verweise && verweise.app) {
+        zelltextMitVerweisen(tr.createEl("td"), text, verweise.app, verweise.quelle);
+      } else {
+        tr.createEl("td", { text });
+      }
+    }
   }
+}
+
+// Ein Verweis in einem Zelltext, erkannt an [[Notiz|Anzeige]].
+const ZELLEN_VERWEIS_QUELLTEXT = "!?\\[\\[([^\\[\\]]+)\\]\\]";
+
+// Füllt ein Zellen-/Listen-Element, in dem Obsidian-Verweise ([[Notiz]],
+// [[Notiz|Anzeige]], [[Notiz#Kopf]]) zu echten Links werden, die die Notiz
+// öffnen. Nur Anzeige und Navigation: kein Lesen der verlinkten Datei,
+// keine Ausführung. Bewusst nicht unterstützt sind Einbettungen ("![[...]]")
+// -- der Inhalt anderer Dateien gehört nicht still in eine Zelle, er kann
+// groß sein und wird deshalb unverändert als Text gezeigt. Ohne
+// Workspace-API bleibt der Text unverändert wie bei SQL-Ergebnissen.
+function zelltextMitVerweisen(el, text, app, quelle) {
+  const werteText = String(text ?? "");
+  if (!app || !app.workspace || typeof app.workspace.openLinkText !== "function" || !app.metadataCache || typeof app.metadataCache.getFirstLinkpathDest !== "function") {
+    el.setText(werteText);
+    return el;
+  }
+  const muster = new RegExp(ZELLEN_VERWEIS_QUELLTEXT, "g");
+  if (!muster.test(werteText)) {
+    el.setText(werteText);
+    return el;
+  }
+  muster.lastIndex = 0;
+  let cursor = 0;
+  let fund;
+  while ((fund = muster.exec(werteText))) {
+    if (fund.index > cursor) el.createEl("span", { cls: "unitedshare-zelltext", text: werteText.slice(cursor, fund.index) });
+    if (fund[0].startsWith("!")) {
+      // Einbettungen bleiben Text -- siehe Kommentar oben.
+      el.createEl("span", { cls: "unitedshare-zelltext", text: fund[0] });
+    } else {
+      const teile = fund[1].split("|");
+      const ziel = teile[0];
+      const anzeige = teile.length > 1 ? (teile.slice(1).join("|") || ziel) : ziel;
+      const verweis = el.createEl("a", {
+        cls: "internal-link unitedshare-verweis",
+        text: anzeige,
+        attr: { href: "#", "data-href": ziel, tabindex: "-1" },
+      });
+      try {
+        const datei = app.metadataCache.getFirstLinkpathDest(ziel, String(quelle || ""));
+        if (datei && datei.path) {
+          // setAttr statt .attrs: Das Mock in den Tests kennt .attrs,
+          // Obsidians echtes DOM nicht -- damit die Auflösung auch im
+          // echten Lesemodus ankommt.
+          if (typeof verweis.setAttr === "function") verweis.setAttr("data-href", datei.path);
+          else verweis.attrs["data-href"] = datei.path;
+        } else {
+          verweis.addClass("is-unresolved");
+        }
+      } catch (_error) {
+        verweis.addClass("is-unresolved");
+      }
+      verweis.addEventListener("click", (ereignis) => {
+        if (ereignis && typeof ereignis.preventDefault === "function") {
+          ereignis.preventDefault();
+          ereignis.stopPropagation();
+        }
+        app.workspace.openLinkText(ziel, String(quelle || ""));
+      });
+    }
+    cursor = fund.index + fund[0].length;
+  }
+  if (cursor < werteText.length) el.createEl("span", { cls: "unitedshare-zelltext", text: werteText.slice(cursor) });
+  if (!el.children.length) el.setText(werteText);
+  return el;
 }
 
 // Wandelt die Zeilen eines Apache-Arrow-Table-Ergebnisses (conn.query(...)
@@ -7895,6 +8504,9 @@ class UnitedShareDuckDbView extends FileView {
 module.exports = class UnitedSharePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    // Laeuft gerade: Auftrag-Steuerungen, die der Stopp-Knopf abbricht.
+    // Nach dem Abbrechen raeumt jede Stelle ihre Eintraege selbst ab.
+    this.laufe = [];
     this.statusBarItem = this.addStatusBarItem();
     this.statusBarItem.addClass("unitedshare-statusbar");
     this.addSettingTab(new UnitedShareSettingTab(this.app, this));
@@ -7902,9 +8514,22 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.registerView(DUCKDB_ANSICHT_VIEW_TYPE, (leaf) => new UnitedShareDuckDbView(leaf, this));
     this.registerExtensions([...DUCKDB_ANSICHT_ENDUNGEN], DUCKDB_ANSICHT_VIEW_TYPE);
     this.registerMarkdownCodeBlockProcessor("sql", (source, el) => this.renderSqlCodeBlock(source, el));
-    this.registerMarkdownCodeBlockProcessor("rmxos", (source, el) => this.renderRmxosCodeBlock(source, el));
+    this.registerMarkdownCodeBlockProcessor("rmxos", (source, el, ctx) => this.renderRmxosCodeBlock(source, el, ctx));
     addIcon(UNITEDSHARE_ICON, markInner());
     this.addRibbonIcon(UNITEDSHARE_ICON, "UnitedShare", () => this.openSidebar());
+    this.addCommand({
+      id: "private-cloud-vorlage",
+      name: "UnitedShare: Private Cloud-Vorlage",
+      callback: () => {
+        const file = this.app.workspace.getActiveFile();
+        const cache = file && this.app.metadataCache && this.app.metadataCache.getFileCache(file);
+        if (!cache || !cache.frontmatter || cache.frontmatter.unitedshare_privacy !== "template") {
+          new Notice("Die aktive Notiz benötigt unitedshare_privacy: template und private Eigenschaften.");
+          return;
+        }
+        new PrivateVorlageModal(this.app, this, { ...cache.frontmatter }).open();
+      },
+    });
     this.addCommand({
       id: "open-unitedshare-sidebar",
       name: "UnitedShare in der Seitenleiste",
@@ -7936,6 +8561,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
   }
 
   onunload() {
+    this.stoppeLaufe();
     this.removeCursorComposer();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
     this.app.workspace.detachLeavesOfType(DUCKDB_ANSICHT_VIEW_TYPE);
@@ -7943,6 +8569,21 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.stopPeerSyncHost();
     this.stopMobilSyncAutomatik();
     this.verwirfPairing();
+  }
+
+  // Der Stopp der laufenden Auftraege: jedes gemeldete Steuer schiesst die
+  // eigene Arbeit ab -- der Modellaufruf bricht mit einer benannten Meldung
+  // ab, gestartete Tresor-Programme bekommen SIGKILL. Frueh genug abbrechen
+  // spart die Arbeit danach; ein Abbruch, der nichts abbricht, waere eine
+  // Luege, deshalb wirkt jedes Signal in der Kette.
+  stoppeLaufe() {
+    const laufende = Array.isArray(this.laufe) ? this.laufe.slice() : [];
+    this.laufe = [];
+    for (const steuer of laufende) {
+      if (steuer && typeof steuer.abort === "function") {
+        try { steuer.abort(); } catch (_err) { /* Abbruch bleibt Abbruch. */ }
+      }
+    }
   }
 
   // -- DuckDB-WASM-Ansicht: ein Singleton pro Plugin-Laufzeit (nicht pro
@@ -8213,25 +8854,38 @@ module.exports = class UnitedSharePlugin extends Plugin {
   // rmxos-Codeblöcke: reine Anzeige der FluentScript-Nachricht als Karte(n).
   // Bewusst ohne Ausführung/Netzwerk -- fluentScriptParsen/-Karten sind reine
   // Funktionen, hier nur ins DOM gebracht.
-  renderRmxosCodeBlock(source, el) {
+  renderRmxosCodeBlock(source, el, ctx) {
     el.empty();
     el.addClass("unitedshare-rmxos-block");
     let ketten;
+    let frontmatter = null;
     try {
       ketten = fluentScriptParsen(source || "");
+      const cache = this.app.metadataCache;
+      const datei = ctx && ctx.sourcePath && cache && typeof cache.getCache === "function" ? cache.getCache(ctx.sourcePath) : null;
+      frontmatter = datei && datei.frontmatter;
+      ketten = rmxosEigenschaftenErsetzen(ketten, frontmatter);
     } catch (error) {
       const meldung = error instanceof UnitedShareError ? error.message : String((error && error.message) || error);
       el.createEl("div", { cls: "unitedshare-rmxos-fehler", text: `FluentScript ungültig: ${meldung}` });
       return;
     }
+    // Der Block nennt eine Eigenschaft, Obsidian konnte die Eigenschaften der
+    // Notiz aber nicht als Objekt lesen. Haeufigste Ursache: unquoted Werte,
+    // die mit "{{" beginnen oder ein ":" enthalten, machen das Frontmatter
+    // fuer Obsidians YAML-Analyse ungueltig ("Ungueltige Eigenschaften").
+    // Ohne Hinweis sucht der Nutzer den Fehler im Codeblock statt im Kopf.
+    const nutztEigenschaften = /\{\{\$/u.test(source || "");
+    const frontmatterLesbar = frontmatter && typeof frontmatter === "object" && !Array.isArray(frontmatter);
     // Mehrere gleichfoermige Ketten (gleicher Kopfverb, gleiche Aufrufnamen --
     // z. B. mehrere result(...).ok().value(...)-Ketten durch ";" getrennt)
     // lassen sich als Tabelle lesen, nicht nur als Liste einzelner Karten.
     // fluentScriptAlsZeilen() gibt dafuer `null` zurueck, wenn die Ketten
     // nicht zueinander passen -- dann bleibt es bei der Karten-Ansicht.
     const zeilen = fluentScriptAlsZeilen(ketten);
+    const quelle = ctx && typeof ctx.sourcePath === "string" ? ctx.sourcePath : "";
     if (zeilen) {
-      renderDuckdbTabelle(el, duckdbTabelleAusZeilen(zeilen));
+      renderDuckdbTabelle(el, duckdbTabelleAusZeilen(zeilen), { app: this.app, quelle });
     } else {
       for (const karte of fluentScriptKarten(ketten)) {
         const karteEl = el.createEl("div", { cls: "unitedshare-rmxos-karte" });
@@ -8241,7 +8895,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
         });
         const listeEl = karteEl.createEl("ul", { cls: "unitedshare-rmxos-felder" });
         for (const feld of karte.felder) {
-          listeEl.createEl("li", { text: feld.wert ? `${feld.name}: ${feld.wert}` : feld.name });
+          zelltextMitVerweisen(listeEl.createEl("li"), feld.wert ? `${feld.name}: ${feld.wert}` : feld.name, this.app, quelle);
         }
       }
     }
@@ -8249,6 +8903,14 @@ module.exports = class UnitedSharePlugin extends Plugin {
       cls: "unitedshare-rmxos-hinweis",
       text: "Nur Anzeige -- Ausführung kommt später.",
     });
+    // Nach dem Rendern: renderDuckdbTabelle leert den Container zu Beginn,
+    // ein frueherer Hinweis wuerde also wieder verschwinden.
+    if (nutztEigenschaften && !frontmatterLesbar) {
+      el.createEl("div", {
+        cls: "unitedshare-rmxos-fehler",
+        text: "Eigenschaften nicht lesbar: Die Notiz-Eigenschaften sind kein gültiges YAML (Obsidian meldet „Ungültige Eigenschaften“). Werte, die mit {{ oder einem Doppelpunkt beginnen, in Anführungszeichen setzen, z. B. owner: \"{{$name}} {{$surname}}\".",
+      });
+    }
   }
 
   // -- Peer-Sync-Host (Desktop-Seite, Mobile folgt in einem späteren Schritt) --
@@ -9056,11 +9718,12 @@ module.exports = class UnitedSharePlugin extends Plugin {
       apiKey,
       timeoutMs: 15000,
       fetchImpl: requestUrlAsFetch(),
-    }).then((ids) => {
+    }).then(async (ids) => {
       if (this.modelFlightStamp !== stamp) return ids;
       this.modelIds = ids;
       this.modelError = "";
       this.modelStamp = stamp;
+      await this.waehleEinzigesModell(ids);
       return ids;
     }).catch((error) => {
       if (this.modelFlightStamp === stamp) {
@@ -9074,6 +9737,14 @@ module.exports = class UnitedSharePlugin extends Plugin {
     });
     this.modelFlight = flight;
     return flight;
+  }
+
+  async waehleEinzigesModell(ids) {
+    if (String(this.settings.model || "").trim()) return;
+    const passende = [...new Set((Array.isArray(ids) ? ids : []).filter(isObsidianModel))];
+    if (passende.length !== 1) return;
+    this.settings.model = passende[0];
+    await this.saveSettings();
   }
 
   async applyModel(model) {
@@ -9323,10 +9994,21 @@ module.exports = class UnitedSharePlugin extends Plugin {
   vaultHost() {
     return {
       read: (rel) => this.readVaultNote(rel),
+      readForWrite: async (rel) => {
+        const safe = assertVaultRelative(rel);
+        const adapter = this.vaultAdapter();
+        if (!adapter || typeof adapter.exists !== "function" || typeof adapter.read !== "function") {
+          throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        }
+        if (!(await adapter.exists(safe))) return null;
+        const text = await adapter.read(safe);
+        if (typeof text !== "string") throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
+        return text;
+      },
       list: (rel) => this.listVaultDir(rel),
       write: (rel, content) => this.writeVaultFile(rel, content),
-      run: (rel) => this.runVaultSource(rel),
-      meshJoin: (rel) => this.reemaxHost().meshJoin(rel),
+      run: (rel, laufOptionen) => this.runVaultSource(rel, laufOptionen),
+      meshJoin: (rel, laufOptionen) => this.reemaxHost().meshJoin(rel, laufOptionen),
       sync: (request) => this.reemaxHost().sync(request),
     };
   }
@@ -9337,7 +10019,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     const adapter = this.vaultAdapter();
     if (!root || !adapter) throw new UnitedShareError("reemax läuft nur in der Desktop-App.", 0);
     return {
-      async meshJoin(rel) {
+      async meshJoin(rel, laufOptionen) {
         const safe = assertVaultRelative(rel);
         if (!(await plugin.vaultDatei(safe))) {
           throw new UnitedShareError("Die Einladung liegt nicht im Tresor.", 0);
@@ -9348,6 +10030,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
         return runReemax(["mesh", "join", adapter.getFullPath(safe)], {
           cwd: root,
           onAktiv: (text) => plugin.meldeLauf(text),
+          signal: laufOptionen && laufOptionen.signal ? laufOptionen.signal : null,
         });
       },
       async sync(request) {
@@ -9355,6 +10038,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
         return runReemax(["sync", direction, peer], {
           cwd: root,
           onAktiv: (text) => plugin.meldeLauf(text),
+          signal: request && request.signal ? request.signal : null,
         });
       },
     };
@@ -9509,7 +10193,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     throw new UnitedShareError("Der Pfad bleibt im Tresor.");
   }
 
-  async runVaultSource(rel) {
+  async runVaultSource(rel, laufOptionen) {
     const safe = assertVaultRelative(rel);
     const adapter = this.vaultAdapter();
     if (
@@ -9528,6 +10212,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
       cwd: adapter.getBasePath(),
       relPath: safe,
       onAktiv: (text) => this.meldeLauf(text),
+      signal: laufOptionen && laufOptionen.signal ? laufOptionen.signal : null,
     });
   }
 
@@ -9563,33 +10248,74 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
   }
 
-  async completeThread(turns, onDelta, onSchritt = null, onMeta = null, onWarten = null) {
+  async completeThread(turns, onDelta, onSchritt = null, onMeta = null, onWarten = null, onRunde = null) {
+    if (!String(this.settings.model || "").trim()) {
+      await this.ensureModels();
+      if (!String(this.settings.model || "").trim()) {
+        throw new UnitedShareError("Bitte in den UnitedShare-Einstellungen ein Modell auswählen. Es stehen mehrere oder keine passenden Modelle zur Verfügung.", 0);
+      }
+    }
     const live = desktopCanStream();
     const report = (meta) => {
       if (typeof onMeta === "function") onMeta(meta);
       this.meldeBudget(meta && meta.limits, meta && meta.usage);
     };
-    return runVaultInstruction({
-      turns,
-      host: this.vaultHost(),
-      onSchritt,
-      confirm: (action) => this.bestaetigeAktion(action),
-      requireWriteConfirm: Boolean(this.settings.requireWriteConfirm),
-      complete: (next) => completeMessages({
-        baseUrl: this.settings.baseUrl,
-        apiKey: this.settings.apiKey,
-        model: this.settings.model,
-        timeoutMs: Number(this.settings.timeoutMs) || 90000,
-        dauerMs: 600000,
-        onWarten: typeof onWarten === "function" ? onWarten : null,
-        fetchImpl: requestUrlAsFetch(),
-        live,
-        onDelta,
-        onMeta: report,
-        system: SYSTEM_PROMPT,
-        turns: next,
-        form: "chat",
-      }),
+    // Abbruchsteuerung des Auftrags: angemeldet in plugin.laufe, abgemeldet
+    // sobald der Auftrag endet -- auf welche Weise auch immer. Der Stopp-Knopf
+    // bricht damit Modellaufruf und laufende Programm-Schritte zugleich ab,
+    // statt auf das 10-Minuten-Aus zu warten.
+    const steuer = typeof AbortController === "function" ? new AbortController() : null;
+    if (steuer) {
+      if (!Array.isArray(this.laufe)) this.laufe = [];
+      this.laufe.push(steuer);
+    }
+    try {
+      return await runVaultInstruction({
+        turns,
+        host: this.vaultHost(),
+        onSchritt,
+        onRunde: typeof onRunde === "function" ? onRunde : null,
+        confirm: (action) => this.bestaetigeAktion(action),
+        requireWriteConfirm: Boolean(this.settings.requireWriteConfirm),
+        signal: steuer ? steuer.signal : null,
+        complete: (next) => completeMessages({
+          baseUrl: this.settings.baseUrl,
+          apiKey: this.settings.apiKey,
+          model: this.settings.model,
+          maxTokens: this.settings.antwortTokens || 1200,
+          timeoutMs: Number(this.settings.timeoutMs) || 90000,
+          dauerMs: 600000,
+          stilleMs: CHAT_STILLE_MS,
+          onWarten: typeof onWarten === "function" ? onWarten : null,
+          fetchImpl: requestUrlAsFetch(),
+          live,
+          onDelta,
+          onMeta: report,
+          system: SYSTEM_PROMPT,
+          turns: next,
+          form: "chat",
+          signal: steuer ? steuer.signal : null,
+        }),
+      });
+    } finally {
+      if (steuer && Array.isArray(this.laufe)) {
+        const stelle = this.laufe.indexOf(steuer);
+        if (stelle >= 0) this.laufe.splice(stelle, 1);
+      }
+    }
+  }
+
+  async privateVorlageAnfragen(text, ziel) {
+    return completeMessages({
+      baseUrl: ziel.baseUrl,
+      apiKey: ziel.apiKey,
+      model: ziel.model,
+      maxTokens: ziel.antwortTokens || 1200,
+      timeoutMs: Number(ziel.timeoutMs) || 90000,
+      fetchImpl: requestUrlAsFetch(),
+      system: "Beantworte den Auftrag. Übernimm Platzhalter wie {{VAR_1}} unverändert; erfinde keine Platzhalterwerte.",
+      turns: [{ role: "user", content: text }],
+      form: "chat",
     });
   }
 
@@ -9661,3 +10387,8 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
   }
 };
+
+// An die exportierte Klasse gehängt, damit Verträge (Tests) die
+// Tabellen-Darstellung direkt prüfen können; im Bundler spielt das keine Rolle.
+module.exports.renderDuckdbTabelle = renderDuckdbTabelle;
+module.exports.zelltextMitVerweisen = zelltextMitVerweisen;

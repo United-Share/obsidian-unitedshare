@@ -201,7 +201,9 @@ test("eine abgebrochene Verbindung nach den Kopfzeilen wird nicht wiederholt", {
         dauerMs: 3000,
       }),
       (error) => {
-        assert.equal(error.message, "Die Verbindung endete, während die Aufgabe noch lief.");
+        assert.match(error.message, /Verbindung wurde unterbrochen/);
+        assert.match(error.message, /ECONNRESET|EPIPE|ECONNABORTED|ERR_STREAM_PREMATURE_CLOSE/);
+        assert.match(error.message, /Auftrag bereits verarbeitet/);
         assert.equal(error.retryable, false);
         assert.equal(error.message.includes("nicht erreichbar"), false);
         return true;
@@ -210,6 +212,30 @@ test("eine abgebrochene Verbindung nach den Kopfzeilen wird nicht wiederholt", {
     assert.equal(anfragen, 1);
   } finally {
     server.close();
+  }
+});
+
+test("Reset vor Antwort und beim Lesen wird ohne vertrauliche Nutzdaten eingeordnet", async () => {
+  for (const nachBeginn of [false, true]) {
+    let count = 0;
+    const delta = [];
+    const reset = Object.assign(new Error("geheimer-servertext"), { code: "ECONNRESET" });
+    const fetchImpl = async () => {
+      count += 1;
+      if (!nachBeginn) throw reset;
+      return { ok: true, status: 200, body: { async *[Symbol.asyncIterator]() {
+        yield 'data: {"choices":[{"delta":{"content":"Teil"}}]}\n\n';
+        throw reset;
+      } } };
+    };
+    await assert.rejects(completeMessages({ baseUrl: "http://127.0.0.1:1/v1", apiKey: "geheimer-key", model: "m", form: "chat", turns: [{ role: "user", content: "geheime Notiz" }], fetchImpl, onDelta: (text) => delta.push(text) }), (error) => {
+      assert.match(error.message, nachBeginn ? /beim Lesen der Antwort/ : /vor Übergabe der Antwort an das Plugin/);
+      assert.match(error.message, /ECONNRESET/);
+      assert.doesNotMatch(error.message, /geheimer|geheime Notiz/);
+      return true;
+    });
+    assert.equal(count, 1);
+    assert.equal(delta.length > 0, nachBeginn);
   }
 });
 
