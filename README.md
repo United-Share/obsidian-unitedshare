@@ -12,7 +12,15 @@ Die vollständige Übersicht über Werkzeuge, Gespräche und Einstellungen steht
 
 1. [Dokumentation](https://unitedshare.ai/docs/) lesen, dazu das [reemax-Handbuch](https://unitedshare.ai/docs/reemax/), falls ihr den Dienst selbst betreibt.
 2. Zugang über die [Console](https://console.unitedshare.io/) oder direkt den [Zugang für Obsidian](https://unitedshare.ai/app/?q=obsidian) anlegen. Der Schlüssel steht dort einmal — in die Plugin-Einstellungen unter **API-Schlüssel** gehört nur er, nicht die key-ID.
-3. Plugin aus den Community-Plugins installieren und einschalten.
+3. Den vollständigen Plugin-Ordner nach `.obsidian/plugins/unitedshare/` kopieren und das Plugin einschalten.
+
+UnitedShare steht **nicht** in den Community-Plugins und wird dort auch nicht angeboten: In der Registry (`community-plugins.json`) gibt es keinen Eintrag, im Registry-Repo keinen Aufnahme-PR und keinen Commit dazu. Ein Store-Installer existiert also nicht; die Installation erfolgt von Hand über den kompletten Ordner samt Unterordner `duckdb/`.
+
+### DuckDB (Parquet/SQL) braucht die mitgelieferte Laufzeit
+
+Die DuckDB-Ansicht für `.parquet` und `.sql` lädt ihre Laufzeit aus dem Unterordner `duckdb/`: `duckdb-eh.wasm` (~36 MB), `duckdb-browser.cjs` und `duckdb-browser-eh.worker.js`. Diese Dateien gehören mit in den kopierten Ordner.
+
+Der Obsidian-Community-Installer und das Release-Workflow liefern **nur** `main.js`, `manifest.json` und `styles.css`. Fehlt der Ordner `duckdb/`, meldet die Ansicht „DuckDB-WASM ließ sich nicht laden." Das trifft jede Installation, die allein aus den drei Release-Dateien besteht.
 
 Ist nach der Anmeldung genau ein unterstütztes Textmodell verfügbar, wählt das Plugin es automatisch. Bei mehreren Modellen erfolgt keine automatische Auswahl, weil deren Kosten und Fähigkeiten hier nicht bekannt sind; ein bereits gewähltes Modell bleibt erhalten. Für die lokale Suche das Feld **Lokale Suche: Modell** leer lassen: Ein unterstütztes bereits installiertes Modell wird automatisch erkannt. Die gesonderte Tresor-Indexsuche benötigt weiterhin `bge-m3`; das Plugin installiert keine Modelle automatisch.
 
@@ -112,8 +120,8 @@ node --test *.test.js       # auch gegen einen echten lokalen Server
 node scripts/bundle.mjs     # main.js aus main.src.js + unitedshare-core.js
 ```
 
-Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. Ein Tag ohne `v`, gleich der Version in `manifest.json`, löst `.github/workflows/release.yml` aus und erzeugt das Release mit diesen drei Dateien.
+Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. Ein Tag ohne `v`, gleich der Version in `manifest.json`, löst `.github/workflows/release.yml` aus und erzeugt ein Release mit **nur** diesen drei Dateien — der Ordner `duckdb/` ist darin nicht enthalten.
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.14` — [Community-Seite](https://community.obsidian.md/plugins/unitedshare)
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — letztes Release `1.2.13`; `manifest.json` steht auf `1.2.14`, dafür gibt es noch keinen Tag und kein Release. Nicht in den Community-Plugins gelistet.
