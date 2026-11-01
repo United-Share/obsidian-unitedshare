@@ -2147,10 +2147,39 @@ function runReemax(args, {
 // Hinweis bei jeder Erklaerung des Formats.
 const AKTIONSART = /["']action["']\s*:\s*["'](read|list|write|run|sync|mesh-join)["']/;
 
+// Dasselbe ohne Anfuehrungszeichen: "action: write". Auf dieses YAML-artige
+// Layout weicht das Modell aus, wenn der Inhalt mehrzeilig wird -- JSON kennt
+// keinen Blockskalar. Ein solcher Block wird nicht ausgefuehrt, aber als
+// verfehlter Versuch erkannt, damit zurueckgemeldet wird statt still zu enden.
+const AKTIONSZEILE = /^[ \t]*action[ \t]*:[ \t]*(read|list|write|run|sync|mesh-join)\b/m;
+
+// Verfehlt das Modell das Aktionsformat? Zwei Formen zaehlen:
+//   1. ein Aktions-JSON als blosser Text (ohne unitedshare-Block), und
+//   2. ein unitedshare-Block, dessen Inhalt keine gueltige Aktion ergibt
+//      (YAML statt JSON, kaputtes JSON).
+// Ein blosser Erklaerungssatz ("die action dafuer heisst write") zaehlt
+// weiterhin nicht -- sonst kostete jede Format-Erklaerung einen Extraaufruf.
 function verfehltesProtokoll(text) {
   const quelle = String(text ?? "");
-  if (quelle.includes("```unitedshare")) return false;
-  return AKTIONSART.test(quelle);
+  if (quelle.includes("```unitedshare")) {
+    // Es gibt einen Block, aber parseVaultActions hat nichts erkannt: er ist
+    // nicht ausfuehrbar. Genau hier fiel das YAML durchs Raster.
+    if (parseVaultActions(quelle).length > 0) return false;
+    const drin = unitedshareBlockInhalt(quelle);
+    return AKTIONSZEILE.test(drin) || AKTIONSART.test(drin);
+  }
+  return AKTIONSART.test(quelle) || AKTIONSZEILE.test(quelle);
+}
+
+// Der Inhalt zwischen ```unitedshare und dem schliessenden ``` -- fuer die
+// Erkennung des verfehlten Formats, nicht zum Ausfuehren.
+function unitedshareBlockInhalt(text) {
+  const quelle = String(text ?? "");
+  const start = quelle.indexOf("```unitedshare");
+  if (start < 0) return "";
+  const nach = start + "```unitedshare".length;
+  const ende = quelle.indexOf("```", nach);
+  return ende < 0 ? quelle.slice(nach) : quelle.slice(nach, ende);
 }
 
 // Aus dem Vault, 2026-10-09: auf die Bitte um eine Notiz kam
@@ -5873,6 +5902,10 @@ const SYSTEM_PROMPT = [
   '{"action":"read","path":"relativer/pfad.md"}',
   "```",
   "action ist read, list, write oder run. path ist relativ zum Tresor, ohne .. und ohne absoluten Pfad. content gehört nur zu write. run startet nur eine vorhandene Datei .py, .js, .mjs oder .sh.",
+  "Der Block enthält IMMER genau ein JSON-Objekt in einer Zeile -- niemals YAML, niemals action: write. Mehrzeiliger Inhalt steht als JSON-String mit \\n zwischen den Zeilen:",
+  "```unitedshare",
+  '{"action":"write","path":"Notiz.md","content":"# Titel\\n\\nErster Absatz.\\n\\n- Punkt eins\\n- Punkt zwei\\n"}',
+  "```",
   "Nimmt der Nutzer eine Einladung oder eine Empfangsdatei im Tresor an, setzt du einen Block:",
   "```unitedshare",
   '{"action":"mesh-join","path":"relativer/pfad.json"}',

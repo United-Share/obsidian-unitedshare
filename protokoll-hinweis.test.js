@@ -171,3 +171,72 @@ test("auch andere Aktionsarten werden erkannt", async () => {
     assert.equal(aufrufe, 2, `${art} muss als verfehltes Format gelten`);
   }
 });
+
+// ANLASS (2026-11-01): Auf "Lege eine Notiz an" antwortete rmxos-mega mit
+// einem unitedshare-Block im YAML-Layout statt JSON:
+//
+//   ```unitedshare
+//   action: write
+//   path: Einkaufsliste.md
+//   content: |
+//     # Einkaufsliste
+//     - Brot
+//   ```
+//
+// JSON kennt keinen Blockskalar, deshalb weicht das Modell bei mehrzeiligem
+// Inhalt auf YAML aus. parseVaultActions verlangt aber JSON, und der alte
+// verfehltesProtokoll-Check stieg beim unitedshare-Block sofort aus -- also
+// endete der Lauf mit der Ankuendigung, angelegt wurde nichts.
+const YAML_BLOCK = [
+  "Ich lege die Notiz an.",
+  "```unitedshare",
+  "action: write",
+  "path: Einkaufsliste.md",
+  "content: |",
+  "  # Einkaufsliste",
+  "  - Brot",
+  "```",
+].join("\n");
+
+test("ein YAML-Block gilt als verfehltes Format und wird nachgefasst", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Einkaufsliste.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      if (aufrufe === 1) return YAML_BLOCK;
+      if (aufrufe === 2) return block({ action: "write", path: "Einkaufsliste.md", content: "# Einkaufsliste\n- Brot\n" });
+      return "Fertig.";
+    },
+  });
+  assert.equal(aufrufe >= 3, true, "auf YAML muss ein zweiter Versuch folgen");
+  assert.equal(host.geschrieben.length, 1, "der korrigierte Versuch legt die Datei an");
+});
+
+test("YAML wird nie direkt ausgeführt", async () => {
+  const host = tresor();
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Einkaufsliste.md an." }],
+    host,
+    complete: async () => YAML_BLOCK,
+  });
+  assert.equal(host.geschrieben.length, 0,
+    "ein YAML-Block darf niemals auf Verdacht geschrieben werden");
+});
+
+test("kaputtes JSON im unitedshare-Block gilt als verfehltes Format", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege a.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      if (aufrufe === 1) return '```unitedshare\n{action: write, path: a.md}\n```';
+      if (aufrufe === 2) return block({ action: "write", path: "a.md", content: "x" });
+      return "Fertig.";
+    },
+  });
+});
