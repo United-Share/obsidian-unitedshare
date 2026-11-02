@@ -677,7 +677,11 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
 }
 
 .unitedshare-statusleiste .unitedshare-mesh {
-  display: contents;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 .unitedshare-statusleiste .unitedshare-pill {
@@ -1097,11 +1101,8 @@ body.is-mobile .unitedshare-cursor-composer textarea.unitedshare-cursor-input {
 }
 
 .unitedshare-schritt.is-abgebrochen .unitedshare-schritt-text {
-  /* Eine Shorthand statt der separaten text-decoration-color-Zeile: die
-     Plugin-Pruefung meldet "text-decoration" sonst als von Obsidian 1.4.5
-     nur teilweise unterstuetzt (text-decoration-color als eigene
-     Deklaration ist die weniger kompatible Form). */
-  text-decoration: line-through var(--text-error);
+  color: var(--text-error);
+  text-decoration: line-through;
 }
 
 .unitedshare-attachments {

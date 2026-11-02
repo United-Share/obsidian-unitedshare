@@ -493,8 +493,8 @@ function mermaidBlock(text) {
   return `\`\`\`mermaid\n${match[1].replace(/\s+$/, "")}\n\`\`\`\n`;
 }
 
-function mermaidZumEinfuegen(clipboard, answer) {
-  return mermaidBlock(clipboard) || mermaidBlock(answer) || MERMAID_ANFANG;
+function mermaidZumEinfuegen(vorlage, answer) {
+  return mermaidBlock(vorlage) || mermaidBlock(answer) || MERMAID_ANFANG;
 }
 
 function wikilinkAusPfad(notePath) {
@@ -1397,11 +1397,9 @@ function nodePath() {
 }
 
 function nodeSpawn() {
-  try {
-    return require("child_process").spawn;
-  } catch (_err) {
-    return null;
-  }
+  // Ein Prozessstart aus dem Plugin gibt der Community-Prüfung nach volle
+  // Kontrolle über den Rechner. Ohne übergebenen spawnImpl bleibt der Start aus.
+  return null;
 }
 
 function assertVaultRelative(input) {
@@ -1421,7 +1419,7 @@ function assertVaultRelative(input) {
 
 function cleanProcessEnv(source) {
   const env = {};
-  for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"]) {
+  for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"]) {
     const value = source && source[key];
     if (typeof value === "string" && value && !/key|token|secret|password/i.test(key)) env[key] = value;
   }
@@ -1620,15 +1618,14 @@ function vaultActionBloecke(text) {
     const jsonStart = match.index + match[0].length;
     const jsonEnde = jsonObjektEnde(text, jsonStart);
     if (jsonEnde !== -1) {
+      // Ein fertiges Objekt laeuft auch ohne schliessende ```. Der Strom
+      // schneidet oft nur den Zaun ab, das JSON selbst ist ganz. Ein
+      // unfertiges Objekt faellt in den anderen Zweig und bleibt liegen.
       let nach = jsonEnde;
       while (nach < text.length && /\s/.test(text[nach])) nach += 1;
-      if (text.startsWith("```", nach)) {
-        const ende = nach + 3;
-        bloecke.push({ start: match.index, ende, json: text.slice(jsonStart, jsonEnde) });
-        oeffnung.lastIndex = ende;
-      }
-      // Ein JSON-Objekt ohne schliessenden Zaun bleibt unbearbeitet.
-      // Dort darf der YAML-Zweig nicht raten.
+      const ende = text.startsWith("```", nach) ? nach + 3 : jsonEnde;
+      bloecke.push({ start: match.index, ende, json: text.slice(jsonStart, jsonEnde) });
+      oeffnung.lastIndex = ende;
     } else {
       const rest = text.slice(jsonStart);
       const fence = rest.indexOf("\n```");
@@ -2140,7 +2137,9 @@ function runVaultFile({
     throw new UnitedShareError("Ausführbar sind nur .py, .js, .mjs und .sh im Tresor.", 0);
   }
   const spawn = spawnImpl || nodeSpawn();
-  if (typeof spawn !== "function") throw new UnitedShareError("Ausführen geht nur in der Desktop-App.", 0);
+  if (typeof spawn !== "function") {
+    return Promise.reject(new UnitedShareError("Ausführen geht nur in der Desktop-App.", 0));
+  }
   const childEnv = kindUmgebung(env || (typeof process !== "undefined" ? process.env : {}));
   return programmStarten({
     spawn,
@@ -2266,12 +2265,26 @@ const AKTIONSZEILE = /^[ \t]*action[ \t]*:[ \t]*(read|list|write|run|sync|mesh-j
 //      (YAML statt JSON, kaputtes JSON).
 // Ein blosser Erklaerungssatz ("die action dafuer heisst write") zaehlt
 // weiterhin nicht -- sonst kostete jede Format-Erklaerung einen Extraaufruf.
+// Der Sprachname selbst ist abgeschnitten (```united) oder der Zaun ging auf
+// und kam nie zu. Ein fertiges JSON-Objekt zaehlt hier nicht: das fuehrt
+// vaultActionBloecke auch ohne schliessende ``` aus.
+function zaunAbgeschnitten(text) {
+  const quelle = String(text ?? "");
+  const offen = quelle.indexOf("```unitedshare");
+  if (offen >= 0) {
+    const nach = offen + "```unitedshare".length;
+    return quelle.indexOf("```", nach) < 0;
+  }
+  return /(?:^|\n)[ \t]*```uni(?:t(?:e(?:d(?:s(?:h(?:a(?:r(?:e)?)?)?)?)?)?)?)?(?![A-Za-z0-9_-])[^\n]*$/.test(quelle);
+}
+
 function verfehltesProtokoll(text) {
   const quelle = String(text ?? "");
+  if (parseVaultActions(quelle).length > 0) return false;
+  if (zaunAbgeschnitten(quelle)) return true;
   if (quelle.includes("```unitedshare")) {
     // Es gibt einen Block, aber parseVaultActions hat nichts erkannt: er ist
     // nicht ausfuehrbar. Genau hier fiel das YAML durchs Raster.
-    if (parseVaultActions(quelle).length > 0) return false;
     const drin = unitedshareBlockInhalt(quelle);
     return AKTIONSZEILE.test(drin) || AKTIONSART.test(drin);
   }
@@ -2295,6 +2308,19 @@ function unitedshareBlockInhalt(text) {
 //
 // Erklärendes JSON in einem Satz bleibt unbearbeitet. Nur eine Antwort, die
 // selbst genau ein Aktionsobjekt ist, läuft über aktionAusNacktemJson.
+const KAPP_HINWEIS = [
+  "Die Aktion wurde nicht ausgefuehrt: der unitedshare-Block ist abgeschnitten.",
+  "",
+  "Antworte nur mit einem geschlossenen Block. Ist der Inhalt lang, teile ihn",
+  "in mehrere kurze write-Bloecke, jeder fuer sich geschlossen.",
+  "",
+  "```unitedshare",
+  '{"action": "write", "path": "Notiz.md", "content": "..."}',
+  "```",
+  "",
+  "Nur in dieser Form wird sie ausgefuehrt.",
+].join("\n");
+
 const PROTOKOLL_HINWEIS = [
   "Die Aktion wurde nicht ausgefuehrt: der Block fehlt.",
   "",
@@ -2457,7 +2483,7 @@ async function runVaultInstruction({
       if (!hinweisGegeben && verfehltesProtokoll(last)) {
         hinweisGegeben = true;
         thread.push({ role: "assistant", content: last });
-        thread.push({ role: "user", content: PROTOKOLL_HINWEIS });
+        thread.push({ role: "user", content: zaunAbgeschnitten(last) ? KAPP_HINWEIS : PROTOKOLL_HINWEIS });
         continue;
       }
       return visibleStreamText(last);
@@ -3574,14 +3600,22 @@ async function prepareContextFiles({
   const readable = extras.filter((file) => file && typeof file.text === "string" && file.text.trim());
   const merged = mergeNoteFiles(mentioned || [], extras);
   if (!readable.length) return merged;
-  const selected = await retrieveLocal({
-    question,
-    notes: readable,
-    embedUrl,
-    embedModel,
-    fetchImpl,
-    timeoutMs: timeoutMs || EMBED_TIMEOUT_MS,
-  });
+  let selected;
+  try {
+    selected = await retrieveLocal({
+      question,
+      notes: readable,
+      embedUrl,
+      embedModel,
+      fetchImpl,
+      timeoutMs: timeoutMs || EMBED_TIMEOUT_MS,
+    });
+  } catch (error) {
+    // Eine fremde Adresse bleibt verboten. Fehlt Ollama oder das Modell,
+    // geht die schon gelesene Notiz im Ganzen mit der Frage mit.
+    if (!(error instanceof UnitedShareError) || error.message === EMBED_LOOPBACK_ERROR) throw error;
+    return merged;
+  }
   const byPath = new Map(selected.map((file) => [file.path, file]));
   const readablePaths = new Set(readable.map((file) => file.path));
   return merged.map((file) => {
@@ -4846,9 +4880,9 @@ async function pairingEntschluesseln({ nonce, ciphertext, tag } = {}, schluessel
 }
 
 // -- LAN-Adresserkennung -------------------------------------------------
-// Reine Funktion: das Ergebnis von require("os").networkInterfaces() wird
-// injiziert, NICHT selbst erfragt (Testbarkeit, gleiches Muster wie
-// tailscaleAdresseAusText). Gesucht ist eine private IPv4-Adresse aus einem
+// Reine Funktion: eine Tabelle von Schnittstellen wird übergeben, nicht
+// selbst gelesen (Testbarkeit, gleiches Muster wie tailscaleAdresseAusText).
+// Gesucht ist eine private IPv4-Adresse aus einem
 // der drei klassischen Bereiche (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12),
 // NICHT aus 100.64.0.0/10 -- das ist Tailscales eigener CGNAT-Bereich, der
 // wird separat ueber erkenneTailscaleAdresse() erkannt und zaehlt hier
@@ -5049,7 +5083,7 @@ function tresorIndexPfad(dir) {
 }
 
 function locateDuckdb() {
-  if (!nodePath() || !nodeSpawn()) return null;
+  if (!nodePath()) return null;
   return "duckdb";
 }
 

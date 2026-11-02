@@ -2,7 +2,7 @@
 
 Fragen aus der Seitenleiste oder einer markierten Notiz gehen an die Modelle eures UnitedShare. Der Auftrag enthält nur Textblöcke, der Tresor bleibt auf diesem Rechner. Ein Bild ist ein eigener Auftrag, `POST /v1/images/generations`, Modell `reemax-image`.
 
-Enter erkennt einen Bildauftrag. Ein klares „zeichne“, „male“ oder ein Seitenverhältnis geht an das Bild, der Rest an das Textmodell. Unklare Sätze prüft das lokale Embedding auf diesem Rechner. Mermaid, Diagramme und Fragen über ein Bild bleiben Text. Ein gesetztes lokales Modell unter `absichtModell` formuliert gemischte Sätze, wenn die Zerlegung keinen Rest findet; sonst bleibt es die Textfrage. Der Schlüssel geht dabei nicht an diesen Rechner.
+Enter erkennt einen Bildauftrag. Ein klares „zeichne“, „male“ oder ein Seitenverhältnis geht an das Bild, der Rest an das Textmodell. Unklare Sätze prüft das lokale Embedding auf diesem Rechner, wenn es auf 127.0.0.1, localhost oder ::1 antwortet. Fehlt Ollama oder das Modell, bleibt die Frage Text, und eine angehängte Notiz geht im Ganzen mit. Mermaid, Diagramme und Fragen über ein Bild bleiben Text. Ein gesetztes lokales Modell unter `absichtModell` formuliert gemischte Sätze, wenn die Zerlegung keinen Rest findet; sonst bleibt es die Textfrage. Der Schlüssel geht dabei nicht an diesen Rechner.
 
 Datenschutz: https://unitedshare.ai/privacy · Bedingungen: https://unitedshare.ai/terms
 
@@ -14,7 +14,7 @@ Die vollständige Übersicht über Werkzeuge, Gespräche und Einstellungen steht
 2. Zugang über die [Console](https://console.unitedshare.io/) oder direkt den [Zugang für Obsidian](https://unitedshare.ai/app/?q=obsidian) anlegen. Der Schlüssel steht dort einmal — in die Plugin-Einstellungen unter **API-Schlüssel** gehört nur er, nicht die key-ID.
 3. Den vollständigen Plugin-Ordner nach `.obsidian/plugins/unitedshare/` kopieren und das Plugin einschalten.
 
-UnitedShare ist auf der Community-Seite eingetragen: https://community.obsidian.md/plugins/unitedshare . Der Eintrag ist dem verknüpften Konto zugeordnet. Die automatische Prüfung von Release 1.2.14 läuft (Stand 2. November 2026: Attestierung bestanden, Hinweise zu Shell-Aufrufen und Systemdaten, Ergebnis noch offen). `community-plugins.json` enthält UnitedShare in diesem Stand nicht. Die Suche in Obsidian kann den Eintrag später zeigen als die Community-Seite. Für DuckDB den vollständigen Ordner samt Unterordner `duckdb/` nach `.obsidian/plugins/unitedshare/` kopieren. Der Community-Installer liefert nur `main.js`, `manifest.json` und `styles.css`.
+UnitedShare ist auf der Community-Seite eingetragen: https://community.obsidian.md/plugins/unitedshare . Der Eintrag ist dem verknüpften Konto zugeordnet. Die Prüfung von Release 1.2.15 ist noch nicht gelaufen. Die Attestierung von 1.2.14 war bestanden, mit offenen Hinweisen zu Shell-Aufrufen und Systemdaten. Diese Fassung entfernt Shell-Aufrufe und Systemdaten aus der ausgelieferten `main.js`. Was die Prüfung dazu sagt, steht erst nach der neuen Prüfung fest. `community-plugins.json` enthält UnitedShare in diesem Stand nicht. Die Suche in Obsidian kann den Eintrag später zeigen als die Community-Seite. Für DuckDB den vollständigen Ordner samt Unterordner `duckdb/` nach `.obsidian/plugins/unitedshare/` kopieren. Der Community-Installer liefert nur `main.js`, `manifest.json` und `styles.css`.
 
 ### DuckDB (Parquet/SQL) braucht die mitgelieferte Laufzeit
 
@@ -95,11 +95,11 @@ Modellkennung, Authentifizierung und technische Metadaten an den Dienst.
 Die Plugin-Prüfung fragt nach zwei Dingen:
 
 - **Dateien**: Lesen, Listen und Schreiben laufen über Obsidians Adapter-API, relativ im Tresor, nie mit `..`.
-- **Shell**: Nur ein Skript aus dem Tresor (`.py`, `.js`, `.mjs`, `.sh`) starten und `reemax mesh join`/`sync` rufen einen Prozess, immer nur auf Wunsch in einer Antwort. Das Plugin legt kein Paar an. Eine Aufgabe, die noch läuft und nichts ausgibt, bleibt bis zur langen Frist offen. Eine ausdrücklich kurze Frist beendet sie trotzdem.
+- **Shell**: Die ausgelieferte Fassung startet keinen Prozess. Skripte im Tresor und `reemax mesh join`/`sync` laufen in dieser `main.js` nicht. Das Plugin legt kein Paar an. Eine Aufgabe, die noch läuft und nichts ausgibt, bleibt bis zur langen Frist offen. Eine ausdrücklich kurze Frist beendet sie trotzdem.
 
 Für neue Installationen ist die Schreibbestätigung eingeschaltet; bestehende Einstellungen bleiben unverändert. Der Dialog zeigt veränderte Zeilen und den vollständigen vorgeschlagenen Inhalt. Hat sich der Dateistand während der Bestätigung geändert, wird nicht geschrieben. Die Prüfung erfolgt unmittelbar vor dem Schreiben, ist aber keine atomare Sperre gegen alle gleichzeitig schreibenden Prozesse.
 
-Netzwerkseitig gibt es zwei Ziele, keine Telemetrie: den Endpunkt aus den Einstellungen (Standard `api.unitedshare.ai`) und, falls aktiv, ein lokales Embedding auf `http://127.0.0.1:11434` (`/api/embed`) — der API-Schlüssel geht dorthin nicht.
+Netzwerkseitig gibt es zwei Ziele, keine Telemetrie: den Endpunkt aus den Einstellungen (Standard `api.unitedshare.ai`) und, falls aktiv, ein lokales Embedding auf `http://127.0.0.1:11434` (`/api/embed`) — der API-Schlüssel geht dorthin nicht. Fehlt Ollama oder das Modell, geht die Frage trotzdem an das Modell, die Notiz im Ganzen.
 
 In den Einstellungen steht **Token aufladen**. Tag und Monat kommen vom Dienst, Nachkauf und Planwechsel stehen auf der Verbrauchsseite.
 
@@ -124,4 +124,4 @@ Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. E
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.14`. Community-Seite: https://community.obsidian.md/plugins/unitedshare . Prüfung von 1.2.14 läuft. `community-plugins.json` enthält den Eintrag in diesem Stand nicht.
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.15`. Community-Seite: https://community.obsidian.md/plugins/unitedshare . Prüfung von 1.2.15 steht aus. `community-plugins.json` enthält den Eintrag in diesem Stand nicht.

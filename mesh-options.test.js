@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { spawn } = require("node:child_process");
 
 const {
   meshOptionLines,
@@ -257,7 +258,7 @@ exit 0
   process.env.PATH = "/usr/bin:/bin";
   process.env.HOME = home;
   try {
-    const view = await readMeshInventory({ timeoutMs: 2000 });
+    const view = await readMeshInventory({ timeoutMs: 2000, spawnImpl: spawn });
     assert.equal(view.installed, true);
     assert.equal(view.version, "0.3.3");
     assert.deepEqual(fs.readFileSync(log, "utf8").trim().split("\n"), [

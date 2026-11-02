@@ -51,6 +51,18 @@ test("parseVaultActions liest nur Blöcke der Antwort", () => {
 // ``` nach der Oeffnung -- traf also den inneren Zaun des Mermaid-Blocks
 // statt des echten Endes, das JSON brach mittendrin ab, geschrieben wurden
 // nur drei Zeichen.
+test("ein vollständiges JSON ohne schließenden Zaun ist eine Aktion", () => {
+  const text = [
+    "Ich lege die Datei an.",
+    "```unitedshare",
+    JSON.stringify({ action: "write", path: "Offen.md", content: "steht\n" }),
+  ].join("\n");
+  assert.deepEqual(parseVaultActions(text), [
+    { action: "write", path: "Offen.md", content: "steht\n" },
+  ]);
+  assert.deepEqual(parseVaultActions('```unitedshare\n{"action":"write","path":"Halb.md","content":"halb'), []);
+});
+
 test("ein Schreib-Inhalt mit eigenem Codeblock bricht den äußeren Block nicht ab", () => {
   const inhalt = [
     "```mermaid",

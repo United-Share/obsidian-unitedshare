@@ -1190,7 +1190,7 @@ test("ein Anhang geht als Ausschnitt mit und die Chips verschwinden", async () =
   assert.equal(files.text, "Plan.md");
 });
 
-test("fällt das Embedding aus, bleibt die Frage stehen und das Modell wird nicht gefragt", async () => {
+test("fällt das Embedding aus, geht die Frage mit der ganzen Notiz ans Modell", async () => {
   const { UnitedShareError } = require("./unitedshare-core");
   const app = makeApp();
   app.vault = {
@@ -1204,11 +1204,12 @@ test("fällt das Embedding aus, bleibt die Frage stehen und das Modell wird nich
   };
   const plugin = new UnitedSharePlugin(app);
   await plugin.onload();
-  let asked = 0;
-  plugin.completeThread = async () => {
-    asked += 1;
-    return "nein";
+  const asked = [];
+  plugin.completeThread = async (turns) => {
+    asked.push(turns);
+    return "Die Notiz bleibt geschlossen.";
   };
+  plugin.sucheTresor = async () => [];
   plugin.embedForFrontier = async () => {
     throw new UnitedShareError("Das lokale Embedding auf diesem Rechner antwortet nicht.", 0);
   };
@@ -1217,10 +1218,11 @@ test("fällt das Embedding aus, bleibt die Frage stehen und das Modell wird nich
   view.addAttachment("Plan.md");
   view.questionEl.value = "Was machen wir?";
   await view.askButton.listeners.click();
-  assert.equal(asked, 0);
-  assert.equal(view.questionEl.value, "Was machen wir?");
-  assert.deepEqual(view.attachments, ["Plan.md"]);
-  assert.match(view.statusEl.text, /Embedding/);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0][0].files[0].path, "Plan.md");
+  assert.match(asked[0][0].files[0].text, /Nordflügel/);
+  assert.equal(view.questionEl.value, "");
+  assert.deepEqual(view.attachments, []);
 });
 
 test("completeThread geht an /v1/chat/completions ohne Werkzeuge", async () => {
@@ -2149,31 +2151,31 @@ test("die untere Leiste trägt Beschriftung, Notiz, Einfügen, Mermaid und Link"
   assert.deepEqual(view.attachments, ["Offen.md"]);
   assert.equal(mock.modals[mock.modals.length - 1].opened, true);
 
-  plugin.clipboardRead = async () => "aus der Zwischenablage";
+  plugin.einfuegeText = async () => "aus der Zwischenablage";
   await knopf(view, "Einfügen").listeners.click();
   assert.equal(editor.last.text, "aus der Zwischenablage");
   assert.equal(editor.cursor, editor.last.cursor);
 
   app.workspace.activeView = null;
-  plugin.clipboardRead = async () => "Feld";
+  plugin.einfuegeText = async () => "Feld";
   view.questionEl.value = "Frage ";
   await knopf(view, "Einfügen").listeners.click();
   assert.equal(view.questionEl.value, "Frage Feld");
 
   const leerAb = mock.notices.length;
-  plugin.clipboardRead = async () => "";
+  plugin.einfuegeText = async () => "";
   await knopf(view, "Einfügen").listeners.click();
   assert.ok(mock.notices.slice(leerAb).includes("Die Zwischenablage ist leer."));
   assert.equal(view.questionEl.value, "Frage Feld");
 
   const unlesbarAb = mock.notices.length;
-  plugin.clipboardRead = async () => {
+  plugin.einfuegeText = async () => {
     throw new Error("denied");
   };
   await knopf(view, "Einfügen").listeners.click();
   assert.ok(mock.notices.slice(unlesbarAb).includes("Die Zwischenablage lässt sich nicht lesen."));
 
-  plugin.clipboardRead = async () => "```mermaid\nflowchart LR\n  A-->B\n```\n";
+  plugin.einfuegeText = async () => "```mermaid\nflowchart LR\n  A-->B\n```\n";
   app.workspace.activeView = { editor };
   const vorherErsetzt = editor.replaced;
   await knopf(view, "Mermaid").listeners.click();
@@ -2182,7 +2184,7 @@ test("die untere Leiste trägt Beschriftung, Notiz, Einfügen, Mermaid und Link"
   assert.equal(editor.last.text.includes("A[Notiz]"), false);
 
   const mermaidAb = mock.notices.length;
-  plugin.clipboardRead = async () => {
+  plugin.einfuegeText = async () => {
     throw new Error("denied");
   };
   view.answer = "siehe\n```mermaid\nflowchart TD\n  X[Ja]\n```\n";
@@ -2190,7 +2192,7 @@ test("die untere Leiste trägt Beschriftung, Notiz, Einfügen, Mermaid und Link"
   assert.match(editor.last.text, /X\[Ja\]/);
   assert.equal(mock.notices.length, mermaidAb);
 
-  plugin.clipboardRead = async () => "";
+  plugin.einfuegeText = async () => "";
   view.answer = "";
   await knopf(view, "Mermaid").listeners.click();
   assert.equal(editor.last.text, "```mermaid\nflowchart LR\n  A[Notiz]\n```\n");

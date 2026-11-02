@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
@@ -471,6 +471,7 @@ test("duckdb speichert bge-m3 und findet den Satz wieder", { skip: !fs.existsSyn
       fetchImpl,
       env,
       disk: nodePlatte(),
+      spawnImpl: spawn,
     });
     assert.equal(zuerst.neu, 2);
     assert.equal(zuerst.behalten, 0);
@@ -485,6 +486,7 @@ test("duckdb speichert bge-m3 und findet den Satz wieder", { skip: !fs.existsSyn
       fetchImpl,
       env,
       disk: nodePlatte(),
+      spawnImpl: spawn,
     });
     assert.equal(nochmal.neu, 0);
     assert.equal(nochmal.behalten, 2);
@@ -498,6 +500,7 @@ test("duckdb speichert bge-m3 und findet den Satz wieder", { skip: !fs.existsSyn
       env,
       k: 4,
       disk: nodePlatte(),
+      spawnImpl: spawn,
     });
     assert.equal(treffer[0].pfad, "Ordner/A.md");
     assert.equal(treffer[0].text.includes("Alpha Satz"), true);
@@ -512,6 +515,7 @@ test("duckdb speichert bge-m3 und findet den Satz wieder", { skip: !fs.existsSyn
       fetchImpl,
       env,
       disk: nodePlatte(),
+      spawnImpl: spawn,
     });
     assert.ok(schwach.length >= 1);
     assert.ok(schwach[0].score < 0.35);
@@ -532,6 +536,7 @@ test("duckdb speichert bge-m3 und findet den Satz wieder", { skip: !fs.existsSyn
       fetchImpl,
       env,
       disk: nodePlatte(),
+      spawnImpl: spawn,
     });
     const übrig = execFileSync(DUCKDB, [
       "-json",

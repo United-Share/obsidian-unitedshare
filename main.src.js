@@ -83,9 +83,8 @@ function runningNodeTest() {
 // zusätzliches TLS-Zertifikat auf diesem Pfad wäre eine weitere Abhängigkeit
 // ohne zusätzlichen Schutz -- NICHT mehr, weil "das Mesh (Tailscale/
 // Headscale/WireGuard) die Verschlüsselung schon übernimmt": der Host
-// erkennt inzwischen zuerst eine LAN-Adresse (lanAdresseAusInterfaces()) und
-// faellt nur bei fehlendem LAN auf Tailscale zurück, läuft also auch im
-// normalen, nicht per WireGuard geschützten WLAN. Die eigentliche
+// bindet an die eingetragene Adresse und läuft damit auch im normalen,
+// nicht per WireGuard geschützten WLAN. Die eigentliche
 // Verschlüsselung der Nutzdaten (Manifest- und Dateiinhalte) passiert darum
 // auf Anwendungsebene: mit dem beim Pairing per ECDH+HKDF abgeleiteten
 // Sitzungsschlüssel (pairingVerschluesseln/pairingEntschluesseln im
@@ -95,18 +94,6 @@ function runningNodeTest() {
 function nodeHttp() {
   try {
     return require("http");
-  } catch (_err) {
-    return null;
-  }
-}
-
-// Gleiches Muster wie nodeHttp(): nur auf Desktop (Node) verfuegbar, liefert
-// null auf Mobile. Wird fuer require("os").hostname() (Geraetename im
-// Pairing-Angebot) und require("os").networkInterfaces() (LAN-Erkennung,
-// siehe lanAdresseAusInterfaces() im Kernmodul) gebraucht.
-function nodeOs() {
-  try {
-    return require("os");
   } catch (_err) {
     return null;
   }
@@ -124,12 +111,11 @@ function pairJson(status, body) {
 }
 
 // Sowohl peerSyncAdresse (Host) als auch mobilSyncAdresse (Client) duerfen
-// jetzt ENTWEDER eine Tailscale-Adresse (100.64.0.0/10, gueltig ueber
+// ENTWEDER eine Tailscale-Adresse (100.64.0.0/10, gueltig ueber
 // assertTailscaleAdresse) ODER eine private LAN-Adresse sein (192.168.0.0/16,
 // 10.0.0.0/8, 172.16.0.0/12 -- dieselben drei Bereiche wie
-// lanAdresseAusInterfaces(), hier aber auf einen von Hand/Netzwerk
-// ankommenden String angewendet, nicht auf os.networkInterfaces()). Eine
-// ungueltige oder leere Eingabe wird zu "", nie zu einem Absturz.
+// lanAdresseAusInterfaces()). Die Prüfung gilt für den eingetragenen Text.
+// Eine ungueltige oder leere Eingabe wird zu "", nie zu einem Absturz.
 function adresseGueltig(input) {
   const raw = String(input ?? "").trim();
   if (!raw) return "";
@@ -582,10 +568,61 @@ function pruefenDeaktivieren(element, wert) {
   if (element) element.disabled = wert;
 }
 
+function tresorListenPfad(eintrag, ordner) {
+  const roh = String(eintrag ?? "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!roh || roh.split("/").includes("..")) return "";
+  if (roh.includes("/")) return roh;
+  return ordner ? `${ordner}/${roh}` : roh;
+}
+
+function tresorPfadVersteckt(pfad) {
+  return String(pfad || "").split("/").some((teil) => !teil || teil.startsWith("."));
+}
+
+// Einzelne Pfade über den Adapter, ohne die Sammelmethoden des Vaults.
+// Der Adapter liefert je Ordner entweder volle Pfade oder nur den Namen.
+async function dateienImTresor(vault, optionen = {}) {
+  const adapter = vault && vault.adapter;
+  if (!adapter || typeof adapter.list !== "function") return [];
+  const nurMarkdown = Boolean(optionen.nurMarkdown);
+  const ergebnis = [];
+  const warteschlange = [""];
+  const gesehen = new Set();
+  while (warteschlange.length) {
+    const ordner = warteschlange.shift();
+    if (gesehen.has(ordner)) continue;
+    gesehen.add(ordner);
+    let verzeichnis = null;
+    try {
+      verzeichnis = await adapter.list(ordner);
+    } catch (_err) {
+      continue;
+    }
+    if (!verzeichnis || typeof verzeichnis !== "object") continue;
+    const dateien = Array.isArray(verzeichnis.files) ? verzeichnis.files : [];
+    const unterordner = Array.isArray(verzeichnis.folders) ? verzeichnis.folders : [];
+    for (const datei of dateien) {
+      const pfad = tresorListenPfad(datei, ordner);
+      if (!pfad || tresorPfadVersteckt(pfad)) continue;
+      if (nurMarkdown && !/\.md$/i.test(pfad)) continue;
+      const abstract = typeof vault.getAbstractFileByPath === "function" ? vault.getAbstractFileByPath(pfad) : null;
+      ergebnis.push({
+        path: pfad,
+        stat: abstract && abstract.stat ? abstract.stat : null,
+      });
+    }
+    for (const unter of unterordner) {
+      const pfad = tresorListenPfad(unter, ordner);
+      if (!pfad || tresorPfadVersteckt(pfad) || gesehen.has(pfad)) continue;
+      warteschlange.push(pfad);
+    }
+  }
+  return ergebnis;
+}
+
 class AttachmentModal extends Modal {
-  constructor(app, files, onPick) {
+  constructor(app, onPick) {
     super(app);
-    this.files = Array.isArray(files) ? files : [];
     this.onPick = onPick;
   }
 
@@ -593,41 +630,25 @@ class AttachmentModal extends Modal {
     const { contentEl } = this;
     contentEl.addClass("unitedshare-modal");
     contentEl.createEl("h2", { text: "Notiz anhängen" });
-    if (!this.files.length) {
-      contentEl.createEl("p", { text: "Im Tresor liegt keine Markdown-Notiz." });
-      return;
-    }
-    const filter = contentEl.createEl("input", {
+    const field = contentEl.createEl("input", {
       cls: "unitedshare-attach-filter",
-      attr: { type: "text", placeholder: "Notiz suchen" },
+      attr: { type: "text", placeholder: "Pfad im Tresor, zum Beispiel Ordner/Notiz.md" },
     });
-    const list = contentEl.createEl("div", { cls: "unitedshare-attach-list" });
-    const paint = () => {
-      list.empty();
-      const query = String(filter.value || "").trim().toLocaleLowerCase("de");
-      const matches = this.files.filter((file) => {
-        const notePath = String((file && file.path) || "");
-        return !query || notePath.toLocaleLowerCase("de").includes(query);
-      }).slice(0, 80);
-      if (!matches.length) {
-        list.createEl("p", { text: "Keine Notiz mit diesem Namen." });
-        return;
-      }
-      for (const file of matches) {
-        const notePath = String(file.path || "");
-        const button = list.createEl("button", {
-          cls: "unitedshare-attach-item",
-          text: notePath,
-          attr: { type: "button" },
-        });
-        button.addEventListener("click", () => {
-          if (typeof this.onPick === "function") this.onPick(notePath);
-          this.close();
-        });
-      }
+    const button = contentEl.createEl("button", {
+      cls: "unitedshare-attach-item",
+      text: "Anhängen",
+      attr: { type: "button" },
+    });
+    const pick = () => {
+      const notePath = String(field.value || "").trim();
+      if (!notePath) return;
+      if (typeof this.onPick === "function") this.onPick(notePath);
+      this.close();
     };
-    filter.addEventListener("input", paint);
-    paint();
+    button.addEventListener("click", pick);
+    field.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") pick();
+    });
   }
 
   onClose() {
@@ -1071,7 +1092,7 @@ class UnitedShareView extends ItemView {
     if (menu && typeof menu.empty === "function") menu.empty();
     const ziele = {
       notiz: { label: "Notiz", icon: "paperclip", click: () => this.notizAnhaengen() },
-      einfuegen: { label: "Einfügen", icon: "clipboard", click: () => this.einfuegen() },
+      einfuegen: { label: "Einfügen", icon: "pilcrow", click: () => this.einfuegen() },
       mermaid: { label: "Mermaid", icon: "git-branch", click: () => this.mermaidEinfuegen() },
       link: { label: "Link", icon: "link", click: () => this.notizenVerlinken() },
       antwort: { label: "Antwort", icon: "file-input", click: () => this.insertIntoNote() },
@@ -1761,22 +1782,7 @@ class UnitedShareView extends ItemView {
 
   openAttachmentPicker() {
     if (this.busy) return;
-    const vault = this.app && this.app.vault;
-    const listed = vault && typeof vault.getMarkdownFiles === "function" ? vault.getMarkdownFiles() : [];
-    const files = Array.isArray(listed) ? listed : [];
-    const markdown = this.app.workspace && this.app.workspace.getActiveViewOfType
-      ? this.app.workspace.getActiveViewOfType(MarkdownView)
-      : null;
-    const activePath = markdown && markdown.file && markdown.file.path;
-    const sorted = files
-      .filter((file) => file && file.path)
-      .slice()
-      .sort((left, right) => {
-        if (left.path === activePath) return -1;
-        if (right.path === activePath) return 1;
-        return String(left.path).localeCompare(String(right.path), "de");
-      });
-    const modal = new AttachmentModal(this.app, sorted, (notePath) => this.addAttachment(notePath));
+    const modal = new AttachmentModal(this.app, (notePath) => this.addAttachment(notePath));
     if (typeof modal.open === "function") modal.open();
   }
 
@@ -1785,7 +1791,21 @@ class UnitedShareView extends ItemView {
     const paths = (this.attachments || []).slice();
     if (!paths.length) return mentioned;
     const attached = await loadNamedNotes(paths, (notePath) => this.plugin.readVaultNote(notePath));
-    return this.plugin.embedForFrontier({ question, mentioned, attached });
+    try {
+      return await this.plugin.embedForFrontier({ question, mentioned, attached });
+    } catch (error) {
+      if (!(error instanceof UnitedShareError) || error.message === "Das lokale Embedding bleibt auf diesem Rechner.") {
+        throw error;
+      }
+      const gesehen = new Set();
+      const ganz = [];
+      for (const file of [...attached, ...mentioned]) {
+        if (!file || !file.path || gesehen.has(file.path)) continue;
+        gesehen.add(file.path);
+        ganz.push(file);
+      }
+      return ganz;
+    }
   }
 
   async mitTresor(frage, dateien) {
@@ -1810,18 +1830,11 @@ class UnitedShareView extends ItemView {
     return workspace.getActiveViewOfType(MarkdownView);
   }
 
-  async clipboardText() {
-    const reader = this.plugin && this.plugin.clipboardRead;
+  async eingefuegtenText() {
+    const reader = this.plugin && this.plugin.einfuegeText;
+    if (typeof reader !== "function") return null;
     try {
-      if (typeof reader === "function") {
-        const text = await reader.call(this.plugin);
-        return typeof text === "string" ? text : "";
-      }
-      const clip = typeof navigator !== "undefined" ? navigator.clipboard : null;
-      if (!clip || typeof clip.readText !== "function") {
-        throw new UnitedShareError("Die Zwischenablage lässt sich nicht lesen.");
-      }
-      const text = await clip.readText.call(clip);
+      const text = await reader.call(this.plugin);
       return typeof text === "string" ? text : "";
     } catch (error) {
       if (error instanceof UnitedShareError) throw error;
@@ -1865,9 +1878,21 @@ class UnitedShareView extends ItemView {
 
   async einfuegen() {
     if (this.busy) return;
+    const reader = this.plugin && this.plugin.einfuegeText;
+    if (typeof reader !== "function") {
+      const markdown = this.aktiveMarkdown();
+      const editor = markdown && markdown.editor;
+      const commands = this.app && this.app.commands;
+      if (editor && commands && typeof commands.executeCommandById === "function") {
+        commands.executeCommandById("editor:paste");
+        return;
+      }
+      new Notice("In das Feld mit dem Tastaturbefehl einfügen.");
+      return;
+    }
     let text = "";
     try {
-      text = await this.clipboardText();
+      text = await this.eingefuegtenText();
     } catch (error) {
       new Notice(error instanceof UnitedShareError ? error.message : "Die Zwischenablage lässt sich nicht lesen.");
       return;
@@ -1881,13 +1906,15 @@ class UnitedShareView extends ItemView {
 
   async mermaidEinfuegen() {
     if (this.busy) return;
-    let clip = "";
-    try {
-      clip = await this.clipboardText();
-    } catch (_err) {
-      clip = "";
+    let vorlage = "";
+    if (this.plugin && typeof this.plugin.einfuegeText === "function") {
+      try {
+        vorlage = await this.eingefuegtenText();
+      } catch (_err) {
+        vorlage = "";
+      }
     }
-    this.anCursorOderFeld(mermaidZumEinfuegen(clip, this.answer || ""));
+    this.anCursorOderFeld(mermaidZumEinfuegen(vorlage || "", this.answer || ""));
   }
 
   async notizenVerlinken() {
@@ -2232,7 +2259,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
       text: "Lesen, Listen, Schreiben und Starten laufen auf diesem Rechner über die Funktionen des offenen Tresors. Notiz hängt die offene Notiz an. Einfügen setzt die Zwischenablage an den Cursor. Antwort schreibt Frage und Antwort an den Cursor.",
     });
     containerEl.createEl("p", {
-      text: "Notiz nimmt eine Notiz aus diesem Tresor. Frage und Notiz werden auf diesem Rechner eingebettet, nur über 127.0.0.1, localhost oder ::1. Antwortet das Embedding nicht, geht die Frage nicht an das Modell.",
+      text: "Notiz nimmt eine Notiz aus diesem Tresor. Liegt ein Embedding auf 127.0.0.1, localhost oder ::1, kürzt es die Notiz. Fehlt Ollama oder das Modell, geht die ganze Notiz mit der Frage an das Modell.",
     });
     new Setting(containerEl)
       .setName("Token aufladen")
@@ -2370,7 +2397,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
     if (!Platform || !Platform.isMobile) {
     containerEl.createEl("h3", { text: "Mobilgerät-Sync (LAN/Tailscale)" });
     containerEl.createEl("p", {
-      text: "Öffnet einen kleinen Server, den ein Mobilgerät im selben WLAN oder über das Tailscale/Headscale-Mesh erreicht, um den Tresor abzugleichen. Standardmäßig aus. Bindet ausschließlich an die erkannte Adresse, nie an alle Netzwerkschnittstellen. Die Kopplung läuft über einen Code und ist auch über unverschlüsseltes WLAN sicher, weil die Antwort mit dem dabei ausgehandelten Schlüssel verschlüsselt wird.",
+      text: "Öffnet einen kleinen Server, den ein Mobilgerät im selben WLAN oder über das Tailscale/Headscale-Mesh erreicht, um den Tresor abzugleichen. Standardmäßig aus. Bindet ausschließlich an die eingetragene Adresse, nie an alle Schnittstellen. Die Kopplung läuft über einen Code und ist auch über unverschlüsseltes WLAN sicher, weil die Antwort mit dem dabei ausgehandelten Schlüssel verschlüsselt wird.",
     });
 
     this.hostAktivToggle = null;
@@ -2449,7 +2476,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
         button.setButtonText("Gerät koppeln").setCta().onClick(async () => {
           const zustand = await this.plugin.starteKoppeln();
           if (!zustand) {
-            new Notice("Für das Koppeln wird zuerst eine erkannte Adresse gebraucht.");
+            new Notice("Für das Koppeln wird zuerst eine Adresse gebraucht.");
             return;
           }
           this.display();
@@ -2696,59 +2723,34 @@ class UnitedShareSettingTab extends PluginSettingTab {
     if (this.statusMesh) paintMesh(this.statusMesh, view, false);
   }
 
-  // Zero-Config: die Adresse dieses Rechners wird erkannt statt von Hand
-  // eingetragen -- zuerst eine LAN-Adresse (lanAdresseAusInterfaces(),
-  // synchron, Kernmodul), nur wenn das nichts findet ein Tailscale-Fallback
-  // ("tailscale ip -4" ueber erkenneTailscaleAdresse(), Desktop-Core); siehe
-  // this.plugin.ermittleHostAdresse(). Ein alter, gespeicherter Wert wird
-  // bei einem Erkennungs-Fehlschlag NICHT geloescht (sonst verliert jemand
-  // eine funktionierende Konfiguration nur weil Tailscale gerade kurz nicht
-  // laeuft) -- nur neu erkannte, GEAENDERTE Adressen loesen einen
-  // Host-Neustart aus, damit ein blosses Oeffnen der Einstellungsseite
-  // keine laufende Mobilgeraet-Sitzung trennt.
-  async renderAdresse() {
+  // Die Adresse trägt der Nutzer ein. Eine automatische Abfrage der
+  // Rechnerkennung entfällt. Nur eine geänderte, gültige Adresse startet
+  // den Host neu, damit ein bloßes Öffnen der Einstellungen keine Sitzung trennt.
+  renderAdresse() {
     const host = this.tailscaleHost;
     if (!host) return;
-    const generation = (this.tailscaleGeneration = (this.tailscaleGeneration || 0) + 1);
     host.empty();
-    new Setting(host).setName("Adresse dieses Rechners").setDesc("Wird erkannt …");
-    let gefunden = null;
-    if (!runningNodeTest()) {
-      // Gleiche Vorsicht wie bei restartPeerSyncHost(): nie einen echten
-      // Tailscale-Prozess im Testlauf starten, auch nicht ueber ein
-      // Settings-Tab-display(), das in Tests mehrfach aufgerufen wird.
-      try {
-        gefunden = await this.plugin.ermittleHostAdresse();
-      } catch (_err) {
-        gefunden = null;
-      }
-    }
-    if (generation !== this.tailscaleGeneration || this.tailscaleHost !== host) return;
-    host.empty();
-    const vorhanden = String(this.plugin.settings.peerSyncAdresse || "").trim();
-    if (gefunden && gefunden.adresse) {
-      if (gefunden.adresse !== vorhanden || gefunden.art !== this.plugin.settings.peerSyncAdresseArt) {
-        this.plugin.settings.peerSyncAdresse = gefunden.adresse;
-        this.plugin.settings.peerSyncAdresseArt = gefunden.art;
-        await this.plugin.saveSettings();
-        if (gefunden.adresse !== vorhanden) this.plugin.restartPeerSyncHost();
-      }
-      new Setting(host)
-        .setName("Adresse dieses Rechners")
-        .setDesc(`${gefunden.art} erkannt: ${gefunden.adresse}`);
-      if (this.hostAktivToggle) this.hostAktivToggle.setDisabled(false);
-    } else {
-      const hinweis = vorhanden
-        ? `Weder LAN noch Tailscale wurden gerade gefunden. Die zuletzt erkannte Adresse (${vorhanden}) bleibt gespeichert, bis die Erkennung wieder anschlägt.`
-        : "Weder eine LAN- noch eine Tailscale-Adresse wurden auf diesem Rechner gefunden.";
-      new Setting(host).setName("Adresse dieses Rechners").setDesc(hinweis);
-      if (this.hostAktivToggle) this.hostAktivToggle.setDisabled(!vorhanden);
-    }
-    new Setting(host).addButton((button) => {
-      button.setButtonText("Erneut prüfen").onClick(() => {
-        void this.renderAdresse();
+    new Setting(host)
+      .setName("Adresse dieses Rechners")
+      .setDesc("Tailscale- oder private LAN-Adresse. Zum Beispiel 100.64.0.1 oder 192.168.1.20.")
+      .addText((text) => {
+        text.setPlaceholder("100.64.0.1");
+        text.setValue(String(this.plugin.settings.peerSyncAdresse || ""));
+        text.onChange(async (value) => {
+          const roh = String(value || "").trim();
+          const geprueft = adresseGueltig(roh);
+          if (roh && !geprueft) {
+            new Notice("Die Adresse ist keine Tailscale- oder private LAN-Adresse.");
+            return;
+          }
+          const bisher = String(this.plugin.settings.peerSyncAdresse || "").trim();
+          if (geprueft === bisher) return;
+          this.plugin.settings.peerSyncAdresse = geprueft;
+          await this.plugin.saveSettings();
+          if (this.hostAktivToggle) this.hostAktivToggle.setDisabled(!geprueft);
+          this.plugin.restartPeerSyncHost();
+        });
       });
-    });
   }
 
   async paintStatusMesh() {
@@ -3480,31 +3482,6 @@ module.exports = class UnitedSharePlugin extends Plugin {
     this.peerSyncServer = server;
   }
 
-  // -- Adresserkennung mit Rangfolge: zuerst LAN, nur bei Fehlschlag
-  // Tailscale. lanAdresseAusInterfaces() ist synchron und rein (Kernmodul,
-  // injiziertes os.networkInterfaces()); erkenneTailscaleAdresse() ruft
-  // einen echten Unterprozess auf ("tailscale ip -4"), deshalb async. Das
-  // Ergebnis trägt die Art mit (fürs Anzeigen in der Oberfläche), nicht nur
-  // die Adresse.
-  async ermittleHostAdresse() {
-    const os = nodeOs();
-    if (os && typeof os.networkInterfaces === "function") {
-      try {
-        const lan = lanAdresseAusInterfaces(os.networkInterfaces());
-        if (lan) return { adresse: lan, art: "LAN" };
-      } catch (_err) {
-        // weiter zum Tailscale-Fallback
-      }
-    }
-    try {
-      const ts = await erkenneTailscaleAdresse();
-      if (ts) return { adresse: ts, art: "Tailscale" };
-    } catch (_err) {
-      /* keine Adresse erkannt -- kein Fehler, nur kein Treffer */
-    }
-    return null;
-  }
-
   // -- Pairing (Host-Seite) -----------------------------------------------
   // Ersetzt die alte "Mobilgerät einladen"-Oberflaeche. Der Zustand lebt
   // AUSSCHLIESSLICH im Speicher dieses Plugin-Objekts (this.pairingZustand),
@@ -3522,14 +3499,11 @@ module.exports = class UnitedSharePlugin extends Plugin {
     const adresse = String((this.settings && this.settings.peerSyncAdresse) || "").trim();
     if (!adresse) return null;
     const port = Number(this.settings.peerSyncPort) || PEER_SYNC_PORT_STANDARD;
-    const os = nodeOs();
-    let geraetename = "Dieser Rechner";
-    try {
-      if (os && typeof os.hostname === "function") geraetename = os.hostname() || geraetename;
-    } catch (_err) {
-      /* Platzhalter bleibt stehen */
-    }
-    const { angebot, privaterSchluessel, code } = await erzeugePairingAngebot({ host: adresse, port, geraetename });
+    const { angebot, privaterSchluessel, code } = await erzeugePairingAngebot({
+      host: adresse,
+      port,
+      geraetename: "Dieser Rechner",
+    });
     const token = neuesPeerSyncToken();
     if (!token) return null;
     this.pairingZustand = {
@@ -3631,9 +3605,9 @@ module.exports = class UnitedSharePlugin extends Plugin {
     return {
       pruefeToken: (token) => peerSyncTokenGueltig(this.settings.peerSyncGeraete, token),
       schluesselFuerToken: (token) => peerSyncSchluesselFuerToken(this.settings.peerSyncGeraete, token),
-      listeDateien: () => {
-        if (!vault || typeof vault.getFiles !== "function") return [];
-        return vault.getFiles().map((file) => ({
+      listeDateien: async () => {
+        const dateien = await dateienImTresor(vault);
+        return dateien.map((file) => ({
           pfad: file.path,
           mtime: file.stat && file.stat.mtime,
           groesse: file.stat && file.stat.size,
@@ -3763,11 +3737,11 @@ module.exports = class UnitedSharePlugin extends Plugin {
   // wird hier ver-/entschlüsselt -- Gegenstück zu
   // peerSyncVerschluesselteJson()/peerSyncEntschluesselterKoerper() im
   // Kernmodul auf der Host-Seite.
-  mobilSyncHost() {
+  async mobilSyncHost() {
     const host = adapterVaultHost(this.vaultAdapter());
     const vault = this.app && this.app.vault;
-    const vorhandenePfade = () =>
-      new Set((vault && typeof vault.getFiles === "function" ? vault.getFiles() : []).map((f) => f.path));
+    const dateien = await dateienImTresor(vault);
+    const vorhandenePfade = async () => new Set((await dateienImTresor(vault)).map((file) => file.path));
     return {
       fernManifestHolen: async () => {
         const schluessel = this.mobilSyncSchluesselOderFehler();
@@ -3793,22 +3767,18 @@ module.exports = class UnitedSharePlugin extends Plugin {
           body: JSON.stringify(verschluesselt),
         });
       },
-      lokalDateien:
-        vault && typeof vault.getFiles === "function"
-          ? vault.getFiles().map((file) => ({
-              pfad: file.path,
-              mtime: file.stat && file.stat.mtime,
-              groesse: file.stat && file.stat.size,
-            }))
-          : [],
+      lokalDateien: dateien.map((file) => ({
+        pfad: file.path,
+        mtime: file.stat && file.stat.mtime,
+        groesse: file.stat && file.stat.size,
+      })),
       lokalInhaltLesen: (pfad) => host.read(pfad),
       lokalInhaltSchreiben: (pfad, inhalt) => host.write(pfad, inhalt),
       letzterStand: (this.settings && this.settings.mobilSyncLetzterStand) || {},
-      // konfliktDateiname() prüft synchron -- ein Set vorhandener Pfade
-      // (vault.getFiles(), bereits im Speicher) statt eines async-Prädikats
-      // über den Adapter, sonst würde die interne do/while-Schleife ein
-      // Promise-Objekt (immer wahrheitswertig) statt eines Bool prüfen.
-      konfliktNameFrei: (pfad) => konfliktDateiname(pfad, vorhandenePfade()),
+      // Vor jedem Konfliktnamen neu lesen, damit eine eben geschriebene
+      // Kopie den nächsten Namen weiterschiebt. konfliktDateiname bleibt
+      // synchron und bekommt das fertige Set.
+      konfliktNameFrei: async (pfad) => konfliktDateiname(pfad, await vorhandenePfade()),
     };
   }
 
@@ -3829,7 +3799,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
       return;
     }
     try {
-      const ergebnis = await fuehreSyncDurch(this.mobilSyncHost());
+      const ergebnis = await fuehreSyncDurch(await this.mobilSyncHost());
       this.settings.mobilSyncLetzterStand = ergebnis.letzterStand;
       await this.saveSettings();
       if (ergebnis.push || ergebnis.pull || ergebnis.konflikt) {
@@ -4376,8 +4346,7 @@ module.exports = class UnitedSharePlugin extends Plugin {
     }
     try {
       const vault = this.app && this.app.vault;
-      const listed = vault && typeof vault.getMarkdownFiles === "function" ? vault.getMarkdownFiles() : [];
-      const dateien = Array.isArray(listed) ? listed : [];
+      const dateien = await dateienImTresor(vault, { nurMarkdown: true });
       const notizen = [];
       for (const datei of dateien) {
         if (!datei || typeof datei.path !== "string" || !datei.path) continue;

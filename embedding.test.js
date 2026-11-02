@@ -94,7 +94,7 @@ test("eine fehlende Anlage ruft das Embedding nicht", async () => {
   ]);
 });
 
-test("ohne passendes Modell bleibt die Frage hier", async () => {
+test("ohne passendes Modell geht die ganze Notiz mit", async () => {
   const { server, port } = await listen((req, res) => {
     assert.equal(req.headers.authorization, undefined);
     if (req.url !== "/api/tags") {
@@ -113,22 +113,9 @@ test("ohne passendes Modell bleibt die Frage hier", async () => {
       embedUrl: `http://127.0.0.1:${port}`,
       fetchImpl: globalThis.fetch,
     };
-    await assert.rejects(
-      () => prepareContextFiles(base),
-      (error) => {
-        assert.ok(error instanceof UnitedShareError);
-        assert.equal(error.message, "Auf diesem Rechner liegt kein passendes Embedding-Modell.");
-        return true;
-      },
-    );
-    await assert.rejects(
-      () => prepareContextFiles({ ...base, embedModel: "bge-m3" }),
-      (error) => {
-        assert.ok(error instanceof UnitedShareError);
-        assert.equal(error.message, "Das Embedding-Modell liegt auf diesem Rechner nicht.");
-        return true;
-      },
-    );
+    const ganz = [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }];
+    assert.deepEqual(await prepareContextFiles(base), ganz);
+    assert.deepEqual(await prepareContextFiles({ ...base, embedModel: "bge-m3" }), ganz);
   } finally {
     server.close();
   }
@@ -155,30 +142,24 @@ test("eine Antwort ausserhalb dieses Rechners wird verworfen", async () => {
   );
 });
 
-test("ein stiller Dienst bricht vor dem Modell ab", async () => {
+test("ein stiller Dienst lässt die ganze Notiz durch", async () => {
   const { server, port } = await listen(() => {});
   try {
-    await assert.rejects(
-      () => prepareContextFiles({
-        question: "Nordflügel",
-        mentioned: [],
-        attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
-        embedUrl: `http://127.0.0.1:${port}`,
-        fetchImpl: globalThis.fetch,
-        timeoutMs: 50,
-      }),
-      (error) => {
-        assert.ok(error instanceof UnitedShareError);
-        assert.equal(error.message, "Das lokale Embedding auf diesem Rechner antwortet nicht.");
-        return true;
-      },
-    );
+    const files = await prepareContextFiles({
+      question: "Nordflügel",
+      mentioned: [],
+      attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
+      embedUrl: `http://127.0.0.1:${port}`,
+      fetchImpl: globalThis.fetch,
+      timeoutMs: 50,
+    });
+    assert.deepEqual(files, [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }]);
   } finally {
     server.close();
   }
 });
 
-test("Status ungleich 200 und ein einzelner Vektor brechen ab", async () => {
+test("Status ungleich 200 und ein einzelner Vektor lassen die Notiz durch", async () => {
   const { server, port } = await listen(async (req, res) => {
     assert.equal(req.headers.authorization, undefined);
     if (req.url === "/api/tags") {
@@ -190,20 +171,13 @@ test("Status ungleich 200 und ein einzelner Vektor brechen ab", async () => {
     res.end("nein");
   });
   try {
-    await assert.rejects(
-      () => prepareContextFiles({
-        question: "Nordflügel",
-        mentioned: [],
-        attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
-        embedUrl: `http://127.0.0.1:${port}`,
-        fetchImpl: globalThis.fetch,
-      }),
-      (error) => {
-        assert.ok(error instanceof UnitedShareError);
-        assert.equal(error.message, "Das lokale Embedding auf diesem Rechner antwortet nicht.");
-        return true;
-      },
-    );
+    assert.deepEqual(await prepareContextFiles({
+      question: "Nordflügel",
+      mentioned: [],
+      attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
+      embedUrl: `http://127.0.0.1:${port}`,
+      fetchImpl: globalThis.fetch,
+    }), [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }]);
   } finally {
     server.close();
   }
@@ -218,20 +192,13 @@ test("Status ungleich 200 und ein einzelner Vektor brechen ab", async () => {
     res.end(JSON.stringify({ embedding: [1, 0] }));
   });
   try {
-    await assert.rejects(
-      () => prepareContextFiles({
-        question: "Nordflügel",
-        mentioned: [],
-        attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
-        embedUrl: `http://127.0.0.1:${single.port}`,
-        fetchImpl: globalThis.fetch,
-      }),
-      (error) => {
-        assert.ok(error instanceof UnitedShareError);
-        assert.equal(error.message, "Die Antwort des lokalen Embeddings war nicht lesbar.");
-        return true;
-      },
-    );
+    assert.deepEqual(await prepareContextFiles({
+      question: "Nordflügel",
+      mentioned: [],
+      attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
+      embedUrl: `http://127.0.0.1:${single.port}`,
+      fetchImpl: globalThis.fetch,
+    }), [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }]);
   } finally {
     single.server.close();
   }
@@ -311,7 +278,7 @@ test("Anleitung und Fassung nennen das lokale Embedding", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const main = fs.readFileSync(path.join(root, "main.js"), "utf8");
-  assert.equal(manifest.version, "1.2.14");
+  assert.equal(manifest.version, "1.2.15");
   assert.equal(manifest.description.endsWith("."), true);
   assert.equal(manifest.description.length <= 250, true);
   assert.equal(manifest.isDesktopOnly, false);

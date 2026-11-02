@@ -250,6 +250,87 @@ test("eine Antwort, die nur das Aktionsobjekt ist, legt die Datei an", async () 
   assert.equal(host.geschrieben[0].inhalt, "nur json\n");
 });
 
+test("ein vollständiges JSON ohne schließenden Zaun legt die Datei an", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  const offen = [
+    "Ich lege die Notiz an.",
+    "```unitedshare",
+    JSON.stringify({ action: "write", path: "Offen.md", content: "steht\n" }),
+  ].join("\n");
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Offen.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      if (aufrufe === 1) return offen;
+      return "Fertig.";
+    },
+  });
+  assert.equal(host.geschrieben.length, 1);
+  assert.equal(host.geschrieben[0].pfad, "Offen.md");
+  assert.equal(host.geschrieben[0].inhalt, "steht\n");
+  assert.equal(aufrufe, 2);
+});
+
+test("ein abgeschnittener Sprachzaun legt nichts an und fragt einmal nach", async () => {
+  const host = tresor();
+  const gesehen = [];
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Offen.md an." }],
+    host,
+    complete: async (thread) => {
+      gesehen.push(thread.map((turn) => turn.content).join("\n"));
+      if (gesehen.length === 1) return "Ich lege die Notiz an.\n```united";
+      if (gesehen.length === 2) return block({ action: "write", path: "Offen.md", content: "kurz\n" });
+      return "Fertig.";
+    },
+  });
+  assert.equal(gesehen.length >= 2, true);
+  assert.match(gesehen[1], /abgeschnitten/);
+  assert.equal(gesehen[1].includes("der Block fehlt"), false);
+  assert.equal(host.geschrieben.length, 1);
+  assert.equal(host.geschrieben[0].inhalt, "kurz\n");
+});
+
+test("unvollständiges JSON im offenen Zaun legt nichts an", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Offen.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      return 'Ich lege an.\n```unitedshare\n{"action":"write","path":"Offen.md","content":"halb';
+    },
+  });
+  assert.equal(aufrufe, 2);
+  assert.equal(host.geschrieben.length, 0);
+});
+
+test("YAML ohne schließenden Zaun legt nichts an", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  const yaml = [
+    "```unitedshare",
+    "action: write",
+    "path: Einkaufsliste.md",
+    "content: |",
+    "  # Einkauf",
+    "  - Brot",
+  ].join("\n");
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Einkaufsliste.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      return yaml;
+    },
+  });
+  assert.equal(aufrufe, 2);
+  assert.equal(host.geschrieben.length, 0);
+});
+
 test("kaputtes JSON im unitedshare-Block gilt als verfehltes Format", async () => {
   const host = tresor();
   let aufrufe = 0;
