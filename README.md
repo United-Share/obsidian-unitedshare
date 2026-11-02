@@ -14,7 +14,7 @@ Die vollständige Übersicht über Werkzeuge, Gespräche und Einstellungen steht
 2. Zugang über die [Console](https://console.unitedshare.io/) oder direkt den [Zugang für Obsidian](https://unitedshare.ai/app/?q=obsidian) anlegen. Der Schlüssel steht dort einmal — in die Plugin-Einstellungen unter **API-Schlüssel** gehört nur er, nicht die key-ID.
 3. Den vollständigen Plugin-Ordner nach `.obsidian/plugins/unitedshare/` kopieren und das Plugin einschalten.
 
-UnitedShare steht **nicht** in den Community-Plugins und wird dort auch nicht angeboten: In der Registry (`community-plugins.json`) gibt es keinen Eintrag, im Registry-Repo keinen Aufnahme-PR und keinen Commit dazu. Ein Store-Installer existiert also nicht; die Installation erfolgt von Hand über den kompletten Ordner samt Unterordner `duckdb/`.
+UnitedShare ist auf der Community-Seite eingetragen: https://community.obsidian.md/plugins/unitedshare . Der Eintrag ist dem verknüpften Konto zugeordnet. Die automatische Prüfung von Release 1.2.14 läuft (Stand 2. November 2026: Attestierung bestanden, Hinweise zu Shell-Aufrufen und Systemdaten, Ergebnis noch offen). `community-plugins.json` enthält UnitedShare in diesem Stand nicht. Die Suche in Obsidian kann den Eintrag später zeigen als die Community-Seite. Für DuckDB den vollständigen Ordner samt Unterordner `duckdb/` nach `.obsidian/plugins/unitedshare/` kopieren. Der Community-Installer liefert nur `main.js`, `manifest.json` und `styles.css`.
 
 ### DuckDB (Parquet/SQL) braucht die mitgelieferte Laufzeit
 
@@ -124,4 +124,4 @@ Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. E
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.14`. Nicht in den Community-Plugins gelistet.
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.14`. Community-Seite: https://community.obsidian.md/plugins/unitedshare . Prüfung von 1.2.14 läuft. `community-plugins.json` enthält den Eintrag in diesem Stand nicht.
