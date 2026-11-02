@@ -184,9 +184,9 @@ test("auch andere Aktionsarten werden erkannt", async () => {
 //   ```
 //
 // JSON kennt keinen Blockskalar, deshalb weicht das Modell bei mehrzeiligem
-// Inhalt auf YAML aus. parseVaultActions verlangt aber JSON, und der alte
-// verfehltesProtokoll-Check stieg beim unitedshare-Block sofort aus -- also
-// endete der Lauf mit der Ankuendigung, angelegt wurde nichts.
+// Inhalt auf YAML aus. Innerhalb des unitedshare-Zauns liest ein strenger
+// Ausschnitt (action, path, content: |) die Notiz. YAML ausserhalb des Zauns
+// und unbekannte Schlüssel bleiben unbearbeitet.
 const YAML_BLOCK = [
   "Ich lege die Notiz an.",
   "```unitedshare",
@@ -198,7 +198,7 @@ const YAML_BLOCK = [
   "```",
 ].join("\n");
 
-test("ein YAML-Block gilt als verfehltes Format und wird nachgefasst", async () => {
+test("ein YAML-Block im unitedshare-Zaun legt die Notiz beim ersten Versuch an", async () => {
   const host = tresor();
   let aufrufe = 0;
   await runVaultInstruction({
@@ -207,23 +207,47 @@ test("ein YAML-Block gilt als verfehltes Format und wird nachgefasst", async () 
     complete: async () => {
       aufrufe += 1;
       if (aufrufe === 1) return YAML_BLOCK;
-      if (aufrufe === 2) return block({ action: "write", path: "Einkaufsliste.md", content: "# Einkaufsliste\n- Brot\n" });
       return "Fertig.";
     },
   });
-  assert.equal(aufrufe >= 3, true, "auf YAML muss ein zweiter Versuch folgen");
-  assert.equal(host.geschrieben.length, 1, "der korrigierte Versuch legt die Datei an");
+  assert.equal(aufrufe, 2, "ein Aufruf für die Aktion, einer für die Zusammenfassung");
+  assert.equal(host.geschrieben.length, 1);
+  assert.equal(host.geschrieben[0].pfad, "Einkaufsliste.md");
+  assert.equal(host.geschrieben[0].inhalt, "# Einkaufsliste\n- Brot\n");
 });
 
-test("YAML wird nie direkt ausgeführt", async () => {
+test("YAML ausserhalb des Zauns legt keine Datei an", async () => {
   const host = tresor();
+  let aufrufe = 0;
+  const ohneZaun = YAML_BLOCK.replace(/```unitedshare\n|```/g, "");
   await runVaultInstruction({
     turns: [{ role: "user", content: "Lege Einkaufsliste.md an." }],
     host,
-    complete: async () => YAML_BLOCK,
+    complete: async () => {
+      aufrufe += 1;
+      return ohneZaun;
+    },
   });
-  assert.equal(host.geschrieben.length, 0,
-    "ein YAML-Block darf niemals auf Verdacht geschrieben werden");
+  assert.equal(aufrufe, 2, "der Hinweis kommt einmal, dann ist Schluss");
+  assert.equal(host.geschrieben.length, 0);
+});
+
+test("eine Antwort, die nur das Aktionsobjekt ist, legt die Datei an", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Ganz.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      if (aufrufe === 1) return '{"action":"write","path":"Ganz.md","content":"nur json\\n"}';
+      return "Fertig.";
+    },
+  });
+  assert.equal(aufrufe, 2);
+  assert.equal(host.geschrieben.length, 1);
+  assert.equal(host.geschrieben[0].pfad, "Ganz.md");
+  assert.equal(host.geschrieben[0].inhalt, "nur json\n");
 });
 
 test("kaputtes JSON im unitedshare-Block gilt als verfehltes Format", async () => {

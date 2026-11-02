@@ -123,6 +123,37 @@ test("Frontmatter und verschachtelte Codeblöcke überleben", () => {
   assert.equal(nachher.messages[0].content, heikel);
 });
 
+test("eine Bildlast ohne Pfad übersteht die Ablage nicht", () => {
+  const fleck = "A".repeat(120);
+  const vorher = eintrag({
+    messages: [{
+      role: "assistant",
+      content: "Kugel",
+      bilder: [{ mime: "image/png", b64: fleck, prompt: "Kugel" }],
+    }],
+  });
+  const text = chatAlsText(vorher);
+  assert.equal(text.includes(fleck), false);
+  const nachher = chatAusText(text);
+  assert.equal(Object.hasOwn(nachher.messages[0], "bilder"), false);
+  assert.equal(nachher.messages[0].content, "Kugel");
+});
+
+test("ein Bild mit Pfad verliert das Base64", () => {
+  const fleck = "A".repeat(120);
+  const vorher = eintrag({
+    messages: [{
+      role: "assistant",
+      content: "Kugel",
+      bilder: [{ mime: "image/png", b64: fleck, path: "UnitedShare/bilder/a.png", prompt: "Kugel" }],
+    }],
+  });
+  const nachher = chatAusText(chatAlsText(vorher));
+  assert.equal(Object.hasOwn(nachher.messages[0].bilder[0], "b64"), false);
+  assert.equal(nachher.messages[0].bilder[0].path, "UnitedShare/bilder/a.png");
+  assert.equal(nachher.messages[0].bilder[0].prompt, "Kugel");
+});
+
 test("Anhänge bleiben erhalten", () => {
   const vorher = eintrag({
     messages: [

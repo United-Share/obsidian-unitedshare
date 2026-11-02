@@ -294,13 +294,18 @@ const DEFAULT_SETTINGS = {
 
 function bildFuerAblage(bild) {
   if (!bild || bild.laden) return null;
-  const stored = { mime: bild.mime, prompt: bild.prompt };
-  if (typeof bild.path === "string" && bild.path) stored.path = bild.path;
-  else if (typeof bild.b64 === "string" && bild.b64) stored.b64 = bild.b64;
-  else return null;
+  if (typeof bild.path !== "string" || !bild.path) return null;
+  const stored = { mime: bild.mime, prompt: bild.prompt, path: bild.path };
   if (Number.isInteger(bild.breite)) stored.breite = bild.breite;
   if (Number.isInteger(bild.hoehe)) stored.hoehe = bild.hoehe;
   return stored;
+}
+
+function bildMarkdown(rel, prompt) {
+  const einbettung = `![[${rel}]]`;
+  const unter = String(prompt || "").replace(/[\r\n]+/g, " ").trim().replace(/[*_[\]]/g, "");
+  if (!unter) return einbettung;
+  return `${einbettung}\n*${unter}*`;
 }
 
 function bildOrdnerNormal(value) {
@@ -370,10 +375,12 @@ const SYSTEM_PROMPT = [
   '{"action":"read","path":"relativer/pfad.md"}',
   "```",
   "action ist read, list, write oder run. path ist relativ zum Tresor, ohne .. und ohne absoluten Pfad. content gehört nur zu write. run startet nur eine vorhandene Datei .py, .js, .mjs oder .sh.",
-  "Der Block enthält IMMER genau ein JSON-Objekt in einer Zeile -- niemals YAML, niemals action: write. Mehrzeiliger Inhalt steht als JSON-String mit \\n zwischen den Zeilen:",
+  "Der Block enthält ein JSON-Objekt. Mehrzeiliger Inhalt steht als JSON-String mit \\n zwischen den Zeilen:",
   "```unitedshare",
   '{"action":"write","path":"Notiz.md","content":"# Titel\\n\\nErster Absatz.\\n\\n- Punkt eins\\n- Punkt zwei\\n"}',
   "```",
+  "Mehrzeiliger Inhalt darf im selben Block auch Feld für Feld stehen: zuerst action, dann path, dann content: | und der Text eingerückt darunter.",
+  "Bilder gehören nie als data:image oder Base64 in den Inhalt. Binde sie als ![[UnitedShare/bilder/name.png]] ein und setze die Aufforderung als kursive Zeile darunter.",
   "Nimmt der Nutzer eine Einladung oder eine Empfangsdatei im Tresor an, setzt du einen Block:",
   "```unitedshare",
   '{"action":"mesh-join","path":"relativer/pfad.json"}',
@@ -1424,18 +1431,29 @@ class UnitedShareView extends ItemView {
     return rel;
   }
 
-  async bildInNotiz(bild) {
+  async bildInNotiz(bild, optionen) {
+    const still = Boolean(optionen && optionen.still);
     const markdown = this.aktiveMarkdown();
     if (!markdown || !markdown.editor) {
-      new Notice("Keine aktive Notiz.");
-      return;
+      if (!still) new Notice("Keine aktive Notiz.");
+      return false;
     }
     let rel = bild && typeof bild.path === "string" ? bild.path : "";
     if (!rel) {
-      rel = await this.bildDateiSchreiben(bild);
+      try {
+        rel = await this.bildDateiSchreiben(bild);
+      } catch (error) {
+        if (still) return false;
+        throw error;
+      }
       if (bild) bild.path = rel;
     }
-    markdown.editor.replaceRange(`![[${rel}]]`, markdown.editor.getCursor());
+    const editor = markdown.editor;
+    const bisher = typeof editor.getValue === "function" ? String(editor.getValue()) : "";
+    if (bisher.includes(`![[${rel}]]`)) return true;
+    const cursor = typeof editor.getCursor === "function" ? editor.getCursor() : { line: 0, ch: 0 };
+    editor.replaceRange(bildMarkdown(rel, bild && bild.prompt), cursor);
+    return true;
   }
 
   async bildErzeugen(mass) {
@@ -1485,6 +1503,13 @@ class UnitedShareView extends ItemView {
         if (pfad) gespeichert.path = pfad;
       } catch (_err) {
         // Die Sitzung zeigt die Datenadresse. Die Datei fehlt, bis der Tresor sie annimmt.
+      }
+      if (gespeichert.path) {
+        try {
+          await this.bildInNotiz(gespeichert, { still: true });
+        } catch (_err) {
+          // Die Abbildung bleibt in der Seitenleiste.
+        }
       }
       nachricht.content = gespeichert.prompt;
       nachricht.bilder = [gespeichert];

@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { completeMessages, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");
+const { buildChatBody, chunkNote, completeMessages, executeVaultAction, runVaultInstruction, UnitedShareError } = require("./unitedshare-core");
 
 function transport(aufrufe) {
   return async (url, options) => {
@@ -45,6 +45,46 @@ test("Budgetfehler zeigt nur Größen, keine vertraulichen Inhalte", async () =>
     return true;
   });
   assert.equal(calls.length, 0);
+});
+
+test("eine data-URL im Verlauf wird vor dem Versand ersetzt", () => {
+  const blob = "A".repeat(80);
+  const body = buildChatBody({
+    model: "test",
+    turns: [{
+      role: "user",
+      content: `Siehe data:image/png;base64,${blob} Ende`,
+      files: [{ path: "bild.md", text: `Vorher ![](data:image/png;base64,${blob}) Danach` }],
+    }],
+  });
+  const text = body.messages.map((message) => message.content).join("\n");
+  assert.equal(text.includes("data:image"), false);
+  assert.match(text, /\[Bild ausgelassen\]/);
+  assert.match(text, /Ende/);
+  assert.match(text, /Vorher/);
+  assert.match(text, /Danach/);
+});
+
+test("Einbettungsstücke tragen keine data-URL", () => {
+  const blob = "A".repeat(80);
+  const pieces = chunkNote("a.md", `Anfang\n\ndata:image/png;base64,${blob}\n\nEnde`);
+  const joined = pieces.map((piece) => piece.text).join("\n");
+  assert.equal(joined.includes("data:image"), false);
+  assert.match(joined, /Anfang/);
+  assert.match(joined, /Ende/);
+});
+
+test("Schreiben legt keine data-URL in die Datei", async () => {
+  const blob = "A".repeat(80);
+  const geschrieben = [];
+  await executeVaultAction(
+    { action: "write", path: "a.md", content: `Vorher\ndata:image/png;base64,${blob}\nEnde` },
+    { async write(pfad, inhalt) { geschrieben.push({ pfad, inhalt }); } },
+  );
+  assert.equal(geschrieben.length, 1);
+  assert.equal(geschrieben[0].inhalt.includes("data:image"), false);
+  assert.match(geschrieben[0].inhalt, /Vorher/);
+  assert.match(geschrieben[0].inhalt, /Ende/);
 });
 
 test("Fehler nach Werkzeugschritt warnt vor erneutem Versuch ohne Zustand zu verlieren", async () => {

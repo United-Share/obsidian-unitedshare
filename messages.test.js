@@ -107,10 +107,13 @@ test("listModels liest die Kennungen aus einem authentifizierten GET /v1/models"
     assert.equal(seen[0].method, "GET");
     assert.equal(seen[0].url, "/v1/models");
     assert.equal(seen[0].authorization, "Bearer test-key");
-    assert.deepEqual(ids, ["rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"]);
+    // mobil ist seit 01.11.2026 fuer On-Device reserviert: der Server darf
+    // ihn nennen, die Allowlist filtert ihn trotzdem heraus.
+    assert.deepEqual(ids, ["rmxos-sema2026.1", "rmxos-mega2026.1"]);
     assert.equal(isObsidianModel("rmxos-mega2026.1"), true);
     assert.equal(isObsidianModel("devstral"), false);
     assert.equal(isObsidianModel("reemax-cortex"), false);
+    assert.equal(isObsidianModel("rmxos-mobil2026.1"), false);
   } finally {
     server.close();
   }
@@ -371,6 +374,69 @@ test("completeMessages setzt Content-Length auf die UTF-8-Bytezahl", async () =>
   assert.match(seen.body, /Größe/);
   assert.notEqual(Buffer.byteLength(seen.body), seen.body.length);
   assert.equal(seen.headers["Content-Length"], String(Buffer.byteLength(seen.body)));
+});
+
+test("ein write-Werkzeugaufruf wird zum unitedshare-Block", async () => {
+  const { server, port } = await listen((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      type: "message",
+      role: "assistant",
+      content: [{
+        type: "tool_use",
+        id: "t1",
+        name: "write",
+        input: { path: "Notiz.md", content: "Hallo" },
+      }],
+      stop_reason: "tool_use",
+    }));
+  });
+  try {
+    const text = await completeMessages({
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      model: "rmxos-mega2026.1",
+      system: "s",
+      turns: [{ role: "user", content: "leg an" }],
+    });
+    assert.match(text, /```unitedshare/);
+    assert.match(text, /"action":"write"/);
+    assert.match(text, /Notiz\.md/);
+    assert.match(text, /Hallo/);
+  } finally {
+    server.close();
+  }
+});
+
+test("ein OpenAI-tool_call write wird zum unitedshare-Block", async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            function: {
+              name: "write",
+              arguments: JSON.stringify({ path: "Notiz.md", content: "Hallo" }),
+            },
+          }],
+        },
+      }],
+    }),
+  });
+  const text = await completeMessages({
+    baseUrl: "https://api.unitedshare.ai/v1",
+    apiKey: "test-key",
+    model: "rmxos-mobil2026.1",
+    form: "chat",
+    turns: [{ role: "user", content: "leg an" }],
+    fetchImpl,
+  });
+  assert.match(text, /```unitedshare/);
+  assert.match(text, /"action":"write"/);
+  assert.match(text, /Notiz\.md/);
 });
 
 test("ein reiner tool_use-Block ist keine Antwort", async () => {

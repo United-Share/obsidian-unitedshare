@@ -258,10 +258,29 @@ function escapeAttr(value) {
     .replace(/</g, "&lt;");
 }
 
+// Eine data-URL oder ein langer Base64-Lauf in einer Notiz wurde bei jedem
+// Turn erneut mitgeschickt und sprengte das Fenster
+// (litellm.ContextWindowExceededError). Die Vorschau in der Seitenleiste
+// darf die Datenadresse behalten. In den Modellkörper, in die Einbettung
+// und in die Gesprächsdatei gehört sie nicht.
+function bildlastEntfernen(text) {
+  let next = String(text ?? "");
+  if (!next) return next;
+  // Der Lauf endet am ersten Zeichen ausserhalb von Base64. Sonst frisst
+  // das Leerzeichen das folgende Wort mit, und eine lange Buchstabenkette
+  // (ein Abschnitt, ein Budgetprobe) gälte als Bild.
+  next = next.replace(/!\[[^\]]*\]\(\s*data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]{40,}\s*\)/gi, "[Bild ausgelassen]");
+  next = next.replace(/<img\b[^>]*\bsrc\s*=\s*["']data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]{40,}["'][^>]*>/gi, "[Bild ausgelassen]");
+  next = next.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]{40,}/gi, "[Bild ausgelassen]");
+  next = next.replace(/("b64"\s*:\s*")[A-Za-z0-9+/=]{80,}(")/g, "$1[Bild ausgelassen]$2");
+  next = next.replace(/[A-Za-z0-9+/]{80,}[+\/][A-Za-z0-9+/]{80,}={0,2}/g, "[Bild ausgelassen]");
+  return next;
+}
+
 function linkedNoteText(file) {
   const body = file && file.missing
     ? "Die Datei liegt nicht im Tresor."
-    : String((file && file.text) || "");
+    : bildlastEntfernen(String((file && file.text) || ""));
   return `<linked_content path="${escapeAttr(file.path)}">\n${body}\n</linked_content>`;
 }
 
@@ -286,7 +305,7 @@ function buildAnthropicBody({ model, system, turns, maxTokens = 1200 }) {
   const messages = [];
   liste.forEach((turn, index) => {
     if (!turn || (turn.role !== "user" && turn.role !== "assistant")) return;
-    const content = [{ type: "text", text: String(turn.content || "") }];
+    const content = [{ type: "text", text: bildlastEntfernen(String(turn.content || "")) }];
     if (turn.role === "user" && index === letzter) {
       for (const file of turn.files || []) {
         if (!file || !file.path) continue;
@@ -311,7 +330,7 @@ function buildChatBody({ model, system, turns, maxTokens = 1200 }) {
   if (typeof system === "string" && system) messages.push({ role: "system", content: system });
   liste.forEach((turn, index) => {
     if (!turn || (turn.role !== "user" && turn.role !== "assistant")) return;
-    let content = String(turn.content || "");
+    let content = bildlastEntfernen(String(turn.content || ""));
     if (turn.role === "user" && index === letzter) {
       const linked = [];
       for (const file of turn.files || []) {
@@ -667,6 +686,121 @@ function takeSse(buffer, emit) {
   return rest;
 }
 
+// Nur diese Namen sind Tresor-Aktionen. "Read" oder "Bash" bleiben eine leere
+// Antwort: Grossschreibung darf nicht versehentlich lesen.
+const WERKZEUG_NAMEN = new Set(["read", "list", "write", "run", "sync", "mesh-join"]);
+
+function werkzeugEintrag(liste, index) {
+  const stelle = Number.isInteger(index) && index >= 0 ? index : liste.length;
+  if (!liste[stelle]) liste[stelle] = { name: "", args: "", input: null };
+  return liste[stelle];
+}
+
+function werkzeugSammeln(liste, event) {
+  if (!event || typeof event !== "object" || !Array.isArray(liste)) return;
+  if (event.type === "content_block_start" && event.content_block && event.content_block.type === "tool_use") {
+    const block = event.content_block;
+    const eintrag = werkzeugEintrag(liste, event.index);
+    if (typeof block.name === "string" && block.name) eintrag.name = block.name;
+    if (block.input && typeof block.input === "object" && !Array.isArray(block.input)) eintrag.input = block.input;
+    return;
+  }
+  if (event.type === "content_block_delta" && event.delta && event.delta.type === "input_json_delta") {
+    const eintrag = werkzeugEintrag(liste, event.index);
+    if (typeof event.delta.partial_json === "string") eintrag.args += event.delta.partial_json;
+    return;
+  }
+  const choice = Array.isArray(event.choices) ? event.choices[0] : null;
+  const deltaCalls = choice && choice.delta && Array.isArray(choice.delta.tool_calls) ? choice.delta.tool_calls : null;
+  const messageCalls = choice && choice.message && Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : null;
+  const calls = deltaCalls || messageCalls;
+  if (!calls) return;
+  for (const call of calls) {
+    if (!call || typeof call !== "object") continue;
+    const eintrag = werkzeugEintrag(liste, call.index);
+    const fn = call.function || {};
+    if (typeof fn.name === "string" && fn.name) eintrag.name = fn.name;
+    if (typeof fn.arguments === "string") eintrag.args += fn.arguments;
+  }
+}
+
+function werkzeugeAusKoerper(data) {
+  const liste = [];
+  if (data && Array.isArray(data.content)) {
+    for (const part of data.content) {
+      if (!part || part.type !== "tool_use") continue;
+      const eintrag = { name: typeof part.name === "string" ? part.name : "", args: "", input: null };
+      if (part.input && typeof part.input === "object" && !Array.isArray(part.input)) eintrag.input = part.input;
+      else if (typeof part.input === "string") eintrag.args = part.input;
+      liste.push(eintrag);
+    }
+  }
+  const choice = data && data.choices && data.choices[0];
+  const calls = choice && choice.message && Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : null;
+  if (calls) {
+    for (const call of calls) {
+      if (!call) continue;
+      const fn = call.function || {};
+      liste.push({
+        name: typeof fn.name === "string" ? fn.name : "",
+        args: typeof fn.arguments === "string" ? fn.arguments : "",
+        input: null,
+      });
+    }
+  }
+  return liste;
+}
+
+function aktionAusWerkzeug(werkzeug) {
+  if (!werkzeug || !WERKZEUG_NAMEN.has(werkzeug.name)) return null;
+  const roh = String(werkzeug.args || "").trim();
+  let data = null;
+  if (roh) {
+    try {
+      data = JSON.parse(roh);
+    } catch (_err) {
+      return null;
+    }
+  } else if (werkzeug.input && typeof werkzeug.input === "object" && !Array.isArray(werkzeug.input)) {
+    data = werkzeug.input;
+  } else {
+    data = {};
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  return aktionAusDaten({ ...data, action: werkzeug.name });
+}
+
+function zaeuneAusWerkzeugen(liste) {
+  const teile = [];
+  for (const werkzeug of liste || []) {
+    if (!werkzeug) continue;
+    const action = aktionAusWerkzeug(werkzeug);
+    if (!action) continue;
+    teile.push(`\`\`\`unitedshare\n${JSON.stringify(action)}\n\`\`\``);
+  }
+  return teile.join("\n");
+}
+
+function textMitWerkzeugen(text, liste) {
+  const sichtbar = String(text ?? "").trim();
+  const zaeune = zaeuneAusWerkzeugen(liste);
+  if (!zaeune) return sichtbar;
+  return sichtbar ? `${sichtbar}\n${zaeune}` : zaeune;
+}
+
+function antwortAusDaten(data) {
+  let text = "";
+  try {
+    text = textAusKoerper(data);
+  } catch (error) {
+    if (!(error instanceof UnitedShareError)) throw error;
+    text = "";
+  }
+  const fertig = textMitWerkzeugen(text, werkzeugeAusKoerper(data));
+  if (!fertig) throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
+  return fertig;
+}
+
 function finishRaw(raw, onDelta, onUsage) {
   let data;
   try {
@@ -674,7 +808,7 @@ function finishRaw(raw, onDelta, onUsage) {
   } catch (_err) {
     throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
   }
-  const text = textAusKoerper(data);
+  const text = antwortAusDaten(data);
   const usage = usageFromMessage(data);
   if (usage && typeof onUsage === "function") onUsage(usage);
   if (typeof onDelta === "function") onDelta(text);
@@ -686,9 +820,13 @@ async function readChunks(onDelta, pump, onUsage, onByte, onFenster) {
   let pending = "";
   let visible = "";
   let saw = false;
+  const werkzeuge = [];
+  let sawTool = false;
   const emit = (piece, event) => {
     const fenster = fensterAusEreignis(event);
     if (fenster && typeof onFenster === "function") onFenster(fenster);
+    werkzeugSammeln(werkzeuge, event);
+    if (!sawTool && zaeuneAusWerkzeugen(werkzeuge)) sawTool = true;
     if (!piece) return;
     saw = true;
     visible += piece;
@@ -703,7 +841,7 @@ async function readChunks(onDelta, pump, onUsage, onByte, onFenster) {
   };
   await pump(push);
   if (pending.trim()) takeSse(`${pending}\n\n`, emit);
-  if (!saw) {
+  if (!saw && !sawTool) {
     // Kein einziges Byte kam an. Das ist von einem Verbindungsabbruch waehrend
     // der Denkpause vor dem ersten Zeichen (bei "mega" bis zu zwanzig Sekunden,
     // siehe completeThread in main.src.js) nicht zu unterscheiden -- deshalb
@@ -717,7 +855,9 @@ async function readChunks(onDelta, pump, onUsage, onByte, onFenster) {
   // Schlusszeichen. Ein Netzabbruch mitten im Strom liefert das bisher
   // Gelesene: eine Teilantwort ist mehr wert als ein Fehler (siehe den
   // entsprechenden Test in strom-ohne-body.test.js).
-  const text = visible.trim();
+  // Werkzeugaufrufe werden hier angehängt, nicht über onDelta: die Blase
+  // zeigt sie nicht, runVaultInstruction führt den Zaun aus.
+  const text = textMitWerkzeugen(visible.trim(), werkzeuge);
   if (!text) throw new UnitedShareError("Das Modell hat keine Antwort geliefert.", 0);
   return text;
 }
@@ -768,7 +908,7 @@ async function readVisible(response, onDelta, onUsage, onByte, onFenster) {
       // SyntaxErrors, der wie ein Netzfehler aussähe.
       throw error;
     }
-    const text = textAusKoerper(parsed);
+    const text = antwortAusDaten(parsed);
     const usage = usageFromMessage(parsed);
     if (usage && typeof onUsage === "function") onUsage(usage);
     if (typeof onDelta === "function") onDelta(text);
@@ -1077,7 +1217,7 @@ async function postJson({
   return typeof response.json === "function" ? response.json() : response;
 }
 
-const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-sema-coder2026.1", "rmxos-sema-iso2026.1", "rmxos-mobil2026.1"];
+const OBSIDIAN_MODELS = ["rmxos-mega2026.1", "rmxos-sema2026.1", "rmxos-sema-coder2026.1", "rmxos-sema-iso2026.1"];
 
 function isObsidianModel(id) {
   return OBSIDIAN_MODELS.includes(String(id || "").trim());
@@ -1619,13 +1759,120 @@ function vaultActionBloecke(text) {
         const ende = nach + 3;
         bloecke.push({ start: match.index, ende, json: text.slice(jsonStart, jsonEnde) });
         oeffnung.lastIndex = ende;
-        match = oeffnung.exec(text);
-        continue;
+      }
+      // Ein JSON-Objekt ohne schliessenden Zaun bleibt unbearbeitet.
+      // Dort darf der YAML-Zweig nicht raten.
+    } else {
+      const rest = text.slice(jsonStart);
+      const fence = rest.indexOf("\n```");
+      if (fence !== -1) {
+        const ende = jsonStart + fence + 4;
+        bloecke.push({ start: match.index, ende, json: rest.slice(0, fence) });
+        oeffnung.lastIndex = ende;
       }
     }
     match = oeffnung.exec(text);
   }
   return bloecke;
+}
+
+function aktionAusDaten(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const action = data.action;
+  if (action === "mesh-join") {
+    return {
+      action,
+      path: typeof data.path === "string" ? data.path : "",
+      content: "",
+    };
+  }
+  if (action === "sync") {
+    return {
+      action,
+      path: "",
+      content: "",
+      peer: typeof data.peer === "string" ? data.peer : "",
+      direction: typeof data.direction === "string" ? data.direction : "",
+    };
+  }
+  if (action === "read" || action === "list" || action === "write" || action === "run") {
+    return {
+      action,
+      path: typeof data.path === "string" ? data.path : "",
+      content: typeof data.content === "string" ? data.content : "",
+    };
+  }
+  return null;
+}
+
+const YAML_SCHLUESSEL = new Set(["action", "path", "content", "peer", "direction"]);
+
+function yamlSkalar(wert) {
+  let text = String(wert ?? "").trim();
+  if ((text[0] === '"' || text[0] === "'") && text.length >= 2 && text[text.length - 1] === text[0]) {
+    const quote = text[0];
+    text = text.slice(1, -1);
+    if (quote === '"') {
+      text = text
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\"/g, "\"")
+        .replace(/\\\\/g, "\\");
+    }
+  }
+  return text;
+}
+
+// Strenger YAML-Ausschnitt innerhalb eines unitedshare-Zauns. JSON kennt
+// keinen Blockskalar, deshalb schreibt das Modell bei mehrzeiligem Inhalt
+// "content: |". Prosa und unbekannte Schlüssel bleiben unbearbeitet.
+function yamlAktion(block) {
+  const zeilen = String(block ?? "").replace(/\r\n/g, "\n").split("\n");
+  const daten = {};
+  const gesehen = new Set();
+  let i = 0;
+  while (i < zeilen.length) {
+    const zeile = zeilen[i];
+    if (!zeile.trim()) {
+      i += 1;
+      continue;
+    }
+    const kopf = /^([A-Za-z][A-Za-z0-9_-]*)[ \t]*:[ \t]*(.*)$/.exec(zeile);
+    if (!kopf) return null;
+    const schluessel = kopf[1];
+    if (!YAML_SCHLUESSEL.has(schluessel) || gesehen.has(schluessel)) return null;
+    gesehen.add(schluessel);
+    const rest = kopf[2].trim();
+    if (rest.startsWith("|") || rest.startsWith(">")) {
+      if (!/^\|[+-]?$/.test(rest)) return null;
+      i += 1;
+      const inhalt = [];
+      let einzug = -1;
+      while (i < zeilen.length) {
+        const folge = zeilen[i];
+        if (!folge.trim()) {
+          inhalt.push("");
+          i += 1;
+          continue;
+        }
+        const leer = folge.match(/^[ \t]*/)[0].length;
+        if (einzug < 0) {
+          if (leer < 1) return null;
+          einzug = leer;
+        }
+        if (leer < einzug) return null;
+        inhalt.push(folge.slice(einzug));
+        i += 1;
+      }
+      while (inhalt.length && inhalt[inhalt.length - 1] === "") inhalt.pop();
+      daten[schluessel] = inhalt.length ? `${inhalt.join("\n")}\n` : "";
+      continue;
+    }
+    daten[schluessel] = yamlSkalar(kopf[2]);
+    i += 1;
+  }
+  if (!gesehen.has("action")) return null;
+  return aktionAusDaten(daten);
 }
 
 function parseVaultActions(text) {
@@ -1638,30 +1885,24 @@ function parseVaultActions(text) {
     } catch (_err) {
       data = null;
     }
-    const action = data && data.action;
-    if (action === "mesh-join") {
-      actions.push({
-        action,
-        path: typeof data.path === "string" ? data.path : "",
-        content: "",
-      });
-    } else if (action === "sync") {
-      actions.push({
-        action,
-        path: "",
-        content: "",
-        peer: typeof data.peer === "string" ? data.peer : "",
-        direction: typeof data.direction === "string" ? data.direction : "",
-      });
-    } else if (action === "read" || action === "list" || action === "write" || action === "run") {
-      actions.push({
-        action,
-        path: typeof data.path === "string" ? data.path : "",
-        content: typeof data.content === "string" ? data.content : "",
-      });
-    }
+    const action = (data && aktionAusDaten(data)) || yamlAktion(block.json);
+    if (action) actions.push(action);
   }
   return actions;
+}
+
+// Die ganze Antwort ist genau ein JSON-Objekt. Text davor oder danach bleibt
+// unerkannt, sonst liefe ein erklärendes Beispiel mit.
+function aktionAusNacktemJson(text) {
+  const roh = String(text ?? "").trim();
+  if (!roh.startsWith("{") || !roh.endsWith("}")) return null;
+  let data = null;
+  try {
+    data = JSON.parse(roh);
+  } catch (_err) {
+    return null;
+  }
+  return aktionAusDaten(data);
 }
 
 function stripVaultActions(text) {
@@ -1732,7 +1973,7 @@ function mermaidEntkommen(text) {
 }
 
 function visibleStreamText(text) {
-  let quelle = platzhalterWeg(String(text ?? ""));
+  let quelle = platzhalterWeg(bildlastEntfernen(String(text ?? "")));
   quelle = mermaidEntkommen(quelle);
   if (!quelle.includes("```unitedshare")) return quelle;
   // Erst die geschlossenen heraus, dann einen etwaigen offenen Rest ab
@@ -1835,7 +2076,7 @@ async function executeVaultAction(action, host, options) {
     if (kind === "read") {
       if (typeof host.read !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
       const text = await host.read(rel);
-      if (typeof text === "string") return `Ergebnis read ${rel}:\n${clipText(text, READ_LIMIT)}`;
+      if (typeof text === "string") return `Ergebnis read ${rel}:\n${clipText(bildlastEntfernen(text), READ_LIMIT)}`;
       // Zweiter Versuch ohne Erwaehnungszeichen. Aus dem Vault kam
       // {"action":"read","path":"@DID Chats.md"} -- das @ stammt aus der
       // Eingabe-Syntax und gehoert nicht zum Dateinamen. Ohne diesen Versuch
@@ -1844,7 +2085,7 @@ async function executeVaultAction(action, host, options) {
       if (ohneAt) {
         const zweiter = await host.read(ohneAt);
         if (typeof zweiter === "string") {
-          return `Ergebnis read ${ohneAt}:\n${clipText(zweiter, READ_LIMIT)}`;
+          return `Ergebnis read ${ohneAt}:\n${clipText(bildlastEntfernen(zweiter), READ_LIMIT)}`;
         }
       }
       ausgang = "fehlgeschlagen";
@@ -1852,7 +2093,7 @@ async function executeVaultAction(action, host, options) {
     }
     if (kind === "write") {
       if (typeof host.write !== "function") throw new UnitedShareError("Die Aktion ist fehlgeschlagen.", 0);
-      const content = typeof action.content === "string" ? action.content : "";
+      const content = bildlastEntfernen(typeof action.content === "string" ? action.content : "");
       if (content.length > WRITE_LIMIT) { ausgang = "fehlgeschlagen"; return `Ergebnis write ${rel}:\nDer Inhalt ist zu lang.`; }
       if (requireWriteConfirm) {
         const lesen = typeof host.readForWrite === "function" ? host.readForWrite.bind(host)
@@ -1860,7 +2101,7 @@ async function executeVaultAction(action, host, options) {
         if (!lesen) throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
         const vorher = await lesen(rel);
         if (vorher !== null && typeof vorher !== "string") throw new UnitedShareError("Der bisherige Dateistand kann nicht geprüft werden.", 0);
-        if (!(await confirm({ ...action, path: rel, previousContent: vorher }))) {
+        if (!(await confirm({ ...action, path: rel, content, previousContent: vorher }))) {
           return `Ergebnis write ${rel}:\n${BESTAETIGUNG_ABGELEHNT}`;
         }
         if (await lesen(rel) !== vorher) {
@@ -2147,10 +2388,9 @@ function runReemax(args, {
 // Hinweis bei jeder Erklaerung des Formats.
 const AKTIONSART = /["']action["']\s*:\s*["'](read|list|write|run|sync|mesh-join)["']/;
 
-// Dasselbe ohne Anfuehrungszeichen: "action: write". Auf dieses YAML-artige
-// Layout weicht das Modell aus, wenn der Inhalt mehrzeilig wird -- JSON kennt
-// keinen Blockskalar. Ein solcher Block wird nicht ausgefuehrt, aber als
-// verfehlter Versuch erkannt, damit zurueckgemeldet wird statt still zu enden.
+// Dasselbe ohne Anfuehrungszeichen: "action: write". Innerhalb eines
+// unitedshare-Zauns liest yamlAktion einen strengen Ausschnitt davon.
+// Ausserhalb des Zauns bleibt es ein verfehlter Versuch.
 const AKTIONSZEILE = /^[ \t]*action[ \t]*:[ \t]*(read|list|write|run|sync|mesh-join)\b/m;
 
 // Verfehlt das Modell das Aktionsformat? Zwei Formen zaehlen:
@@ -2183,14 +2423,11 @@ function unitedshareBlockInhalt(text) {
 }
 
 // Aus dem Vault, 2026-10-09: auf die Bitte um eine Notiz kam
-// '{"action":"write","path":"DIDNS.md",...}' als blosser Text. Der Nutzer sah
-// rohes JSON, angelegt wurde nichts -- parseVaultActions verlangt den Block,
-// und der Auffangweg actionsFromReply deckt nur ausfuehrbare Dateien mit
-// Pfaden aus der Frage.
+// '{"action":"write","path":"DIDNS.md",...}' als blosser Text hinter einem
+// Satz. Der Nutzer sah rohes JSON, angelegt wurde nichts.
 //
-// Den Parser zu lockern waere gefaehrlich: vor Vault-Aktionen wird nicht
-// nachgefragt, ein JSON, das das Format bloss erklaert, wuerde dann
-// ausgefuehrt. Also wird nichts getan, sondern zurueckgemeldet.
+// Erklärendes JSON in einem Satz bleibt unbearbeitet. Nur eine Antwort, die
+// selbst genau ein Aktionsobjekt ist, läuft über aktionAusNacktemJson.
 const PROTOKOLL_HINWEIS = [
   "Die Aktion wurde nicht ausgefuehrt: der Block fehlt.",
   "",
@@ -2334,10 +2571,13 @@ async function runVaultInstruction({
     }
     last = typeof reply === "string" ? reply : "";
     const protocol = parseVaultActions(last);
+    const nackt = protocol.length ? null : aktionAusNacktemJson(last);
     const actions = protocol.length
       ? protocol
-      : actionsFromReply(instructionUserText(thread), last)
-        .filter((action) => !done.has(`${action.action}:${action.path}`));
+      : nackt
+        ? [nackt]
+        : actionsFromReply(instructionUserText(thread), last)
+          .filter((action) => !done.has(`${action.action}:${action.path}`));
     if (!actions.length) {
       // Das Modell wollte offenbar etwas tun, hat aber das Format verfehlt.
       // Ausgefuehrt wird trotzdem nichts -- nur zurueckgemeldet, damit der
@@ -3001,8 +3241,38 @@ function chatDateiname(eintrag) {
   return `${iso.slice(0, 10)}-${iso.slice(11, 16).replace(":", "")}-${chatKennung(eintrag && eintrag.id)}.json`;
 }
 
+function nachrichtOhneBildlast(message) {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+  const kopie = { ...message };
+  if (typeof kopie.content === "string") {
+    const inhalt = bildlastEntfernen(kopie.content);
+    if (inhalt !== kopie.content) kopie.content = inhalt;
+  }
+  if (Array.isArray(kopie.bilder)) {
+    const bilder = [];
+    for (const bild of kopie.bilder) {
+      if (!bild || typeof bild !== "object") continue;
+      if (typeof bild.path !== "string" || !bild.path) continue;
+      const sauber = { ...bild };
+      delete sauber.b64;
+      bilder.push(sauber);
+    }
+    if (bilder.length) kopie.bilder = bilder;
+    else delete kopie.bilder;
+  }
+  return kopie;
+}
+
 function chatAlsText(eintrag) {
-  return `${JSON.stringify(eintrag, null, 2)}\n`;
+  const quelle = eintrag && typeof eintrag === "object" && !Array.isArray(eintrag)
+    ? {
+      ...eintrag,
+      messages: Array.isArray(eintrag.messages)
+        ? eintrag.messages.map((message) => nachrichtOhneBildlast(message))
+        : eintrag.messages,
+    }
+    : eintrag;
+  return `${JSON.stringify(quelle, null, 2)}\n`;
 }
 
 function chatAusText(text) {
@@ -3014,6 +3284,7 @@ function chatAusText(text) {
   }
   if (!daten || typeof daten !== "object" || Array.isArray(daten)) return null;
   if (!Array.isArray(daten.messages)) return null;
+  daten.messages = daten.messages.map((message) => nachrichtOhneBildlast(message));
   return daten;
 }
 
@@ -3183,7 +3454,7 @@ function pickEmbedModel(names, preferred) {
 }
 
 function chunkNote(notePath, text) {
-  const body = String(text || "").replace(/\r\n/g, "\n").trim();
+  const body = bildlastEntfernen(String(text || "")).replace(/\r\n/g, "\n").trim();
   if (!body) return [];
   const pieces = [];
   const pushPiece = (value) => {
@@ -5826,13 +6097,18 @@ const DEFAULT_SETTINGS = {
 
 function bildFuerAblage(bild) {
   if (!bild || bild.laden) return null;
-  const stored = { mime: bild.mime, prompt: bild.prompt };
-  if (typeof bild.path === "string" && bild.path) stored.path = bild.path;
-  else if (typeof bild.b64 === "string" && bild.b64) stored.b64 = bild.b64;
-  else return null;
+  if (typeof bild.path !== "string" || !bild.path) return null;
+  const stored = { mime: bild.mime, prompt: bild.prompt, path: bild.path };
   if (Number.isInteger(bild.breite)) stored.breite = bild.breite;
   if (Number.isInteger(bild.hoehe)) stored.hoehe = bild.hoehe;
   return stored;
+}
+
+function bildMarkdown(rel, prompt) {
+  const einbettung = `![[${rel}]]`;
+  const unter = String(prompt || "").replace(/[\r\n]+/g, " ").trim().replace(/[*_[\]]/g, "");
+  if (!unter) return einbettung;
+  return `${einbettung}\n*${unter}*`;
 }
 
 function bildOrdnerNormal(value) {
@@ -5902,10 +6178,12 @@ const SYSTEM_PROMPT = [
   '{"action":"read","path":"relativer/pfad.md"}',
   "```",
   "action ist read, list, write oder run. path ist relativ zum Tresor, ohne .. und ohne absoluten Pfad. content gehört nur zu write. run startet nur eine vorhandene Datei .py, .js, .mjs oder .sh.",
-  "Der Block enthält IMMER genau ein JSON-Objekt in einer Zeile -- niemals YAML, niemals action: write. Mehrzeiliger Inhalt steht als JSON-String mit \\n zwischen den Zeilen:",
+  "Der Block enthält ein JSON-Objekt. Mehrzeiliger Inhalt steht als JSON-String mit \\n zwischen den Zeilen:",
   "```unitedshare",
   '{"action":"write","path":"Notiz.md","content":"# Titel\\n\\nErster Absatz.\\n\\n- Punkt eins\\n- Punkt zwei\\n"}',
   "```",
+  "Mehrzeiliger Inhalt darf im selben Block auch Feld für Feld stehen: zuerst action, dann path, dann content: | und der Text eingerückt darunter.",
+  "Bilder gehören nie als data:image oder Base64 in den Inhalt. Binde sie als ![[UnitedShare/bilder/name.png]] ein und setze die Aufforderung als kursive Zeile darunter.",
   "Nimmt der Nutzer eine Einladung oder eine Empfangsdatei im Tresor an, setzt du einen Block:",
   "```unitedshare",
   '{"action":"mesh-join","path":"relativer/pfad.json"}',
@@ -6956,18 +7234,29 @@ class UnitedShareView extends ItemView {
     return rel;
   }
 
-  async bildInNotiz(bild) {
+  async bildInNotiz(bild, optionen) {
+    const still = Boolean(optionen && optionen.still);
     const markdown = this.aktiveMarkdown();
     if (!markdown || !markdown.editor) {
-      new Notice("Keine aktive Notiz.");
-      return;
+      if (!still) new Notice("Keine aktive Notiz.");
+      return false;
     }
     let rel = bild && typeof bild.path === "string" ? bild.path : "";
     if (!rel) {
-      rel = await this.bildDateiSchreiben(bild);
+      try {
+        rel = await this.bildDateiSchreiben(bild);
+      } catch (error) {
+        if (still) return false;
+        throw error;
+      }
       if (bild) bild.path = rel;
     }
-    markdown.editor.replaceRange(`![[${rel}]]`, markdown.editor.getCursor());
+    const editor = markdown.editor;
+    const bisher = typeof editor.getValue === "function" ? String(editor.getValue()) : "";
+    if (bisher.includes(`![[${rel}]]`)) return true;
+    const cursor = typeof editor.getCursor === "function" ? editor.getCursor() : { line: 0, ch: 0 };
+    editor.replaceRange(bildMarkdown(rel, bild && bild.prompt), cursor);
+    return true;
   }
 
   async bildErzeugen(mass) {
@@ -7017,6 +7306,13 @@ class UnitedShareView extends ItemView {
         if (pfad) gespeichert.path = pfad;
       } catch (_err) {
         // Die Sitzung zeigt die Datenadresse. Die Datei fehlt, bis der Tresor sie annimmt.
+      }
+      if (gespeichert.path) {
+        try {
+          await this.bildInNotiz(gespeichert, { still: true });
+        } catch (_err) {
+          // Die Abbildung bleibt in der Seitenleiste.
+        }
       }
       nachricht.content = gespeichert.prompt;
       nachricht.bilder = [gespeichert];

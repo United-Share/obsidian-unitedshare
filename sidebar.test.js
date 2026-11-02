@@ -1310,11 +1310,11 @@ test("ein hinterlegter Schlüssel lädt die Modellnamen in die Aufklappliste", a
   assert.equal(loaded[before].headers.Authorization, "Bearer test-key");
   const model = lastSetting("Modell");
   assert.ok(model.dropdown, "Modell ist eine Aufklappliste");
+  // mobil (01.11.2026): fuer On-Device reserviert, faellt aus dem Menue.
   assert.deepEqual(model.dropdown.order, [
     "",
     "rmxos-sema2026.1",
     "rmxos-mega2026.1",
-    "rmxos-mobil2026.1",
   ]);
   assert.equal(model.dropdown.value, "rmxos-mega2026.1");
   assert.equal(plugin.settings.model, "rmxos-mega2026.1");
@@ -1329,7 +1329,7 @@ test("ein hinterlegter Schlüssel lädt die Modellnamen in die Aufklappliste", a
   assert.equal(select.value, "rmxos-mega2026.1");
   assert.deepEqual(
     select.children.filter((node) => node.tag === "option").map((node) => node.attrs.value),
-    ["", "rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"],
+    ["", "rmxos-sema2026.1", "rmxos-mega2026.1"],
   );
   assert.equal(modelCalls().length, before + 1, "dieselbe Liste wird nicht erneut geladen");
 
@@ -1389,7 +1389,7 @@ test("ohne Schlüssel geht kein Modellabruf raus", async () => {
 test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die Kennung als Text", async () => {
   const app = makeApp();
   const plugin = new UnitedSharePlugin(app);
-  plugin.loadData = async () => ({ apiKey: "", baseUrl: "https://api.example.test/v1", model: "rmxos-mobil2026.1" });
+  plugin.loadData = async () => ({ apiKey: "", baseUrl: "https://api.example.test/v1", model: "rmxos-sema2026.1" });
   await plugin.onload();
   await plugin.settingTab.display();
   const before = modelCalls().length;
@@ -1402,7 +1402,9 @@ test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die
   const loaded = modelCalls();
   assert.equal(loaded.length, before + 1);
   assert.equal(loaded[before].headers.Authorization, "Bearer test-key");
-  assert.equal(lastSetting("Modell").dropdown.value, "rmxos-mobil2026.1");
+  assert.equal(lastSetting("Modell").dropdown.value, "rmxos-sema2026.1");
+  // mobil (01.11.2026, reservierter Name) taucht nicht mehr im Menue auf.
+  assert.equal(lastSetting("Modell").dropdown.options["rmxos-mobil2026.1"], undefined);
   assert.equal(lastSetting("Modell").dropdown.options.devstral, undefined);
 
   await key.text.change("rejected-key");
@@ -1410,8 +1412,19 @@ test("nach dem Schlüssel lädt die Liste, ein abgelehnter Schlüssel lässt die
   const failed = lastSetting("Modell");
   assert.equal(failed.dropdown, null);
   assert.match(failed.desc, /abgelehnt/);
-  assert.equal(failed.text.value, "rmxos-mobil2026.1");
-  assert.equal(plugin.settings.model, "rmxos-mobil2026.1");
+  assert.equal(failed.text.value, "rmxos-sema2026.1");
+  assert.equal(plugin.settings.model, "rmxos-sema2026.1");
+});
+
+test("ein gespeichertes rmxos-mobil2026.1 wird beim Laden geleert (Name reserviert)", async () => {
+  // Seit 01.11.2026 ist der Name fuer kuenftige On-Device-Modelle
+  // reserviert: er steht in keiner Allowlist mehr. loadSettings behandelt
+  // ihn wie jedes nicht erlaubte Modell und leert die Einstellung.
+  const app = makeApp();
+  const plugin = new UnitedSharePlugin(app);
+  plugin.loadData = async () => ({ apiKey: "", baseUrl: "https://api.example.test/v1", model: "rmxos-mobil2026.1" });
+  await plugin.onload();
+  assert.equal(plugin.settings.model, "");
 });
 
 function nodeTexts(node, acc = []) {
@@ -1465,7 +1478,7 @@ test("ein Schlüssel und reemax zeigen das direkte Netz, nicht im Modellmenü", 
   await plugin.onload();
   await plugin.settingTab.display();
   const model = lastSetting("Modell");
-  assert.deepEqual(model.dropdown.order, ["", "rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"]);
+  assert.deepEqual(model.dropdown.order, ["", "rmxos-sema2026.1", "rmxos-mega2026.1"]);
   assert.equal(model.dropdown.options["mesh-only-model"], undefined);
   assert.equal(model.dropdown.options.qwen, undefined);
   const settingText = nodeTexts(plugin.settingTab.containerEl).join("\n");
@@ -1512,7 +1525,7 @@ test("ein Schlüssel und reemax zeigen das direkte Netz, nicht im Modellmenü", 
   const select = find(view.contentEl, (node) => node.tag === "select");
   assert.deepEqual(
     select.children.filter((node) => node.tag === "option").map((node) => node.attrs.value),
-    ["", "rmxos-sema2026.1", "rmxos-mega2026.1", "rmxos-mobil2026.1"],
+    ["", "rmxos-sema2026.1", "rmxos-mega2026.1"],
   );
   assert.deepEqual(plugin.meshSpawn.seen, [
     ["version", "--json"],
@@ -2423,22 +2436,66 @@ test("Bild zeigt die Abbildung und setzt sie in die offene Notiz", async () => {
   assert.ok(written[0].data instanceof Uint8Array);
   assert.equal(written[0].data[0], 0x89);
   assert.equal(written[0].data[1], 0x50);
-  assert.match(editor.last.text, /^!\[\[UnitedShare\/bilder\/bild-\d+\.png\]\]$/);
+  assert.match(editor.last.text, /^!\[\[UnitedShare\/bilder\/bild-\d+\.png\]\]\n\*eine rote Kugel\*$/);
 });
 
-test("ein Bild ohne Text bleibt im Gespräch und in der Ablage", async () => {
+test("ein erzeugtes Bild landet ohne Klick in der offenen Notiz", async () => {
+  const { app, plugin, view } = await offeneSeite();
+  const written = [];
+  app.vault = {
+    getAbstractFileByPath() {
+      return null;
+    },
+    async createFolder() {},
+    async createBinary(notePath, data) {
+      written.push({ notePath, data });
+      return { path: notePath };
+    },
+  };
+  const editor = editorMit("");
+  app.workspace.activeView = { editor, file: { path: "Offen.md" } };
+  plugin.generateImage = async (prompt) => ({ mime: "image/png", b64: PNG_B64, prompt });
+  view.questionEl.value = "eine rote Kugel";
+  await knopf(view, "1:1").listeners.click();
+  assert.equal(written.length, 1);
+  assert.match(written[0].notePath, /^UnitedShare\/bilder\/bild-\d+\.png$/);
+  assert.equal(editor.replaced, 1);
+  assert.match(editor.value, /!\[\[UnitedShare\/bilder\/bild-\d+\.png\]\]\n\*eine rote Kugel\*/);
+  const nachricht = view.activeTab().messages.find((message) => message.bilder);
+  assert.match(nachricht.bilder[0].path, /^UnitedShare\/bilder\/bild-\d+\.png$/);
+  assert.equal(nachricht.bilder[0].b64, PNG_B64);
+});
+
+test("ein Bild ohne Datei bleibt in der Sitzung und nicht in der Ablage", async () => {
   const { view } = await offeneSeite();
   const bild = { mime: "image/png", b64: PNG_B64, prompt: "Kugel", extra: "weg" };
   view.activeTab().messages = [{ role: "assistant", content: "", bilder: [bild] }];
-  const eintrag = view.tabAlsEintrag(view.activeTab());
-  assert.equal(eintrag.messages.length, 1);
-  assert.deepEqual(eintrag.messages[0].bilder, [{ mime: "image/png", b64: PNG_B64, prompt: "Kugel" }]);
-  assert.equal(Object.hasOwn(eintrag.messages[0].bilder[0], "extra"), false);
+  assert.equal(view.activeTab().messages[0].bilder[0].b64, PNG_B64);
+  assert.equal(view.tabAlsEintrag(view.activeTab()), null);
 
   view.newConversation();
-  assert.deepEqual(view.history[0].messages[0].bilder, [{ mime: "image/png", b64: PNG_B64, prompt: "Kugel" }]);
-  view.restoreHistory(view.history[0]);
-  assert.deepEqual(view.activeTab().messages[0].bilder, [{ mime: "image/png", b64: PNG_B64, prompt: "Kugel" }]);
+  assert.equal(JSON.stringify(view.history).includes(PNG_B64), false);
+  assert.equal(view.history[0].messages[0].bilder, undefined);
+});
+
+test("ein Bild mit Pfad und ohne Text bleibt in der Ablage", async () => {
+  const { view } = await offeneSeite();
+  const bild = {
+    mime: "image/png",
+    b64: PNG_B64,
+    path: "UnitedShare/bilder/kugel.png",
+    prompt: "Kugel",
+    extra: "weg",
+  };
+  view.activeTab().messages = [{ role: "assistant", content: "", bilder: [bild] }];
+  const eintrag = view.tabAlsEintrag(view.activeTab());
+  assert.equal(eintrag.messages.length, 1);
+  assert.deepEqual(eintrag.messages[0].bilder, [{
+    mime: "image/png",
+    path: "UnitedShare/bilder/kugel.png",
+    prompt: "Kugel",
+  }]);
+  assert.equal(JSON.stringify(eintrag).includes(PNG_B64), false);
 });
 
 test("Token aufladen verlinkt die Verbrauchsseite und lässt den bestehenden Text stehen", async () => {
@@ -2617,7 +2674,7 @@ test("In die Notiz nutzt einen vorhandenen Pfad und schreibt die Datei nicht neu
   app.workspace.activeView = { editor, file: { path: "Offen.md" } };
   await knopf(view, "In die Notiz").listeners.click();
   assert.equal(writes, 0);
-  assert.equal(editor.last.text, "![[UnitedShare/bilder/da.png]]");
+  assert.equal(editor.last.text, "![[UnitedShare/bilder/da.png]]\n*da*");
 });
 
 test("eine fehlende Bilddatei lässt keinen Platzhalter stehen", async () => {
