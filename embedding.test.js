@@ -251,6 +251,147 @@ test("die nächsten Abschnitte gehen mit, der Rest wird zum Hinweis", async () =
   }
 });
 
+const GROSS_HINWEIS = "Diese Datei ist zu groß für den Auftrag. Lies sie mit action read und nur den Abschnitt, den die Frage braucht.";
+
+test("eine Notiz über 128000 Bytes wird ohne Embedding zum Pfad", async () => {
+  const { server, port } = await listen((req, res) => {
+    if (req.url !== "/api/tags") {
+      res.writeHead(500);
+      res.end("embed darf nicht drankommen");
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ models: [{ name: "glm-4.7-flash:latest" }] }));
+  });
+  const gross = { path: "Gross.md", text: "G".repeat(128001) };
+  const genau = { path: "Genau.md", text: "K".repeat(128000) };
+  const art = [];
+  const basis = {
+    question: "Nordflügel",
+    embedUrl: `http://127.0.0.1:${port}`,
+    fetchImpl: globalThis.fetch,
+    onArt(name) { art.push(name); },
+  };
+  try {
+    const zuGross = await prepareContextFiles({ ...basis, mentioned: [], attached: [gross] });
+    assert.deepEqual(art, ["roh"]);
+    assert.equal(zuGross[0].path, "Gross.md");
+    assert.equal(zuGross[0].text, GROSS_HINWEIS);
+    assert.equal(gross.text.length, 128001);
+    const genauSo = await prepareContextFiles({ ...basis, mentioned: [], attached: [genau] });
+    assert.deepEqual(art, ["roh", "roh"]);
+    assert.equal(genauSo[0], genau);
+    assert.equal(genau.text.length, 128000);
+  } finally {
+    server.close();
+  }
+});
+
+test("zwei Notizen über der Summe werden verkleinert, bis sie in 128000 Bytes passen", async () => {
+  const { server, port } = await listen((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ models: [{ name: "glm-4.7-flash:latest" }] }));
+  });
+  const erste = { path: "Erste.md", text: "A".repeat(70000) };
+  const zweite = { path: "Zweite.md", text: "B".repeat(90000) };
+  const fehlt = { path: "Fehlt.md", missing: true };
+  try {
+    const files = await prepareContextFiles({
+      question: "beide",
+      mentioned: [],
+      attached: [erste, zweite, fehlt],
+      embedUrl: `http://127.0.0.1:${port}`,
+      fetchImpl: globalThis.fetch,
+    });
+    assert.equal(files[0], erste);
+    assert.equal(files[1].path, "Zweite.md");
+    assert.equal(files[1].text, GROSS_HINWEIS);
+    assert.equal(files[2], fehlt);
+    assert.equal(erste.text, "A".repeat(70000));
+    assert.equal(zweite.text.length, 90000);
+    const summe = files.reduce((acc, file) => acc + Buffer.byteLength(String(file.text || ""), "utf8"), 0);
+    assert.ok(summe <= 128000);
+  } finally {
+    server.close();
+  }
+});
+
+test("ohne Einbettung ruft der Auftrag das Modell nicht und kürzt nur die große Datei", async () => {
+  let called = 0;
+  const art = [];
+  const kurz = { path: "Kurz.md", text: "Der Nordflügel bleibt zu." };
+  const gross = { path: "Gross.md", text: "G".repeat(128001) };
+  const files = await prepareContextFiles({
+    question: "Nordflügel",
+    mentioned: [kurz],
+    attached: [gross],
+    embedUrl: "http://evil.example:11434",
+    ohneEinbettung: true,
+    fetchImpl: async () => {
+      called += 1;
+      throw new Error("nicht rufen");
+    },
+    onArt(name) { art.push(name); },
+  });
+  assert.equal(called, 0);
+  assert.deepEqual(art, ["roh"]);
+  assert.equal(files[0].text, GROSS_HINWEIS);
+  assert.equal(files[1], kurz);
+});
+
+test("ein Treffer meldet Embedding, eine zu große Erwähnung bleibt draußen", async () => {
+  const gesehen = [];
+  const art = [];
+  const { server, port } = await listen(async (req, res) => {
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ models: [{ name: "bge-m3:latest" }] }));
+      return;
+    }
+    const body = await readBody(req);
+    gesehen.push(...body.input);
+    const embeddings = body.input.map((text) => [String(text).includes("MARKE") ? 1 : 0, 1]);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ embeddings }));
+  });
+  const riesig = "R".repeat(128001);
+  try {
+    const files = await prepareContextFiles({
+      question: "MARKE",
+      mentioned: [{ path: "Riesig.md", text: riesig }],
+      attached: [{ path: "Klein.md", text: "MARKE steht hier." }],
+      embedUrl: `http://127.0.0.1:${port}`,
+      fetchImpl: globalThis.fetch,
+      onArt(name) { art.push(name); },
+    });
+    const byPath = Object.fromEntries(files.map((file) => [file.path, file.text]));
+    assert.deepEqual(art, ["embedding"]);
+    assert.match(byPath["Klein.md"], /MARKE/);
+    assert.equal(byPath["Riesig.md"], GROSS_HINWEIS);
+    assert.equal(gesehen.some((text) => String(text).includes(riesig.slice(0, 20))), false);
+  } finally {
+    server.close();
+  }
+});
+
+test("eine fremde Adresse meldet die Art nicht", async () => {
+  let art = "unberührt";
+  await assert.rejects(
+    () => prepareContextFiles({
+      question: "Nordflügel",
+      mentioned: [],
+      attached: [{ path: "Probe.md", text: "Der Nordflügel bleibt zu." }],
+      embedUrl: "http://evil.example:11434",
+      fetchImpl: async () => {
+        throw new Error("nicht rufen");
+      },
+      onArt(name) { art = name; },
+    }),
+    (error) => error instanceof UnitedShareError && error.message === "Das lokale Embedding bleibt auf diesem Rechner.",
+  );
+  assert.equal(art, "unberührt");
+});
+
 test("bevorzugt wird bge-m3, ein gesetztes Modell muss installiert sein", () => {
   assert.equal(
     pickEmbedModel(["glm-4.7-flash:latest", "nomic-embed-text:latest"], ""),
@@ -278,7 +419,8 @@ test("Anleitung und Fassung nennen das lokale Embedding", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const main = fs.readFileSync(path.join(root, "main.js"), "utf8");
-  assert.equal(manifest.version, "1.2.15");
+  const src = fs.readFileSync(path.join(root, "main.src.js"), "utf8");
+  assert.equal(manifest.version, "1.2.16");
   assert.equal(manifest.description.endsWith("."), true);
   assert.equal(manifest.description.length <= 250, true);
   assert.equal(manifest.isDesktopOnly, false);
@@ -290,4 +432,9 @@ test("Anleitung und Fassung nennen das lokale Embedding", () => {
   assert.equal(main.includes("function prepareContextFiles"), true);
   assert.equal(main.includes("Notiz anhängen"), true);
   assert.equal(main.includes("Einfügen"), true);
+  assert.equal(src.includes("geht die ganze Notiz mit der Frage an das Modell"), false);
+  assert.equal(src.includes("eine große nur als Pfad"), true);
+  assert.equal(readme.includes("eine angehängte Notiz geht im Ganzen mit"), false);
+  assert.equal(readme.includes("die Notiz im Ganzen."), false);
+  assert.equal(readme.includes("eine große nur als Pfad"), true);
 });

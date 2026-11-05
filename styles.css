@@ -471,11 +471,17 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   background: var(--background-primary);
 }
 
+/* Ein langes Prompt wächst bis acht Zeilen. Danach scrollt nur das Feld.
+   Die Werkzeugleiste bleibt darunter im Bild. 18px sind das Padding oben
+   und unten, deshalb border-box. */
 .unitedshare-input-wrapper textarea.unitedshare-input {
   width: 100%;
   flex: 1 1 auto;
+  box-sizing: border-box;
   field-sizing: content;
   min-height: 60px;
+  max-height: calc(1.4em * 8 + 18px);
+  overflow-y: auto;
   resize: none;
   padding: 8px 10px 10px;
   border: none;

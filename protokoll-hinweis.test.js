@@ -287,13 +287,14 @@ test("ein abgeschnittener Sprachzaun legt nichts an und fragt einmal nach", asyn
     },
   });
   assert.equal(gesehen.length >= 2, true);
-  assert.match(gesehen[1], /abgeschnitten/);
+  assert.match(gesehen[1], /geschlossenen Block/);
+  assert.equal(gesehen[1].includes("abgeschnitten"), false);
   assert.equal(gesehen[1].includes("der Block fehlt"), false);
   assert.equal(host.geschrieben.length, 1);
   assert.equal(host.geschrieben[0].inhalt, "kurz\n");
 });
 
-test("unvollständiges JSON im offenen Zaun legt nichts an", async () => {
+test("unvollständiges write mit fertigem Pfad legt den gelesenen Inhalt einmal an", async () => {
   const host = tresor();
   let aufrufe = 0;
   await runVaultInstruction({
@@ -302,6 +303,23 @@ test("unvollständiges JSON im offenen Zaun legt nichts an", async () => {
     complete: async () => {
       aufrufe += 1;
       return 'Ich lege an.\n```unitedshare\n{"action":"write","path":"Offen.md","content":"halb';
+    },
+  });
+  assert.equal(aufrufe, 2);
+  assert.equal(host.geschrieben.length, 1);
+  assert.equal(host.geschrieben[0].pfad, "Offen.md");
+  assert.equal(host.geschrieben[0].inhalt, "halb");
+});
+
+test("ein abgeschnittener Pfad im offenen Zaun legt nichts an", async () => {
+  const host = tresor();
+  let aufrufe = 0;
+  await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Offen.md an." }],
+    host,
+    complete: async () => {
+      aufrufe += 1;
+      return 'Ich lege an.\n```unitedshare\n{"action":"write","path":"Offen';
     },
   });
   assert.equal(aufrufe, 2);
@@ -344,4 +362,57 @@ test("kaputtes JSON im unitedshare-Block gilt als verfehltes Format", async () =
       return "Fertig.";
     },
   });
+});
+
+// ANLASS: Das Modell sagt "die Notiz ist angelegt" und oeffnet den Zaun.
+// max_tokens schneidet den Inhalt ab. Sichtbar bleibt das Versprechen, die
+// Datei fehlt. Auf die Rueckfrage erklaert das Modell immer, der
+// unitedshare-Tag sei abgebrochen. Der angefangene write muss trotzdem
+// laufen, und diese Erklaerung darf weder vorgesagt noch angezeigt werden.
+test("ein abgebrochenes write legt die Notiz an und die Abbruch-Erklaerung bleibt unsichtbar", async () => {
+  const host = tresor();
+  const gesehen = [];
+  const abbruch = [
+    "Die Notiz ist angelegt.",
+    "```unitedshare",
+    '{"action":"write","path":"Einkauf.md","content":"# Einkauf\\n- Brot',
+  ].join("\n");
+  const erklaerung = "Der unitedshare-Tag war abgebrochen, deshalb konnten die Tools nicht sauber gerufen werden.";
+  const antwort = await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Einkauf.md an." }],
+    host,
+    complete: async (thread) => {
+      gesehen.push(thread.map((turn) => turn.content).join("\n"));
+      if (gesehen.length === 1) return abbruch;
+      return erklaerung;
+    },
+  });
+  assert.equal(host.geschrieben.length, 1);
+  assert.equal(host.geschrieben[0].pfad, "Einkauf.md");
+  assert.equal(host.geschrieben[0].inhalt, "# Einkauf\n- Brot");
+  assert.equal(gesehen.some((eintrag) => eintrag.includes("abgeschnitten")), false);
+  assert.equal(antwort.includes("abgebrochen"), false);
+  assert.equal(antwort.includes("abgeschnitten"), false);
+});
+
+test("ein Zaun ohne JSON sagt dem Modell nicht, der Tag sei abgeschnitten", async () => {
+  const host = tresor();
+  const gesehen = [];
+  const erklaerung = "Der unitedshare-Tag war abgebrochen, deshalb konnten die Tools nicht sauber gerufen werden.";
+  const antwort = await runVaultInstruction({
+    turns: [{ role: "user", content: "Lege Einkauf.md an." }],
+    host,
+    complete: async (thread) => {
+      gesehen.push(thread.map((turn) => turn.content).join("\n"));
+      if (gesehen.length === 1) return "Die Notiz ist angelegt.\n```unitedshare";
+      return erklaerung;
+    },
+  });
+  assert.equal(gesehen.length >= 2, true);
+  assert.equal(gesehen[1].includes("abgeschnitten"), false);
+  assert.equal(gesehen[1].includes("der Block fehlt"), false);
+  assert.match(gesehen[1], /unitedshare/);
+  assert.equal(host.geschrieben.length, 0);
+  assert.equal(antwort.includes("abgebrochen"), false);
+  assert.equal(antwort.includes("abgeschnitten"), false);
 });

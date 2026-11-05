@@ -891,6 +891,23 @@ test("ohne aktive Notiz bleibt der Text in der Seitenleiste", async () => {
   assert.match(mock.notices.at(-1), /Notiz/);
 });
 
+test("ein langes Prompt scrollt im Feld und die Schaltflächen bleiben darunter", () => {
+  const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  const feld = css.match(/\.unitedshare-input-wrapper textarea\.unitedshare-input\s*\{[^}]*\}/);
+  assert.ok(feld, "Promptfeld-Regel fehlt");
+  assert.match(feld[0], /box-sizing:\s*border-box/);
+  assert.match(feld[0], /field-sizing:\s*content/);
+  assert.match(feld[0], /min-height:\s*60px/);
+  assert.match(feld[0], /max-height:\s*calc\(1\.4em \* 8 \+ 18px\)/);
+  assert.match(feld[0], /overflow-y:\s*auto/);
+  assert.match(feld[0], /resize:\s*none/);
+  assert.match(css, /\.unitedshare-input-toolbar\s*\{[^}]*flex-shrink:\s*0/);
+  assert.match(
+    css,
+    /\.unitedshare-sidebar\.is-keyboard-open \.unitedshare-input-wrapper textarea\.unitedshare-input\s*\{[^}]*max-height:\s*6\.5em/,
+  );
+});
+
 test("die Tastatur schiebt das Promptfeld in den sichtbaren Bereich", async () => {
   const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
   assert.match(css, /--unitedshare-keyboard-inset/);
@@ -1190,6 +1207,97 @@ test("ein Anhang geht als Ausschnitt mit und die Chips verschwinden", async () =
   assert.equal(files.text, "Plan.md");
 });
 
+test("das Handy nennt nur Lesen, Listen und Schreiben", () => {
+  const { systemFuerGeraet } = require("./main.src.js");
+  const mobil = systemFuerGeraet({ mobil: true, einbettung: false });
+  const desktop = systemFuerGeraet({ mobil: false, einbettung: true });
+  const roh = systemFuerGeraet({ mobil: false, einbettung: false });
+  assert.equal(mobil.includes("mesh-join"), false);
+  assert.equal(mobil.includes('"action":"sync"'), false);
+  assert.equal(mobil.includes("oder run"), false);
+  assert.match(mobil, /action ist read, list oder write/);
+  assert.match(mobil, /nur als Pfad/);
+  assert.equal(mobil.includes("auf diesem Rechner ausgewählt"), false);
+  assert.match(desktop, /mesh-join/);
+  assert.match(desktop, /"action":"sync"/);
+  assert.match(desktop, /oder run/);
+  assert.match(desktop, /auf diesem Rechner ausgewählt/);
+  assert.match(roh, /nicht gekürzt/);
+  assert.equal(roh.includes("auf diesem Rechner ausgewählt"), false);
+});
+
+test("auf dem Handy sucht die Frage den Index nicht", async () => {
+  mock.Platform.isMobile = true;
+  try {
+    const app = makeApp();
+    const plugin = new UnitedSharePlugin(app);
+    await plugin.onload();
+    const asked = [];
+    let index = 0;
+    plugin.completeThread = async (turns) => {
+      asked.push(turns);
+      return "Antworttext";
+    };
+    plugin.sucheTresor = async () => {
+      index += 1;
+      throw new UnitedShareError("Der Tresor-Index läuft in der Desktop-App.");
+    };
+    const view = plugin.registeredViews[0].factory({ app });
+    await view.onOpen();
+    const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+    const hinweise = mock.notices.length;
+    view.questionEl.value = "Wo liegt der Satz?";
+    await askButton.listeners.click();
+    assert.equal(index, 0);
+    assert.equal(asked.length, 1);
+    assert.equal(mock.notices.slice(hinweise).includes("Der Tresor-Index läuft in der Desktop-App."), false);
+  } finally {
+    mock.Platform.isMobile = false;
+  }
+});
+
+test("fällt das Embedding aus, geht eine kurze Notiz mit und eine große nur als Pfad", async () => {
+  const { UnitedShareError } = require("./unitedshare-core");
+  const app = makeApp();
+  const gross = "G".repeat(128001);
+  app.vault = {
+    getAbstractFileByPath(notePath) {
+      if (notePath === "Klein.md" || notePath === "Gross.md") return { path: notePath };
+      return null;
+    },
+    async cachedRead(file) {
+      return file.path === "Gross.md" ? gross : "Der Nordflügel bleibt geschlossen.";
+    },
+  };
+  const plugin = new UnitedSharePlugin(app);
+  await plugin.onload();
+  const asked = [];
+  plugin.completeThread = async (turns, _delta, _schritt, _meta, _warten, _runde, kontext) => {
+    asked.push({ turns, kontext });
+    return "Die Notiz bleibt geschlossen.";
+  };
+  plugin.sucheTresor = async () => [];
+  plugin.embedForFrontier = async () => {
+    throw new UnitedShareError("Das lokale Embedding auf diesem Rechner antwortet nicht.", 0);
+  };
+  const view = plugin.registeredViews[0].factory({ app });
+  await view.onOpen();
+  view.addAttachment("Klein.md");
+  view.addAttachment("Gross.md");
+  view.questionEl.value = "Was machen wir?";
+  await askButtonClick(view);
+  assert.equal(asked.length, 1);
+  const byPath = Object.fromEntries(asked[0].turns[0].files.map((file) => [file.path, file.text]));
+  assert.match(byPath["Klein.md"], /Nordflügel/);
+  assert.equal(byPath["Gross.md"], "Diese Datei ist zu groß für den Auftrag. Lies sie mit action read und nur den Abschnitt, den die Frage braucht.");
+  assert.equal(asked[0].kontext.einbettung, false);
+});
+
+function askButtonClick(view) {
+  const askButton = find(view.contentEl, (node) => node.tag === "button" && node.attrs["aria-label"] === "Fragen");
+  return askButton.listeners.click();
+}
+
 test("fällt das Embedding aus, geht die Frage mit der ganzen Notiz ans Modell", async () => {
   const { UnitedShareError } = require("./unitedshare-core");
   const app = makeApp();
@@ -1247,6 +1355,13 @@ test("completeThread geht an /v1/chat/completions ohne Werkzeuge", async () => {
   assert.equal(body.messages[0].role, "system");
   assert.equal(typeof body.messages[0].content, "string");
   assert.match(body.messages[0].content, /Obsidian/);
+  assert.match(body.messages[0].content, /nicht gekürzt/);
+  assert.match(body.messages[0].content, /mesh-join/);
+  assert.equal(body.messages[0].content.includes("auf diesem Rechner ausgewählt"), false);
+  const mitEinbettung = mock.requests.length;
+  await plugin.completeThread([{ role: "user", content: "Hallo" }], null, null, null, null, null, { einbettung: true });
+  const eingebettet = JSON.parse(mock.requests[mitEinbettung].body);
+  assert.match(eingebettet.messages[0].content, /auf diesem Rechner ausgewählt/);
   assert.equal(body.messages[1].role, "user");
   assert.equal(body.messages[1].content, "Hallo");
   assert.equal(text, "Antwort aus messages");
