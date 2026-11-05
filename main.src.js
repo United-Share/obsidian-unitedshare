@@ -3043,6 +3043,26 @@ class UnitedShareDuckDbView extends FileView {
           statusEl.setText(DUCKDB_ANSICHT_KEINE_ABFRAGE);
           return;
         }
+        // Dateiverweise im SQL-Text (FROM 'adressen.parquet') genau so
+        // nachziehen wie renderSqlCodeBlock(): tresor-relativ lesen und
+        // unter GENAU dem String registrieren, den DuckDB im FROM sieht.
+        // Ohne Zutun scheitert die .sql-Ansicht nach einem kuehlen Start,
+        // weil der Singleton noch nichts registriert hat -- der Codeblock-
+        // Flusss ahmte dieses Verhalten schon, der Dateiview musste dieselbe
+        // Norm erfuellen. Fehlt eine verwiesene Datei, bleibt sie
+        // unregistriert -- die eigene DuckDB-Meldung zeigt dann nachfolgend,
+        // was nicht lesbar war.
+        for (const verweis of duckdbDateiverweiseAusSql(sql)) {
+          try {
+            const verweisBytes = await this.plugin.readVaultBinary(verweis);
+            await db.registerFileBuffer(
+              verweis,
+              verweisBytes instanceof Uint8Array ? verweisBytes : new Uint8Array(verweisBytes),
+            );
+          } catch (_err) {
+            /* Datei fehlt: unregistriert lassen, DuckDB nennt den Rest. */
+          }
+        }
       } else if (endung === "parquet") {
         const bytes = await this.plugin.readVaultBinary(file.path);
         // registerFileBuffer lebt auf AsyncDuckDB (db), nicht auf der
