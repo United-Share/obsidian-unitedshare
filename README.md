@@ -24,7 +24,7 @@ UnitedShare ist auf der Community-Seite eingetragen: https://community.obsidian.
 
 Die DuckDB-Ansicht für `.parquet` und `.sql` lädt ihre Laufzeit aus dem Unterordner `duckdb/`: `duckdb-eh.wasm` (~36 MB), `duckdb-browser.cjs` und `duckdb-browser-eh.worker.js`. Diese Dateien gehören mit in den kopierten Ordner.
 
-Der Obsidian-Community-Installer und das Release-Workflow liefern **nur** `main.js`, `manifest.json` und `styles.css`. Fehlt der Ordner `duckdb/`, meldet die Ansicht „DuckDB-WASM ließ sich nicht laden." Das trifft jede Installation, die allein aus den drei Release-Dateien besteht.
+Der Obsidian-Community-Installer und das Release-Workflow liefern **nur** `main.js`, `manifest.json` und `styles.css`. Fehlt der Ordner `duckdb/`, benennt die Ansicht die fehlende Datei und trägt die Ergänzung vor — der Release-Workflow hängt die drei Laufzeitdateien als Anhänge an, der Community-Installer lädt sie trotzdem nicht automatisch.
 
 Ist nach der Anmeldung genau ein unterstütztes Textmodell verfügbar, wählt das Plugin es automatisch. Bei mehreren Modellen erfolgt keine automatische Auswahl, weil deren Kosten und Fähigkeiten hier nicht bekannt sind; ein bereits gewähltes Modell bleibt erhalten. Für die lokale Suche das Feld **Lokale Suche: Modell** leer lassen: Ein unterstütztes bereits installiertes Modell wird automatisch erkannt. Die gesonderte Tresor-Indexsuche benötigt weiterhin `bge-m3`; das Plugin installiert keine Modelle automatisch.
 
@@ -126,7 +126,7 @@ node --test *.test.js       # auch gegen einen echten lokalen Server
 node scripts/bundle.mjs     # main.js aus main.src.js + unitedshare-core.js
 ```
 
-Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. Ein Tag ohne `v`, gleich der Version in `manifest.json`, löst `.github/workflows/release.yml` aus und erzeugt ein Release mit **nur** diesen drei Dateien — der Ordner `duckdb/` ist darin nicht enthalten.
+Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. Ein Tag ohne `v`, gleich der Version in `manifest.json`, löst `.github/workflows/release.yml` aus und erzeugt ein Release mit den drei Stammdateien plus den drei `duckdb/`-Laufzeitdateien als Anhängen — der Community-Installer lädt die Anhänge trotzdem nicht mit.
 
 ## Stand
 

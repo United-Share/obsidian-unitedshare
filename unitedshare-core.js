@@ -5399,6 +5399,42 @@ function duckdbTabelleAusZeilen(zeilen) {
   return { spalten, zeilen: rows.map(ausZeile) };
 }
 
+// -- DuckDB-Laufzeit: die Ansicht braucht den Unterordner duckdb/ im
+// Plugin-Ordner (wasm + worker + commonjs). Der Community-Installer und
+// das Release-Workflow liefern NUR main.js/manifest.json/styles.css --
+// fehlt eine dieser Dateien, muss die Meldung genau benennen, was fehlt
+// und was zu tun ist, statt der allgemeinen "ließ sich nicht laden"-
+// Fassung, die den Menschen ueber die Ursache im Unklaren liess.
+const DUCKDB_LAUFZEIT = Object.freeze([
+  "duckdb-eh.wasm",
+  "duckdb-browser-eh.worker.js",
+  "duckdb-browser.cjs",
+]);
+
+// vorhanden: Liste der Dateinamen, die der Adapter tatsächlich gefunden
+// hat. Ungültige Eingabe (null, kein Array) zählt als "nichts vorhanden",
+// denn fail-closed heißt hier: alles fehlt, nichts wird unterschlagen.
+function duckdbLaufzeitLuecken(vorhandene) {
+  const vorhanden = new Set(
+    Array.isArray(vorhandene) ? vorhandene.filter((name) => typeof name === "string") : [],
+  );
+  return DUCKDB_LAUFZEIT.filter((datei) => !vorhanden.has(datei));
+}
+
+// Benannte Meldung für die Oberfläche: nennt die fehlenden Dateien, den
+// genauen Zielordner im Tresor und die Ursache (Installer/Release liefert
+// die Laufzeit nicht mit) samt der einen nötigen Aktion.
+function duckdbLaufzeitMeldung(fehlt) {
+  if (!Array.isArray(fehlt) || fehlt.length === 0) return "";
+  return (
+    "DuckDB-Laufzeit unvollständig: fehlt " + fehlt.join(", ")
+    + " im Ordner .obsidian/plugins/unitedshare/duckdb/. "
+    + "Der Community-Installer lädt nur die drei Stammdateien; diesen "
+    + "vollständigen Ordner duckdb/ ergänzen (als Anhänge im Release oder im "
+    + "kompletten Plugin-Ordner), dann öffnen sich .parquet und .sql."
+  );
+}
+
 // Findet String-Literale in einem SQL-Text, die wie ein Dateipfad relativ
 // zum Tresor aussehen (z. B. 'daten.parquet' in FROM 'daten.parquet'),
 // damit der SQL-Codeblock-Prozessor sie VOR der Abfrage per
@@ -5934,7 +5970,10 @@ module.exports = {
   pickEmbedModel,
   dateienAusTreffern,
   DUCKDB_ANSICHT_ENDUNGEN,
+  DUCKDB_LAUFZEIT,
   duckdbDateiverweiseAusSql,
+  duckdbLaufzeitLuecken,
+  duckdbLaufzeitMeldung,
   duckdbSqlAusDatei,
   duckdbTabelleAusZeilen,
   duckdbVorschauAbfrage,

@@ -27,7 +27,7 @@ test("der Release-Workflow attestiert main.js, manifest.json und styles.css", ()
   assert.match(text, /contents:\s*write/);
   assert.match(text, /actions\/attest@v4/);
   const block = subjectBlock(text);
-  for (const name of ["main.js", "manifest.json", "styles.css"]) {
+  for (const name of ["main.js", "manifest.json", "styles.css", "duckdb/duckdb-eh.wasm", "duckdb/duckdb-browser.cjs", "duckdb/duckdb-browser-eh.worker.js"]) {
     assert.ok(block.includes(name), `${name} fehlt in subject-path`);
   }
   const buildAt = text.indexOf("node scripts/bundle.mjs");
@@ -45,7 +45,10 @@ test("Tags ohne v lösen den Release aus und müssen zur Manifest-Version passen
   assert.match(text, /\^\[0-9\]\+\\.\[0-9\]\+\\.\[0-9\]\+\$/);
   assert.match(text, /manifest\.json/);
   assert.match(text, /gh release create/);
-  assert.match(text, /main\.js manifest\.json styles\.css/);
+  assert.match(
+    text,
+    /main\.js manifest\.json styles\.css duckdb\/duckdb-eh\.wasm duckdb\/duckdb-browser\.cjs duckdb\/duckdb-browser-eh\.worker\.js/,
+  );
 });
 
 test("ein erneuter Bundle trifft die veröffentlichte main.js", () => {

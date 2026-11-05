@@ -30,6 +30,9 @@ jobs:
             main.js
             manifest.json
             styles.css
+            duckdb/duckdb-eh.wasm
+            duckdb/duckdb-browser.cjs
+            duckdb/duckdb-browser-eh.worker.js
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')
@@ -52,5 +55,5 @@ jobs:
             gh release create "$tag" \
               --title "$tag" \
               --notes "Community-Release ${tag}." \
-              main.js manifest.json styles.css
+              main.js manifest.json styles.css duckdb/duckdb-eh.wasm duckdb/duckdb-browser.cjs duckdb/duckdb-browser-eh.worker.js
           fi

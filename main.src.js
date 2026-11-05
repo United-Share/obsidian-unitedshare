@@ -4,7 +4,7 @@ const { privateVorlageVorbereiten, privateAntwortAufloesen } = require("./privac
 const { rmxosEigenschaftenErsetzen } = require("./rmxos-template");
 
 const { FileView, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { absichtLokal, adapterVaultHost, akzeptierePairing, applyComposerAnswer, assertLoopbackEmbedUrl, assertTailscaleAdresse, assertSyncRequest, assertVaultRelative, auftragSpalten, aufladenAdresse, bedieneSyncAnfrage, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, dateienAusTreffern, DUCKDB_ANSICHT_ENDUNGEN, duckdbDateiverweiseAusSql, duckdbSqlAusDatei, duckdbTabelleAusZeilen, duckdbVorschauAbfrage, erkenneICloudTresor, erkenneTailscaleAdresse, erzeugePairingAnfrage, erzeugePairingAngebot, executeVaultAction, fluentScriptAlsZeilen, fluentScriptKarten, fluentScriptParsen, fuehreSyncDurch, indexNachziehen, isObsidianModel, istDuckdbAnsichtEndung, keyboardCoverPx, konfliktDateiname, lanAdresseAusInterfaces, leiteSessionSchluesselAb, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, lokalText, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, mischeDateien, pairingEntschluesseln, pairingVerschluesseln, pairingVersuchErlaubt, pairingVersuchVermerken, PEER_SYNC_TOKEN_HEADER, prepareContextFiles, readIndexedOrHidden, readMeshInventory, runReemax, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, sucheImTresor, tresorIndexPfad, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
+const { absichtLokal, adapterVaultHost, akzeptierePairing, applyComposerAnswer, assertLoopbackEmbedUrl, assertTailscaleAdresse, assertSyncRequest, assertVaultRelative, auftragSpalten, aufladenAdresse, bedieneSyncAnfrage, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, dateienAusTreffern, DUCKDB_ANSICHT_ENDUNGEN, duckdbDateiverweiseAusSql, duckdbLaufzeitLuecken, duckdbLaufzeitMeldung, duckdbSqlAusDatei, duckdbTabelleAusZeilen, duckdbVorschauAbfrage, erkenneICloudTresor, erkenneTailscaleAdresse, erzeugePairingAnfrage, erzeugePairingAngebot, executeVaultAction, fluentScriptAlsZeilen, fluentScriptKarten, fluentScriptParsen, fuehreSyncDurch, indexNachziehen, isObsidianModel, istDuckdbAnsichtEndung, keyboardCoverPx, konfliktDateiname, lanAdresseAusInterfaces, leiteSessionSchluesselAb, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, lokalText, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, mischeDateien, pairingEntschluesseln, pairingVerschluesseln, pairingVersuchErlaubt, pairingVersuchVermerken, PEER_SYNC_TOKEN_HEADER, prepareContextFiles, readIndexedOrHidden, readMeshInventory, runReemax, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, sucheImTresor, tresorIndexPfad, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
 
 // Ein 400 oder eine leere Antwort tritt "ab und zu" auf -- meist ohne offene
 // Entwicklerkonsole. console.error bleibt das Erste, aber das Fehlerprotokoll
@@ -3195,6 +3195,32 @@ module.exports = class UnitedSharePlugin extends Plugin {
     const cjsRel = `${basis}/duckdb/duckdb-browser.cjs`;
     const workerRel = `${basis}/duckdb/duckdb-browser-eh.worker.js`;
     const wasmRel = `${basis}/duckdb/duckdb-eh.wasm`;
+    // Erste Pruefung MIT NAMEN: die drei Laufzeitdateien muessen im
+    // Plugin-Unterordner liegen. Die allgemeine Meldung "ließ sich nicht
+    // laden" verbirgt genau diese Ursache (Community-Installer und Release
+    // liefern nur die drei Stammdateien) -- hier schlägt es früh mit den
+    // benannten Dateien durch, ehe der require() unklare Stackspuren wirft.
+    const laufzeitVorhanden = [];
+    for (const [datei, rel] of [
+      ["duckdb-eh.wasm", wasmRel],
+      ["duckdb-browser-eh.worker.js", workerRel],
+      ["duckdb-browser.cjs", cjsRel],
+    ]) {
+      let da = false;
+      try {
+        da = Boolean(await adapter.exists(rel));
+      } catch (_err) {
+        da = false; // Pruefung gescheitert zaehlt als fehlend (fail-closed)
+      }
+      if (da) laufzeitVorhanden.push(datei);
+    }
+    const laufzeitFehlt = duckdbLaufzeitLuecken(laufzeitVorhanden);
+    if (laufzeitFehlt.length) {
+      throw this._duckdbFehler(
+        duckdbLaufzeitMeldung(laufzeitFehlt),
+        new Error(`duckdb/: es fehlt ${laufzeitFehlt.join(", ")}`),
+      );
+    }
     // Bewusst require() der CommonJS-Variante (duckdb-browser.cjs) statt
     // import() der ES-Modul-Variante (duckdb-browser.mjs) ueber eine
     // file://-URL: dynamisches import() einer file://-URL scheitert in

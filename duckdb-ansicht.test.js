@@ -7,7 +7,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   DUCKDB_ANSICHT_ENDUNGEN,
+  DUCKDB_LAUFZEIT,
   duckdbDateiverweiseAusSql,
+  duckdbLaufzeitLuecken,
+  duckdbLaufzeitMeldung,
   duckdbSqlAusDatei,
   duckdbTabelleAusZeilen,
   duckdbVorschauAbfrage,
@@ -165,6 +168,59 @@ test("duckdbDateiverweiseAusSql liefert [] ohne Literale oder bei leerer Eingabe
   assert.deepEqual(duckdbDateiverweiseAusSql(""), []);
   assert.deepEqual(duckdbDateiverweiseAusSql(null), []);
   assert.deepEqual(duckdbDateiverweiseAusSql(undefined), []);
+});
+
+// -- DuckDB-Laufzeit: benannte Lueckenmeldungen statt allgemeinem Fehlschlag --
+// Die Oberflaeche (initDuckDb) prueft die drei Dateien per adapter.exists()
+// und wirft mit duckdbLaufzeitMeldung(); hier sind die reinen Vertraege.
+
+test("DUCKDB_LAUFZEIT nennt genau die drei Laufzeitdateien", () => {
+  assert.deepEqual([...DUCKDB_LAUFZEIT].sort(), [
+    "duckdb-browser-eh.worker.js",
+    "duckdb-browser.cjs",
+    "duckdb-eh.wasm",
+  ]);
+});
+
+test("duckdbLaufzeitLuecken meldet fehlende Dateien und ignoriert fremde Namen", () => {
+  assert.deepEqual(
+    duckdbLaufzeitLuecken(["duckdb-eh.wasm"]),
+    ["duckdb-browser-eh.worker.js", "duckdb-browser.cjs"],
+  );
+  assert.deepEqual(
+    duckdbLaufzeitLuecken(["duckdb-eh.wasm", "duckdb-browser-eh.worker.js", "duckdb-browser.cjs"]),
+    [],
+  );
+  assert.deepEqual(
+    duckdbLaufzeitLuecken(["extra.parquet", "duckdb-eh.wasm"]),
+    ["duckdb-browser-eh.worker.js", "duckdb-browser.cjs"],
+  );
+});
+
+test("duckdbLaufzeitLuecken ist fail-closed: nichts vorhanden heisst alles fehlt", () => {
+  assert.deepEqual(duckdbLaufzeitLuecken([]), [...DUCKDB_LAUFZEIT]);
+  assert.deepEqual(duckdbLaufzeitLuecken(null), [...DUCKDB_LAUFZEIT]);
+  assert.deepEqual(duckdbLaufzeitLuecken(undefined), [...DUCKDB_LAUFZEIT]);
+  assert.deepEqual(duckdbLaufzeitLuecken(["", false, null]), [...DUCKDB_LAUFZEIT]);
+});
+
+test("duckdbLaufzeitMeldung ist leer, wenn nichts fehlt", () => {
+  assert.equal(duckdbLaufzeitMeldung([]), "");
+  assert.equal(duckdbLaufzeitMeldung(null), "");
+  assert.equal(duckdbLaufzeitMeldung(undefined), "");
+});
+
+test("duckdbLaufzeitMeldung benennt fehlende Datei, Zielordner, Ursache und Aktion", () => {
+  const meldung = duckdbLaufzeitMeldung(["duckdb-eh.wasm"]);
+  assert.ok(meldung.includes("duckdb-eh.wasm"), "fehlende Datei wird genannt");
+  assert.ok(meldung.includes(".obsidian/plugins/unitedshare/duckdb/"), "Zielordner wird genannt");
+  assert.ok(meldung.includes("Community-Installer"), "Ursache wird benannt");
+  assert.ok(meldung.includes("Ordner duckdb/ ergänzen"), "Aktion wird benannt");
+});
+
+test("duckdbLaufzeitMeldung listet mehrere fehlende Dateien auf", () => {
+  const meldung = duckdbLaufzeitMeldung(["duckdb-eh.wasm", "duckdb-browser.cjs"]);
+  assert.ok(meldung.includes("duckdb-eh.wasm, duckdb-browser.cjs"));
 });
 
 // -- Strukturpruefung der drei vendorten @duckdb/duckdb-wasm-Dateien --
