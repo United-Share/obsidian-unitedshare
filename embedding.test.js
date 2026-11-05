@@ -420,9 +420,11 @@ test("Anleitung und Fassung nennen das lokale Embedding", () => {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const main = fs.readFileSync(path.join(root, "main.js"), "utf8");
   const src = fs.readFileSync(path.join(root, "main.src.js"), "utf8");
-  assert.equal(manifest.version, "1.2.16");
+  assert.equal(manifest.version, "1.2.17");
   assert.equal(manifest.description.endsWith("."), true);
   assert.equal(manifest.description.length <= 250, true);
+  assert.match(manifest.description, /Agent/);
+  assert.match(manifest.description, /on-prem/);
   assert.equal(manifest.isDesktopOnly, false);
   assert.equal(readme.includes(`Release-Tag \`${manifest.version}\``), true);
   assert.equal(readme.includes("http://127.0.0.1:11434"), true);
@@ -437,4 +439,8 @@ test("Anleitung und Fassung nennen das lokale Embedding", () => {
   assert.equal(readme.includes("eine angehängte Notiz geht im Ganzen mit"), false);
   assert.equal(readme.includes("die Notiz im Ganzen."), false);
   assert.equal(readme.includes("eine große nur als Pfad"), true);
+  assert.equal(readme.includes("Agent im Tresor"), true);
+  assert.equal(readme.includes("On-prem"), true);
+  assert.equal(readme.includes("noch keinen eigenen Agentendienst"), false);
+  assert.equal(readme.includes("zeigt derzeit Version 1.2.15"), false);
 });

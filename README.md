@@ -1,6 +1,10 @@
 # UnitedShare für Obsidian
 
-Fragen aus der Seitenleiste oder einer markierten Notiz gehen an die Modelle eures UnitedShare. Der Auftrag enthält nur Textblöcke, der Tresor bleibt auf diesem Rechner. Ein Bild ist ein eigener Auftrag, `POST /v1/images/generations`, Modell `reemax-image`.
+UnitedShare ist der Agent im Tresor. Eine Frage aus der Seitenleiste oder einer markierten Notiz geht als Textauftrag an das Modell. Liest, listet oder schreibt die Antwort eine Notiz, führt das Plugin das auf diesem Rechner aus. Der Auftrag enthält nur Textblöcke, der Tresor bleibt hier.
+
+Das Modell hat zwei Orte. On-prem: die Basis-URL auf den eigenen Dienst setzen, OpenAI-kompatibel und mit `/v1`, etwa den reemax-Dienst, den ihr selbst betreibt. Über die API: die Basis-URL auf `https://api.unitedshare.ai/v1` lassen. Der Schlüssel liegt nur in `data.json` im Tresor und geht nicht an ein lokales Embedding.
+
+Ein Bild ist ein eigener Auftrag, `POST /v1/images/generations`, Modell `reemax-image`.
 
 Enter erkennt einen Bildauftrag. Ein klares „zeichne“, „male“ oder ein Seitenverhältnis geht an das Bild, der Rest an das Textmodell. Unklare Sätze prüft das lokale Embedding auf diesem Rechner, wenn es auf 127.0.0.1, localhost oder ::1 antwortet. Fehlt Ollama oder das Modell, bleibt die Frage Text. Eine kurze Notiz geht im Ganzen mit, eine große nur als Pfad. Mermaid, Diagramme und Fragen über ein Bild bleiben Text. Ein gesetztes lokales Modell unter `absichtModell` formuliert gemischte Sätze, wenn die Zerlegung keinen Rest findet; sonst bleibt es die Textfrage. Der Schlüssel geht dabei nicht an diesen Rechner.
 
@@ -14,7 +18,7 @@ Die vollständige Übersicht über Werkzeuge, Gespräche und Einstellungen steht
 2. Zugang über die [Console](https://console.unitedshare.io/) oder direkt den [Zugang für Obsidian](https://unitedshare.ai/app/?q=obsidian) anlegen. Der Schlüssel steht dort einmal — in die Plugin-Einstellungen unter **API-Schlüssel** gehört nur er, nicht die key-ID.
 3. Den vollständigen Plugin-Ordner nach `.obsidian/plugins/unitedshare/` kopieren und das Plugin einschalten.
 
-UnitedShare ist auf der Community-Seite eingetragen: https://community.obsidian.md/plugins/unitedshare . Der Eintrag ist dem verknüpften Konto zugeordnet. `community-plugins.json` führt UnitedShare. Die Community-Seite zeigt derzeit Version 1.2.15. Release 1.2.16 liegt im Repo; die Prüfung dieser Fassung ist noch nicht gelaufen. Für DuckDB den vollständigen Ordner samt Unterordner `duckdb/` nach `.obsidian/plugins/unitedshare/` kopieren. Der Community-Installer liefert nur `main.js`, `manifest.json` und `styles.css`.
+UnitedShare ist auf der Community-Seite eingetragen: https://community.obsidian.md/plugins/unitedshare . Der Eintrag ist dem verknüpften Konto zugeordnet. `community-plugins.json` führt UnitedShare. Für DuckDB den vollständigen Ordner samt Unterordner `duckdb/` nach `.obsidian/plugins/unitedshare/` kopieren. Der Community-Installer liefert nur `main.js`, `manifest.json` und `styles.css`.
 
 ### DuckDB (Parquet/SQL) braucht die mitgelieferte Laufzeit
 
@@ -24,7 +28,7 @@ Der Obsidian-Community-Installer und das Release-Workflow liefern **nur** `main.
 
 Ist nach der Anmeldung genau ein unterstütztes Textmodell verfügbar, wählt das Plugin es automatisch. Bei mehreren Modellen erfolgt keine automatische Auswahl, weil deren Kosten und Fähigkeiten hier nicht bekannt sind; ein bereits gewähltes Modell bleibt erhalten. Für die lokale Suche das Feld **Lokale Suche: Modell** leer lassen: Ein unterstütztes bereits installiertes Modell wird automatisch erkannt. Die gesonderte Tresor-Indexsuche benötigt weiterhin `bge-m3`; das Plugin installiert keine Modelle automatisch.
 
-Basis-URL, Standard `https://api.unitedshare.ai/v1`. Der Schlüssel liegt nur in `data.json` im Tresor, nie im weitergegebenen Plugin-Ordner.
+Basis-URL, Standard `https://api.unitedshare.ai/v1` für die API. On-prem dieselbe Einstellung auf den eigenen Dienst mit `/v1` setzen. Der Schlüssel liegt nur in `data.json` im Tresor, nie im weitergegebenen Plugin-Ordner.
 
 Nach dem Einschalten öffnet UnitedShare eine Ansicht in der rechten Seitenleiste. Das Symbol in der linken Leiste und der Befehl **UnitedShare in der Seitenleiste** holen sie nach vorn. Ist die Seitenleiste zugeklappt, steht unten im Fenster eine Eingabe, und ein Rechtsklick in einer Notiz bietet **UnitedShareAI**; eine Markierung wird dort nur durch die Antwort ersetzt.
 
@@ -87,10 +91,12 @@ unbekannte Platzhalter werden abgelehnt. Es handelt sich nicht um homomorphe
 Verschlüsselung.
 
 **Wichtig:** Diese Regeln gelten ausschließlich für den separaten Befehl. Der
-gewöhnliche Chat, Erwähnungen und andere Plugin-Funktionen werden davon nicht
-gesperrt. Der aktuelle Cloud-Aufruf nutzt die vorhandene Modell-API, noch keinen
-eigenen Agentendienst. Neben der Vorlage und einer festen Format-Anweisung gehen
-Modellkennung, Authentifizierung und technische Metadaten an den Dienst.
+gewöhnliche Chat ist der Agent: der Textauftrag geht an die Basis-URL, Lesen,
+Listen und Schreiben laufen hier im Tresor. On-prem ist dieselbe Schleife gegen
+euren eigenen Dienst, über die API gegen `https://api.unitedshare.ai/v1`.
+Einen zweiten, ferngesteuerten Agentendienst gibt es nicht. Neben der Vorlage
+und einer festen Format-Anweisung gehen Modellkennung, Authentifizierung und
+technische Metadaten an den Dienst.
 
 Die Plugin-Prüfung fragt nach zwei Dingen:
 
@@ -124,4 +130,4 @@ Der Community-Installer lädt nur `main.js`, `manifest.json` und `styles.css`. E
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.16`. Community-Seite: https://community.obsidian.md/plugins/unitedshare . Die Seite zeigt derzeit 1.2.15. Die Prüfung von 1.2.16 steht aus. `community-plugins.json` führt den Eintrag.
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.2.17`. Community-Seite: https://community.obsidian.md/plugins/unitedshare . `community-plugins.json` führt den Eintrag.
