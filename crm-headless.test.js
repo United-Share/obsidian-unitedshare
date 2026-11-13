@@ -78,6 +78,64 @@ test("standardKonfig begrenzt limit auf 1 bis 1000", () => {
   assert.equal(core.standardKonfig({}).limit, 100);
 });
 
+// ---------------------------------------------------------- Tresor finden
+
+test("findeTresor findet den Tresor von innen und bleibt außerhalb ehrlich leer", async () => {
+  const wurzel = await fs.mkdtemp(path.join(os.tmpdir(), "crm-finde-"));
+  const tresor = path.join(wurzel, "mein-tresor");
+  await fs.mkdir(path.join(tresor, ".obsidian"), { recursive: true });
+  await fs.mkdir(path.join(tresor, "crm"), { recursive: true });
+  await fs.mkdir(path.join(tresor, "crm", "tiefer"), { recursive: true });
+  assert.equal(core.findeTresor(tresor), tresor);
+  assert.equal(core.findeTresor(path.join(tresor, "crm")), tresor);
+  assert.equal(core.findeTresor(path.join(tresor, "crm", "tiefer")), tresor);
+  assert.equal(core.findeTresor(wurzel), null);
+  assert.equal(core.findeTresor(wurzel, 0), null);
+});
+
+test("findeTresor hoert an der Wurzel auf und ehrt die Tiefe", async () => {
+  const wurzel = await fs.mkdtemp(path.join(os.tmpdir(), "crm-tiefe-"));
+  let ordner = wurzel;
+  for (let i = 0; i < 8; i += 1) {
+    const folge = path.join(ordner, `ebene${i}`);
+    await fs.mkdir(folge);
+    ordner = folge;
+  }
+  await fs.mkdir(path.join(wurzel, ".obsidian"), { recursive: true });
+  // 8 Ebenen liegen jenseits der Standardtiefe 6 — außerhalb bleibt der Fund leer,
+  // mit genug Tiefe wird er gefunden.
+  assert.equal(core.findeTresor(ordner), null);
+  assert.equal(core.findeTresor(ordner, 10), wurzel);
+});
+
+test("tresorBestimmen: Angabe vor Umgebung vor Automatik — jede Quelle benannt", async () => {
+  const wurzel = await fs.mkdtemp(path.join(os.tmpdir(), "crm-quelle-"));
+  const tresor = path.join(wurzel, "tresor");
+  await fs.mkdir(path.join(tresor, ".obsidian"), { recursive: true });
+  const vorher = process.env.CRM_VAULT;
+  try {
+    process.env.CRM_VAULT = "";
+    const auto = core.tresorBestimmen({}, tresor);
+    assert.equal(auto.vault, tresor);
+    assert.equal(auto.tresorQuelle, "auto");
+    assert.equal(auto.limit, 100);
+    process.env.CRM_VAULT = tresor;
+    const umgebung = core.tresorBestimmen({}, wurzel);
+    assert.equal(umgebung.vault, tresor);
+    assert.equal(umgebung.tresorQuelle, "umgebung");
+    const angabe = core.tresorBestimmen({ vault: tresor }, wurzel);
+    assert.equal(angabe.vault, tresor);
+    assert.equal(angabe.tresorQuelle, "angabe");
+    process.env.CRM_VAULT = "";
+    const nichts = core.tresorBestimmen({}, wurzel);
+    assert.equal(nichts.vault, "");
+    assert.equal(nichts.tresorQuelle, "");
+  } finally {
+    if (vorher === undefined) delete process.env.CRM_VAULT;
+    else process.env.CRM_VAULT = vorher;
+  }
+});
+
 // --------------------------------------------------- DuckDB-Laufzeit + Werkzeuge
 
 let duckdbVorhanden = true;

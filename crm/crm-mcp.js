@@ -157,7 +157,7 @@ function starteMcpStdio(kontext) {
   });
   process.stdin.on("end", () => process.exit(0));
   process.stderr.write(
-    `UnitedShare CRM über stdio: JSON-RPC 2.0, eine Nachricht je Zeile. Tresor: ${kontext.cfg.vault || "(nicht gesetzt)"}\n`,
+    `UnitedShare CRM über stdio: JSON-RPC 2.0, eine Nachricht je Zeile. Tresor: ${kontext.cfg.vault || "(kein Tresor gefunden)"}\n`,
   );
   return { verarbeite: zeile };
 }

@@ -20,12 +20,26 @@ Vollständig lesend, vollständig lokal — und für Agenten über **MCP** und
 
 ## Schnellstart
 
+Kein absoluter Pfad nötig: der Tresor wird **gefunden**. Starte den Aufruf
+im Tresor (oder in einem Unterordner) — die CLI geht von dort nach oben,
+bis ein Ordner `.obsidian` liegt (bis zu 6 Ebenen). Wer es zeigen will,
+kann `--vault <pfad>` oder `CRM_VAULT` mitgeben; das hat Vorrang.
+
 ```sh
-node crm/crm-cli.js status --vault /Volumes/SecondBrainReemax/UnitedShare/obsidian-test-126
-node crm/crm-cli.js tool crm_uebersicht --vault ...
-node crm/crm-cli.js sql "SELECT Ort, COUNT(*) FROM 'adressen.parquet' GROUP BY Ort LIMIT 5" --vault ...
-node crm/crm-cli.js abfrage aviso-uebersicht.sql --vault ...
+# im Tresor-Ordner starten:
+node crm/crm-cli.js status
+node crm/crm-cli.js tool crm_uebersicht
+node crm/crm-cli.js sql "SELECT Ort, COUNT(*) FROM 'adressen.parquet' GROUP BY Ort LIMIT 5"
+node crm/crm-cli.js abfrage aviso-uebersicht.sql
+
+# von außerhalb, mit benanntem Tresor (relativ zum Aufrufort):
+node crm/crm-cli.js status --vault ../mein-tresor
 ```
+
+`status` nennt ehrlich, woher der Tresor kommt (`tresorQuelle`:
+`angabe`, `umgebung` oder `auto` — der Marker `.obsidian` macht ihn
+findbar). Findet die Automatik nichts, bleibt sie nicht still: die
+Meldung sagt, dass ein Tresor fehlt.
 
 Die `.sql`-Abfragedateien aus `crm/` im Tresor (z. B. die 9 aviso-*.sql)
 sind über `crm_abfragen` und `crm_abfrage_datei` erreichbar und liefern
@@ -35,7 +49,7 @@ exakt dieselben Werte wie die SQL-Ansicht im Obsidian-Plugin (live geprüft:
 ## Server (MCP + ACP)
 
 ```sh
-node crm/crm-cli.js server --vault <tresor> --port 8787
+node crm/crm-cli.js server --port 8787      # im Tresor starten — der Tresor wird gefunden
 ```
 
 Bindet auf `127.0.0.1` (Loopback), druckt einen zufälligen Token (oder
@@ -57,7 +71,7 @@ Fehler folgen der ACP-Form `{code, message[, data]}` mit
 `invalid_input | not_found | server_error`. Unklare Eingaben sind HTTP 400
 (kein failed-Run); echte Ausführungsfehler werden zu `status: "failed"`.
 
-MCP über stdio für lokale Agenten: `node crm/crm-cli.js stdio --vault ...`
+MCP über stdio für lokale Agenten: `node crm/crm-cli.js stdio`
 (eine JSON-RPC-Nachricht je Zeile; Begleittext nur auf stderr, kein Token).
 
 ## Ehrliche Grenzen und Entscheidungen

@@ -15,6 +15,7 @@
 
 const { spawn } = require("node:child_process");
 const { readdir, readFile } = require("node:fs/promises");
+const { existsSync } = require("node:fs");
 const path = require("node:path");
 
 const CRM_VERSION = "1.0.0";
@@ -48,6 +49,46 @@ function standardKonfig(overrides = {}) {
       1, LIMIT_MAXIMAL, LIMIT_STANDARD,
     ),
   };
+}
+
+// ------------------------------------------------------- Tresor finden
+//
+// Kein produktives System arbeitet mit absoluten Pfaden: der Tresor wird
+// nicht angegeben, sondern GEFUNDEN. Obsidian-Tresor sind an ihrem
+// .obsidian-Ordner erkennbar. Wir gehen vom Startordner (meist: wo der
+// Aufruf passiert) nach oben, bis wir den Marker sehen — so weit, wie es
+// eine sinnvolle Ordnerhierarchie hergibt (TRESOR_TIEFE). Wer trotzdem
+// zeigen will, wo zu suchen ist: --vault <pfad> oder CRM_VAULT hat
+// Vorrang vor der Automatik.
+
+const TRESOR_TIEFE = 6;
+const TRESOR_MERKMAL = ".obsidian";
+
+function findeTresor(start = process.cwd(), maximalTiefe = TRESOR_TIEFE) {
+  let ordner = path.resolve(String(start || "."));
+  for (let ebenen = 0; ebenen <= Math.max(0, Math.floor(maximalTiefe)); ebenen += 1) {
+    if (existsSync(path.join(ordner, TRESOR_MERKMAL))) return ordner;
+    const ueber = path.dirname(ordner);
+    if (ueber === ordner) return null; // an der Wurzel angekommen
+    ordner = ueber;
+  }
+  return null;
+}
+
+// Eine Konfiguration mit Fundquelle, damit Werkzeuge und CLI ehrlich sagen
+// koennen, WOHER der Tresor kommt: angabe (--vault), umgebung (CRM_VAULT),
+// auto (Marker gefunden) oder "" (nichts gefunden — Fehlerfall, benannt).
+function tresorBestimmen(overrides = {}, start = process.cwd()) {
+  const cfg = standardKonfig(overrides);
+  if (cfg.vault) {
+    return {
+      ...cfg,
+      tresorQuelle: overrides.vault !== undefined && overrides.vault !== "" ? "angabe" : "umgebung",
+    };
+  }
+  const gefunden = findeTresor(start);
+  if (gefunden) return { ...cfg, vault: gefunden, tresorQuelle: "auto" };
+  return { ...cfg, tresorQuelle: "" };
 }
 
 // ------------------------------------------------------ SQL-Absicherungen
@@ -286,6 +327,10 @@ module.exports = {
   LIMIT_MAXIMAL,
   ABFRAGE_TIMEOUT_MS,
   standardKonfig,
+  TRESOR_TIEFE,
+  TRESOR_MERKMAL,
+  findeTresor,
+  tresorBestimmen,
   sqlAnsichten,
   istLesendeAbfrage,
   sichererParquetName,

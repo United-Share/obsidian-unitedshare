@@ -7,7 +7,7 @@
 
 const { spawn } = require("node:child_process");
 const {
-  CRM_VERSION, STANDARD_AGENT_URL, standardKonfig,
+  CRM_VERSION, STANDARD_AGENT_URL, tresorBestimmen,
   parquetDateienImVault, abfrageDateienImVault, duckdbJsonAusfuehren,
 } = require("./crm-core");
 const { crmWerkzeugeAlle, erstelleKontext } = require("./crm-abfragen-tools");
@@ -32,7 +32,9 @@ Befehle:
   hilfe | version               diese Hilfe | Version
 
 Optionen:
-  --vault <pfad>                Tresor-Ordner (auch CRM_VAULT)
+  --vault <pfad>                Tresor-Ordner (auch CRM_VAULT). Ohne Angabe wird
+                                der Tresor gefunden: von hier nach oben, bis ein
+                                Ordner .obsidian liegt (bis zu 6 Ebenen).
   --limit <n>                   Zeilengrenze je Abfrage (1-1000, Standard 100)
   --duckdb <pfad>               duckdb-Binaerdatei (auch CRM_DUCKDB_BIN)
   --token <t>                   Server-Token (auch CRM_TOKEN; sonst zufaellig)
@@ -40,10 +42,13 @@ Optionen:
   --erlaubt                     Cloud-Aufrufe ausdruecklich freigeben
 
 Beispiele:
-  node crm/crm-cli.js status --vault /Volumes/SecondBrainReemax/UnitedShare/obsidian-test-126
-  node crm/crm-cli.js tool crm_uebersicht --vault ...
-  node crm/crm-cli.js server --vault ... --port 8787
-  node crm/crm-cli.js agent info --erlaubt
+  node crm/crm-cli.js status                    # im Tresor starten — er wird gefunden
+  node crm/crm-cli.js tool crm_uebersicht
+  node crm/crm-cli.js sql "SELECT Ort, COUNT(*) FROM 'adressen.parquet' GROUP BY Ort"
+  node crm/crm-cli.js abfrage aviso-uebersicht.sql
+  node crm/crm-cli.js server --port 8787        # MCP + ACP + health; Token in der Konsole
+  node crm/crm-cli.js stdio                     # MCP fuer lokale Agenten (z. B. MCP-Client)
+  node crm/crm-cli.js agent info --erlaubt      # Cloud-Gegenstelle (bewusst gesperrt)
 `;
 
 function drucke(objekt) {
@@ -106,9 +111,16 @@ async function status(cfg) {
   catch (fehler) { tresorFehler = fehler.message; }
   let abfragen = [];
   try { abfragen = await abfrageDateienImVault(cfg); } catch { abfragen = []; }
+  const quelle = {
+    angabe: "per --vault angegeben",
+    umgebung: "per CRM_VAULT gesetzt",
+    auto: "automatisch gefunden (Marker .obsidian)",
+    "": "nicht gefunden",
+  };
   return {
     version: CRM_VERSION,
-    tresor: cfg.vault || "(nicht gesetzt — --vault <pfad> angeben)",
+    tresor: cfg.vault || "(kein Tresor gefunden — im Tresor starten oder --vault <pfad> angeben)",
+    tresorQuelle: quelle[cfg.tresorQuelle ?? ""] ?? cfg.tresorQuelle,
     tresorFehler,
     duckdb: await duckdbVersion(cfg),
     parquetDateien: dateien,
@@ -135,7 +147,7 @@ function serverBanner(lauf, cfg) {
 async function main(argv) {
   const { flags, rest } = leseFlags(argv);
   const befehl = rest[0] ?? "hilfe";
-  const cfg = standardKonfig({ vault: flags.vault, limit: flags.limit, duckdbBin: flags.duckdbBin });
+  const cfg = tresorBestimmen({ vault: flags.vault, limit: flags.limit, duckdbBin: flags.duckdbBin });
 
   if (befehl === "hilfe" || befehl === "help" || befehl === "--help" || befehl === "-h") {
     process.stdout.write(HILFE);
@@ -183,7 +195,12 @@ async function main(argv) {
       return 0;
     }
     case "server": {
-      if (!cfg.vault) throw new CliFehler("server braucht einen Tresor: --vault <pfad> (oder CRM_VAULT).", 2);
+      if (!cfg.vault) {
+        throw new CliFehler(
+          "server braucht einen Tresor: im Tresor starten (der Marker .obsidian macht ihn findbar) oder --vault <pfad> angeben.",
+          2,
+        );
+      }
       const lauf = await starteCrmServer(kontext, {
         host: flags.host ?? "127.0.0.1",
         port: flags.port,
