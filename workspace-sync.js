@@ -80,8 +80,40 @@ function kopf(apiKey) {
   return { Authorization: `Bearer ${apiKey}` };
 }
 
+// Hausmuster aus unitedshare-core: Buffer nur mit Guard, der
+// Bundler-Buffer-Stub hat kein byteLength.
+function utf8ByteLength(text) {
+  if (typeof Buffer !== "undefined" && typeof Buffer.byteLength === "function") {
+    return Buffer.byteLength(text, "utf8");
+  }
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
+  return text.length;
+}
+
+// S5: typfeste Messung. Alles ohne messbare Groesse wird abgelehnt statt
+// geraten; URLSearchParams und beliebige Objekte haben keine Byte-Laenge.
+function bodyBytes(inhalt) {
+  if (typeof inhalt === "string") return utf8ByteLength(inhalt);
+  if (typeof ArrayBuffer !== "undefined") {
+    if (inhalt instanceof ArrayBuffer) return inhalt.byteLength;
+    if (ArrayBuffer.isView(inhalt)) return inhalt.byteLength;
+  }
+  return null;
+}
+
+function contentLengthVon(antwort) {
+  if (!antwort || !antwort.headers || typeof antwort.headers.get !== "function") return null;
+  const roh = antwort.headers.get("content-length");
+  if (roh === null || roh === undefined) return null;
+  const n = Number(roh);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 async function objektSchreiben(ctx, key, inhalt) {
-  const bytes = typeof inhalt === "string" ? Buffer.byteLength(inhalt, "utf8") : (inhalt ? inhalt.length : 0);
+  const bytes = bodyBytes(inhalt);
+  if (bytes === null) {
+    return { status: 0, ok: false, grund: "unmessbar" };
+  }
   if (bytes > MAX_OBJEKT_BYTES) {
     return { status: 413, ok: false, grund: "zu-gross" };
   }
@@ -90,16 +122,29 @@ async function objektSchreiben(ctx, key, inhalt) {
     headers: kopf(ctx.apiKey),
     body: inhalt,
   });
-  return { status: antwort.status, ok: antwort.status === 200 };
+  return { status: antwort.status, ok: antwort.status >= 200 && antwort.status < 300 };
 }
 
+// S4: Antworten sind Netz-Eingabe. Content-Length vorab, nach dem Lesen
+// erneut messen (fail-closed), NUL-Inhalte verwerfen.
 async function objektLesen(ctx, key) {
   const antwort = await ctx.fetchImpl(urlFuerObjekt(ctx.baseUrl, key), {
     method: "GET",
     headers: kopf(ctx.apiKey),
   });
   if (antwort.status !== 200) return { status: antwort.status, text: null };
-  return { status: 200, text: await antwort.text() };
+  const angekuendigt = contentLengthVon(antwort);
+  if (angekuendigt !== null && angekuendigt > MAX_OBJEKT_BYTES) {
+    return { status: 200, text: null, grund: "zu-gross" };
+  }
+  const text = await antwort.text();
+  if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
+    return { status: 200, text: null, grund: "zu-gross" };
+  }
+  if (text.includes("\u0000")) {
+    return { status: 200, text: null, grund: "unlesbar" };
+  }
+  return { status: 200, text };
 }
 
 async function objekteListen(ctx, praefix) {
@@ -108,8 +153,20 @@ async function objekteListen(ctx, praefix) {
     headers: kopf(ctx.apiKey),
   });
   if (antwort.status !== 200) return { status: antwort.status, items: [] };
-  const daten = await antwort.json();
-  return { status: 200, items: Array.isArray(daten.items) ? daten.items : [] };
+  const angekuendigt = contentLengthVon(antwort);
+  if (angekuendigt !== null && angekuendigt > MAX_OBJEKT_BYTES) {
+    return { status: 200, items: [], grund: "zu-gross" };
+  }
+  let daten;
+  try {
+    daten = await antwort.json();
+  } catch (_fehler) {
+    return { status: 200, items: [], grund: "unlesbar" };
+  }
+  if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
+    return { status: 200, items: [], grund: "unlesbar" };
+  }
+  return { status: 200, items: daten.items };
 }
 
 // Spiegelt einen frisch gespeicherten Chat und holt bei Erfolg die

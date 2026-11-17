@@ -125,6 +125,109 @@ test("objektSchreiben, objektLesen und objekteListen sprechen das Gateway-Protok
   }
 });
 
+// Nacharbeit S4: Antworten des Gateways sind Netz-Eingabe. Content-Length
+// wird vorab geprueft, nach dem Lesen wird erneut gemessen (fail-closed),
+// NUL-Inhalte und unlesbares JSON werden verworfen statt durchgereicht.
+function fakeAntwort({ status = 200, body = "", jsonWert, contentLength } = {}) {
+  return {
+    status,
+    headers: {
+      get: (name) =>
+        String(name).toLowerCase() === "content-length"
+          ? (contentLength ?? String(Buffer.byteLength(body, "utf8")))
+          : null,
+    },
+    text: async () => body,
+    json: async () => {
+      if (jsonWert !== undefined) return jsonWert;
+      return JSON.parse(body);
+    },
+  };
+}
+
+test("objekteListen verwirft kaputtes oder leeres JSON als unlesbar", async () => {
+  const kaputt = await objekteListen(
+    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: "{kaputt" }) },
+    CHATS_PRAEFIX
+  );
+  assert.equal(kaputt.status, 200);
+  assert.deepEqual(kaputt.items, []);
+  assert.equal(kaputt.grund, "unlesbar");
+
+  const nullwert = await objekteListen(
+    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ jsonWert: null }) },
+    CHATS_PRAEFIX
+  );
+  assert.deepEqual(nullwert.items, []);
+  assert.equal(nullwert.grund, "unlesbar");
+
+  const leer = await objekteListen(
+    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: '{"bucket":"b","items":[]}' }) },
+    CHATS_PRAEFIX
+  );
+  assert.deepEqual(leer.items, []);
+  assert.equal(leer.grund, undefined);
+});
+
+test("objektLesen verwirft Riesen-Inhalte und NUL-Bytes fail-closed", async () => {
+  const angekuendigt = await objektLesen(
+    {
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "k",
+      fetchImpl: async () => fakeAntwort({ body: "klein", contentLength: String(MAX_OBJEKT_BYTES + 1) }),
+    },
+    "obsidian/chats/a.json"
+  );
+  assert.equal(angekuendigt.text, null);
+  assert.equal(angekuendigt.grund, "zu-gross");
+
+  const gelogen = await objektLesen(
+    {
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "k",
+      fetchImpl: async () => fakeAntwort({ body: "x".repeat(MAX_OBJEKT_BYTES + 1), contentLength: "5" }),
+    },
+    "obsidian/chats/a.json"
+  );
+  assert.equal(gelogen.text, null);
+  assert.equal(gelogen.grund, "zu-gross");
+
+  const nul = await objektLesen(
+    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: "ok\u0000boese" }) },
+    "obsidian/chats/a.json"
+  );
+  assert.equal(nul.text, null);
+  assert.equal(nul.grund, "unlesbar");
+});
+
+// Nacharbeit S5: Body-Messung typfest nach dem utf8ByteLength-Hausmuster.
+// Alles ohne messbare Groesse wird fail-closed abgelehnt, bevor ein Request
+// entsteht; der Bundler-Buffer-Stub hat kein byteLength.
+test("objektSchreiben misst auch Binaer-Bodies und lehnt Unmessbares ab", async () => {
+  let treffer = 0;
+  const ctx = {
+    baseUrl: "http://127.0.0.1:1/v1",
+    apiKey: "k",
+    fetchImpl: async () => {
+      treffer += 1;
+      throw new Error("darf nicht passieren");
+    },
+  };
+  const riesig = await objektSchreiben(ctx, "obsidian/chats/a.json", new ArrayBuffer(32 * 1024 * 1024));
+  assert.equal(riesig.ok, false);
+  assert.equal(riesig.grund, "zu-gross");
+
+  const objekt = await objektSchreiben(ctx, "obsidian/chats/a.json", { nicht: "messbar" });
+  assert.equal(objekt.ok, false);
+  assert.equal(objekt.grund, "unmessbar");
+
+  const params = await objektSchreiben(ctx, "obsidian/chats/a.json", new URLSearchParams("a=1"));
+  assert.equal(params.ok, false);
+  assert.equal(params.grund, "unmessbar");
+
+  assert.equal(treffer, 0);
+});
+
 // Haertung nach Security-Finding 3: die Byte-Grenze wird am tatsaechlichen
 // Body durchgesetzt, nicht nur an Metadaten. Ein zu grosser Body verlaesst
 // das Geraet gar nicht erst.
