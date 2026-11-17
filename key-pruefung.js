@@ -19,7 +19,15 @@ function utf8ByteLength(text) {
     return Buffer.byteLength(text, "utf8");
   }
   if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
-  return text.length;
+  // Fail-closed-Fallback: text.length wuerde Mehrbyte-Zeichen unterzaehlen
+  // und die Byte-Grenzen aufweichen. Manuelle Codepoint-Zaehlung,
+  // Surrogatpaare korrekt als 4 Bytes.
+  let bytes = 0;
+  for (const zeichen of text) {
+    const cp = zeichen.codePointAt(0);
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  return bytes;
 }
 
 // S6: Zeichenklassen, mit denen ein Key am Validator vorbei auf dem
@@ -30,30 +38,38 @@ function utf8ByteLength(text) {
 // und ueberlange Segmente (Dateisystem-Grenze 255 Bytes).
 const UNSICHTBAR = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
 const RAND_LEERRAUM = /^\p{Zs}|\p{Zs}$/u;
-const SLASH_VARIANTEN = /[\uff0f\u2215]/;
 const WINDOWS_ZEICHEN = /[*?"<>|]/;
-const PUNKT_VARIANTEN = /[\u2024\uff0e]/g;
+// NFKC-resistente Slash-Doppelgaenger: normalize("NFKC") laesst U+2044
+// (Fraction Slash) und U+2215 (Division Slash) gemessen unveraendert
+// stehen, deshalb bleiben genau diese beiden als Restliste gesperrt.
+const NFKC_RESISTENTE_SLASHES = /[\u2044\u2215]/;
 const MAX_SEGMENT_BYTES = 255;
+const PFADBEDEUTSAM = [".", "/", "\\", ":"];
 
 function segmentGueltig(segment) {
   if (segment.length === 0) return false;
   if (UNSICHTBAR.test(segment)) return false;
   if (RAND_LEERRAUM.test(segment)) return false;
-  if (SLASH_VARIANTEN.test(segment)) return false;
   if (WINDOWS_ZEICHEN.test(segment)) return false;
   if (segment.includes("%")) return false;
   if (utf8ByteLength(segment) > MAX_SEGMENT_BYTES) return false;
-  // Punkt-Varianten zaehlen in allen Punkt-Regeln als Punkt.
-  const punktNorm = segment.replace(PUNKT_VARIANTEN, ".");
+  // S6-Nachtrag: die Kompatibilitaets-Form entscheidet. Faltet NFKC ein
+  // pfadbedeutsames Zeichen herbei, das die Originalform nicht hatte,
+  // wird abgelehnt: eine nachgelagerte Faltung darf nie Pfadbedeutung
+  // erzeugen.
+  const nfkc = segment.normalize("NFKC");
+  for (const zeichen of PFADBEDEUTSAM) {
+    if (nfkc.includes(zeichen) && !segment.includes(zeichen)) return false;
+  }
+  if (NFKC_RESISTENTE_SLASHES.test(nfkc)) return false;
   // Dot-Segmente sind tabu: .obsidian/plugins waere Codeausfuehrung.
-  if (punktNorm.startsWith(".")) return false;
-  if (punktNorm.endsWith(".") || punktNorm.endsWith(" ")) return false;
-  // Konservativ: ".." auch mitten im Segment ablehnen. Eine spaetere
-  // Normalisierungsschicht koennte daraus echte Traversal-Punkte machen.
-  if (punktNorm.includes("..")) return false;
-  if (GERAETENAMEN.test(punktNorm)) return false;
+  if (nfkc.startsWith(".")) return false;
+  if (nfkc.endsWith(".") || nfkc.endsWith(" ")) return false;
+  // Konservativ: ".." auch mitten im Segment ablehnen.
+  if (nfkc.includes("..")) return false;
+  if (GERAETENAMEN.test(nfkc)) return false;
   // NTFS Alternate Data Streams und laufwerksrelative Pfade.
-  if (punktNorm.includes(":")) return false;
+  if (nfkc.includes(":")) return false;
   return true;
 }
 

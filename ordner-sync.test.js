@@ -313,6 +313,26 @@ test("keyAusRelpfad lehnt unsichtbare und getarnte Zeichen ab", () => {
   }
 });
 
+// S6-Nachtrag: statt Zeichenlisten entscheidet die NFKC-Form. Faltet die
+// Kompatibilitaets-Normalisierung ein pfadbedeutsames Zeichen (. / \\ :)
+// herbei, das die Originalform nicht hatte, wird abgelehnt. U+2044 und
+// U+2215 laesst NFKC gemessen unveraendert stehen und sie bleiben als
+// dokumentierte Restliste gesperrt.
+test("keyAusRelpfad lehnt NFKC-faltbare und NFKC-resistente Doppelgaenger ab", () => {
+  const faelle = [
+    "\u2024obsidian/n.md",
+    "a\uff0eb/../x.md",
+    "notes/\ufe52versteckt.md",
+    "a\u2044b.md",
+    "a\u2215b.md",
+    "halb\u00bd.md",
+  ];
+  for (const pfad of faelle) {
+    assert.equal(keyAusRelpfad(pfad), null, JSON.stringify(pfad));
+  }
+  assert.ok(keyAusRelpfad("Ideen/Caf\u00e9 Plan \u00e4\u00f6\u00fc.md"), "Umlaute bleiben erlaubt");
+});
+
 test("keyAusRelpfad deckelt Segmente auf 255 UTF-8-Bytes", () => {
   const genauAmLimit = "a".repeat(252) + ".md";
   assert.ok(keyAusRelpfad(genauAmLimit), "255 Bytes exakt sind erlaubt");
