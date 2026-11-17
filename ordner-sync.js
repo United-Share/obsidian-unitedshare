@@ -73,13 +73,18 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
   return { hochladen, uebersprungen, geloeschtIgnoriert };
 }
 
-// Entscheidung fuer eine eingehende Notiz. Niemals stilles Ueberschreiben:
-// weicht die lokale Fassung ab, bekommt die eingehende eine Konfliktkopie.
+// Entscheidung fuer eine eingehende Notiz. Niemals stilles Ueberschreiben,
+// fail-closed (Security-Finding 2): existiert ist Pflicht und entscheidet.
+// "anlegen" gibt es nur fuer nachweislich fehlende Dateien; eine existierende
+// Datei mit unlesbarem Inhalt (lokalText null) bekommt eine Konfliktkopie.
 function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
-  if (lokalText === null || lokalText === undefined) {
+  if (typeof existiert !== "function") {
+    throw new TypeError("eingehendeNotiz braucht existiert als Funktion");
+  }
+  if (!existiert(relpfad)) {
     return { aktion: "anlegen", zielPfad: relpfad };
   }
-  if (lokalText === remoteText) {
+  if (lokalText !== null && lokalText !== undefined && lokalText === remoteText) {
     return { aktion: "unveraendert", zielPfad: relpfad };
   }
   return { aktion: "konflikt", zielPfad: konfliktDateiname(relpfad, existiert) };

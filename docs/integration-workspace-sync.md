@@ -43,6 +43,11 @@ Die drei Hooks, jeweils wenige Zeilen:
    (objektSchreiben je hochladen-Eintrag, indexNachSync persistieren),
    eingehende Notizen ueber eingehendeNotiz behandeln; bei aktion konflikt
    und requireWriteConfirm greift das bestehende Bestaetigungs-Muster.
+   Vertrag von eingehendeNotiz (fail-closed): existiert ist Pflicht und
+   muss den echten Dateisystem-Stand pruefen (adapter.exists), lokalText
+   null heisst "nicht lesbar" und fuehrt bei existierender Datei zur
+   Konfliktkopie, niemals zum Ueberschreiben. "anlegen" kommt nur fuer
+   nachweislich fehlende Dateien zurueck.
    Uebersprungene Dateien (zu-gross) und geloeschtIgnoriert in das
    fehler-protokoll schreiben.
 

@@ -147,6 +147,27 @@ test("eingehendeNotiz legt Neues direkt an und macht bei Abweichung eine Konflik
   assert.ok(konflikt.zielPfad.includes("Konflikt"));
 });
 
+// Haertung nach Security-Finding 2: "anlegen" darf nur zurueckkommen, wenn
+// die Datei nachweislich NICHT existiert. lokalText null bedeutet auch
+// "Lesen fehlgeschlagen"; eine existierende, aber unlesbare Datei still zu
+// ueberschreiben waere Datenverlust. existiert ist deshalb Pflicht und
+// entscheidet; unlesbar bei existierender Datei ergibt eine Konfliktkopie.
+test("eingehendeNotiz ist fail-closed: existierend plus unlesbar ergibt Konflikt", () => {
+  const e = eingehendeNotiz({
+    relpfad: "Ideen/unlesbar.md",
+    remoteText: "Remote-Fassung",
+    lokalText: null,
+    existiert: (p) => p === "Ideen/unlesbar.md",
+  });
+  assert.equal(e.aktion, "konflikt");
+  assert.notEqual(e.zielPfad, "Ideen/unlesbar.md");
+  assert.ok(e.zielPfad.includes("Konflikt"));
+});
+
+test("eingehendeNotiz verlangt existiert als Funktion", () => {
+  assert.throws(() => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }), TypeError);
+});
+
 test("indexNachSync uebernimmt die hochgeladenen Staende und vergisst nichts anderes", () => {
   const neu = indexNachSync({ "a.md": "h1" }, [{ pfad: "b.md", hash: "h2" }]);
   assert.deepEqual(neu, { "a.md": "h1", "b.md": "h2" });
