@@ -18,6 +18,17 @@ const CHATS_PRAEFIX = "obsidian/chats/";
 const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 // S4-Nachtrag: Deckel fuer Listing-Items; Ueberschuss wird verworfen.
 const ITEM_DECKEL = 500;
+// K3: die Warteschlange ist ein Puffer, kein Archiv. Obergrenzen mit
+// Verdraengung des Aeltesten, Versuchslimit je Eintrag, und endgueltige
+// Ablehnungen werden gar nicht erst eingereiht.
+const WARTESCHLANGE_MAX_EINTRAEGE = 50;
+const WARTESCHLANGE_MAX_BYTES = 4 * 1024 * 1024;
+const VERSUCHE_MAX = 5;
+const NACHHOL_MAX_STUECK = 10;
+
+function wiederholbar(status) {
+  return status === 0 || status === 429 || status >= 500;
+}
 
 function slugAusTitel(titel) {
   const roh = String(titel ?? "").toLowerCase();
@@ -258,31 +269,80 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   const key = chatKey(eintrag);
   const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
 
+  // K3: defensive Defaults, ein leerer Zustand wirft nicht.
+  const z = zustand && typeof zustand === "object" ? zustand : {};
+  if (!Array.isArray(z.warteschlange)) z.warteschlange = [];
+
   let geschrieben;
   try {
     geschrieben = await objektSchreiben(transport, key, inhalt);
   } catch (fehler) {
     geschrieben = { status: 0, ok: false, fehler };
   }
+
   if (!geschrieben.ok) {
-    zustand.warteschlange.push({ key, inhalt });
+    if (!wiederholbar(geschrieben.status)) {
+      // Endgueltige Ablehnung: einmal protokollieren, nie einreihen.
+      protokolliere({ quelle: "workspace-sync", key, status: geschrieben.status, endgueltig: true });
+      melde("Workspace-Spiegel verworfen");
+      return { ergebnis: "verworfen", nachgeholt: 0 };
+    }
+    // Dedupe pro Key: der letzte Stand gewinnt, Position am Ende.
+    z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
+    z.warteschlange.push({ key, inhalt, versuche: 0 });
+    // Obergrenzen: Anzahl und Gesamtbytes, Verdraengung des Aeltesten.
+    while (z.warteschlange.length > WARTESCHLANGE_MAX_EINTRAEGE) {
+      const raus = z.warteschlange.shift();
+      protokolliere({ quelle: "workspace-sync", key: raus.key, status: 0, verdraengt: true });
+    }
+    let gesamt = z.warteschlange.reduce((summe, w) => summe + utf8ByteLength(String(w.inhalt ?? "")), 0);
+    while (gesamt > WARTESCHLANGE_MAX_BYTES && z.warteschlange.length > 1) {
+      const raus = z.warteschlange.shift();
+      gesamt -= utf8ByteLength(String(raus.inhalt ?? ""));
+      protokolliere({ quelle: "workspace-sync", key: raus.key, status: 0, verdraengt: true });
+    }
     protokolliere({ quelle: "workspace-sync", key, status: geschrieben.status });
     melde("Workspace-Spiegel aufgeschoben");
     return { ergebnis: "aufgeschoben", nachgeholt: 0 };
   }
 
+  // Frischer Erfolg: veraltete Fassungen desselben Keys fliegen raus,
+  // niemals landet eine alte Fassung ueber der frischen.
+  const vorher = z.warteschlange.length;
+  z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
+  if (z.warteschlange.length < vorher) {
+    protokolliere({ quelle: "workspace-sync", key, status: 0, veraltetVerworfen: true });
+  }
+
   let nachgeholt = 0;
-  while (zustand.warteschlange.length > 0) {
-    const naechster = zustand.warteschlange[0];
-    let gelungen = false;
+  let bearbeitet = 0;
+  while (z.warteschlange.length > 0 && bearbeitet < NACHHOL_MAX_STUECK) {
+    const kopfEintrag = z.warteschlange[0];
+    bearbeitet += 1;
+    let r;
     try {
-      gelungen = (await objektSchreiben(transport, naechster.key, naechster.inhalt)).ok;
+      r = await objektSchreiben(transport, kopfEintrag.key, kopfEintrag.inhalt);
     } catch (_fehler) {
-      gelungen = false;
+      r = { status: 0, ok: false };
     }
-    if (!gelungen) break;
-    zustand.warteschlange.shift();
-    nachgeholt += 1;
+    if (r.ok) {
+      z.warteschlange.shift();
+      nachgeholt += 1;
+      continue;
+    }
+    if (!wiederholbar(r.status)) {
+      // Endgueltig abgelehnt: raus damit, der Kopf blockiert nicht.
+      z.warteschlange.shift();
+      protokolliere({ quelle: "workspace-sync", key: kopfEintrag.key, status: r.status, endgueltig: true });
+      continue;
+    }
+    kopfEintrag.versuche = (kopfEintrag.versuche ?? 0) + 1;
+    if (kopfEintrag.versuche >= VERSUCHE_MAX) {
+      z.warteschlange.shift();
+      protokolliere({ quelle: "workspace-sync", key: kopfEintrag.key, status: r.status, aufgegeben: true });
+      continue;
+    }
+    break;
   }
   melde(nachgeholt > 0 ? `Workspace-Spiegel ok, ${nachgeholt} nachgeholt` : "Workspace-Spiegel ok");
   return { ergebnis: "gespiegelt", nachgeholt };
@@ -300,6 +360,8 @@ function wiederherstellbareChats(items) {
 
 module.exports = {
   CHATS_PRAEFIX,
+  WARTESCHLANGE_MAX_EINTRAEGE,
+  ITEM_DECKEL,
   MAX_OBJEKT_BYTES,
   basisPruefen,
   apiKeyPruefen,

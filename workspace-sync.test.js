@@ -24,6 +24,7 @@ const {
   CHATS_PRAEFIX,
   MAX_OBJEKT_BYTES,
   basisPruefen,
+  WARTESCHLANGE_MAX_EINTRAEGE,
   slugAusTitel,
   chatKey,
   urlFuerObjekt,
@@ -450,11 +451,14 @@ test("chatSpiegeln lehnt unbrauchbare apiKeys ohne Request ab", async () => {
   }
 });
 
-test("chatSpiegeln bei 401 schreibt ins Protokoll und stellt den Chat in die Warteschlange", async () => {
+test("chatSpiegeln bei 500 schreibt ins Protokoll und stellt den Chat in die Warteschlange", async () => {
   const protokoll = [];
   const { server, port } = await listen((req, res) => {
-    res.writeHead(401, { "content-type": "application/json" });
-    res.end('{"error":"invalid_token"}');
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end('{"error":"kaputt"}');
+    });
   });
   try {
     const ctx = {
@@ -507,6 +511,208 @@ test("chatSpiegeln holt die Warteschlange beim naechsten Erfolg nach", async () 
 // Nacharbeit S2: das Listing kommt vom Netz und ist damit fremde Eingabe.
 // Keys werden mit derselben Segmentpruefung wie im Ordner-Sync gefiltert;
 // der lokale Dateiname wird ohnehin NIE aus dem Remote-Key abgeleitet.
+// Nacharbeit K3: die Warteschlange ist ein Puffer, kein Archiv. Pro Key
+// gewinnt der letzte Stand (niemals veraltete Fassung ueber frische),
+// endgueltige Ablehnungen (400 401 403 413) werden nicht eingereiht und
+// blockieren nicht den Kopf, Obergrenzen verdraengen das Aelteste, und
+// ein leerer Zustand wirft nicht.
+function chatVon(id, inhaltMarker) {
+  return {
+    title: "T" + id,
+    erstellt: "2026-11-17T0" + (inhaltMarker.length % 10) + ":00:00Z",
+    id,
+    messages: [{ role: "user", content: inhaltMarker }],
+  };
+}
+
+test("frischer Erfolg verwirft veraltete Fassungen desselben Keys", async () => {
+  const ablage = new Map();
+  const { server, port } = await listen((req, res) => {
+    const url = new URL(req.url, "http://x");
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      ablage.set(url.searchParams.get("key"), body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"key":"x","bytes":1}');
+    });
+  });
+  try {
+    const eintrag = { title: "Stale", erstellt: "2026-11-17T08:00:00Z", id: "s1", messages: [{ role: "user", content: "frisch" }] };
+    const eigenerKey = chatKey(eintrag);
+    const zustand = { warteschlange: [{ key: eigenerKey, inhalt: "VERALTET", versuche: 1 }] };
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+      },
+      eintrag,
+      zustand
+    );
+    assert.equal(e.ergebnis, "gespiegelt");
+    assert.equal(zustand.warteschlange.length, 0);
+    assert.ok(ablage.get(eigenerKey).includes("frisch"));
+    assert.ok(!ablage.get(eigenerKey).includes("VERALTET"));
+  } finally {
+    server.close();
+  }
+});
+
+test("endgueltige Ablehnung blockiert nicht den Kopf der Warteschlange", async () => {
+  const gesehen = [];
+  const { server, port } = await listen((req, res) => {
+    const url = new URL(req.url, "http://x");
+    const key = url.searchParams.get("key");
+    gesehen.push(key);
+    req.on("data", () => {});
+    req.on("end", () => {
+      const status = key.includes("endgueltig") ? 413 : 200;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end('{"key":"x","bytes":1}');
+    });
+  });
+  try {
+    const zustand = {
+      warteschlange: [
+        { key: "obsidian/chats/endgueltig.json", inhalt: "a" },
+        { key: "obsidian/chats/geht.json", inhalt: "b" },
+      ],
+    };
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+      },
+      chatVon("k3b", "neu"),
+      zustand
+    );
+    assert.equal(e.ergebnis, "gespiegelt");
+    assert.equal(e.nachgeholt, 1);
+    assert.equal(zustand.warteschlange.length, 0);
+    assert.ok(gesehen.includes("obsidian/chats/geht.json"));
+  } finally {
+    server.close();
+  }
+});
+
+test("wiederholte 500-Fehlschlaege desselben Chats ergeben einen Eintrag", async () => {
+  const { server, port } = await listen((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end('{"error":"kaputt"}');
+    });
+  });
+  try {
+    const ctx = {
+      settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+      erlaubeLoopback: true,
+      fetchImpl: fetch,
+    };
+    const eintrag = chatVon("gleich", "selber chat");
+    const zustand = { warteschlange: [] };
+    const e1 = await chatSpiegeln(ctx, eintrag, zustand);
+    const e2 = await chatSpiegeln(ctx, eintrag, zustand);
+    assert.equal(e1.ergebnis, "aufgeschoben");
+    assert.equal(e2.ergebnis, "aufgeschoben");
+    assert.equal(zustand.warteschlange.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("endgueltige Ablehnung des frischen Chats wird verworfen statt eingereiht", async () => {
+  const { server, port } = await listen((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end('{"error":"invalid_token"}');
+    });
+  });
+  try {
+    const protokoll = [];
+    const zustand = { warteschlange: [] };
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+        protokoll: (eintrag) => protokoll.push(eintrag),
+      },
+      chatVon("verworfen", "x"),
+      zustand
+    );
+    assert.equal(e.ergebnis, "verworfen");
+    assert.equal(zustand.warteschlange.length, 0);
+    assert.equal(protokoll.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("201 gilt als Erfolg und leerer Zustand wirft nicht", async () => {
+  const { server, port } = await listen((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end('{"key":"x","bytes":1}');
+    });
+  });
+  try {
+    const zustand = {};
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+      },
+      chatVon("ok201", "y"),
+      zustand
+    );
+    assert.equal(e.ergebnis, "gespiegelt");
+    assert.ok(Array.isArray(zustand.warteschlange));
+    const ohneZustand = await chatSpiegeln({ settings: { apiKey: "" } }, chatVon("oz", "z"), undefined);
+    assert.equal(ohneZustand.ergebnis, "kein-schluessel");
+  } finally {
+    server.close();
+  }
+});
+
+test("die Warteschlange verdraengt bei Ueberlauf das Aelteste", async () => {
+  const { server, port } = await listen((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end("{}");
+    });
+  });
+  try {
+    const zustand = {
+      warteschlange: Array.from({ length: WARTESCHLANGE_MAX_EINTRAEGE }, (_x, i) => ({
+        key: `obsidian/chats/alt-${i}.json`,
+        inhalt: "x",
+      })),
+    };
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+      },
+      chatVon("voll", "w"),
+      zustand
+    );
+    assert.equal(e.ergebnis, "aufgeschoben");
+    assert.equal(zustand.warteschlange.length, WARTESCHLANGE_MAX_EINTRAEGE);
+    assert.ok(!zustand.warteschlange.some((w) => w.key === "obsidian/chats/alt-0.json"));
+    assert.equal(zustand.warteschlange[zustand.warteschlange.length - 1].key, chatKey(chatVon("voll", "w")));
+  } finally {
+    server.close();
+  }
+});
+
 test("wiederherstellbareChats verwirft Angriffs-Keys aus dem Listing", () => {
   const items = [
     { key: "obsidian/chats/../geheim.json", size: 1 },
