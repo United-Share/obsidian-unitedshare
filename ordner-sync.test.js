@@ -235,6 +235,59 @@ test("eingehendeNotiz ist fail-closed: existierend plus unlesbar ergibt Konflikt
   assert.ok(e.zielPfad.includes("Konflikt"));
 });
 
+// Haertung (Paket 2): existiert und lokalText sind additive Signale.
+// "anlegen" gibt es nur, wenn BEIDE sagen "da ist nichts". Widersprechen
+// sie sich, ist etwas faul (Race, kaputter Adapter) und es wird die
+// Konfliktkopie gewaehlt. Ein werfendes existiert ist ebenfalls Konflikt,
+// niemals false. relpfad wird wie in keyAusRelpfad auf NFC normalisiert.
+test("eingehendeNotiz behandelt Signal-Widerspruch als Konflikt", () => {
+  const widerspruch = eingehendeNotiz({
+    relpfad: "Ideen/race.md",
+    remoteText: "Remote",
+    lokalText: "Lokal gelesen",
+    existiert: () => false,
+  });
+  assert.equal(widerspruch.aktion, "konflikt");
+  assert.ok(widerspruch.zielPfad.includes("Konflikt"));
+});
+
+test("eingehendeNotiz behandelt werfendes existiert als Konflikt", () => {
+  let erster = true;
+  const e = eingehendeNotiz({
+    relpfad: "Ideen/kaputt.md",
+    remoteText: "Remote",
+    lokalText: null,
+    existiert: () => {
+      if (erster) {
+        erster = false;
+        throw new Error("Adapter kaputt");
+      }
+      return false;
+    },
+  });
+  assert.equal(e.aktion, "konflikt");
+  assert.ok(e.zielPfad.includes("Konflikt"));
+});
+
+test("eingehendeNotiz normalisiert den Relpfad auf NFC", () => {
+  const gesehen = [];
+  const nfd = "ide\u0301e.md";
+  const nfc = "id\u00e9e.md";
+  assert.notEqual(nfd, nfc);
+  const e = eingehendeNotiz({
+    relpfad: nfd,
+    remoteText: "x",
+    lokalText: null,
+    existiert: (p) => {
+      gesehen.push(p);
+      return false;
+    },
+  });
+  assert.equal(e.aktion, "anlegen");
+  assert.equal(e.zielPfad, nfc);
+  assert.equal(gesehen[0], nfc);
+});
+
 test("eingehendeNotiz verlangt existiert als Funktion", () => {
   assert.throws(() => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }), TypeError);
 });

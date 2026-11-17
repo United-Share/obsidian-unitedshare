@@ -93,20 +93,39 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
 }
 
 // Entscheidung fuer eine eingehende Notiz. Niemals stilles Ueberschreiben,
-// fail-closed (Security-Finding 2): existiert ist Pflicht und entscheidet.
-// "anlegen" gibt es nur fuer nachweislich fehlende Dateien; eine existierende
-// Datei mit unlesbarem Inhalt (lokalText null) bekommt eine Konfliktkopie.
+// fail-closed: existiert und lokalText sind ADDITIVE Signale. "anlegen"
+// gibt es nur, wenn beide sagen "da ist nichts". Widersprechen sie sich
+// (Race, kaputter Adapter) oder wirft existiert, wird die Konfliktkopie
+// gewaehlt. Der Relpfad wird wie in keyAusRelpfad auf NFC normalisiert.
 function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (typeof existiert !== "function") {
     throw new TypeError("eingehendeNotiz braucht existiert als Funktion");
   }
-  if (!existiert(relpfad)) {
-    return { aktion: "anlegen", zielPfad: relpfad };
+  const pfad = String(relpfad ?? "").normalize("NFC");
+  // Fuer die NAMENSsuche der Konfliktkopie darf eine werfende Probe die
+  // Schleife in konfliktDateiname nicht endlos machen: Wurf heisst dort
+  // "Kandidat gilt als frei", der Schreibpfad bestaetigt ohnehin.
+  const probeFuerNamen = (kandidat) => {
+    try {
+      return Boolean(existiert(kandidat));
+    } catch (_fehler) {
+      return false;
+    }
+  };
+  let vorhanden;
+  try {
+    vorhanden = Boolean(existiert(pfad));
+  } catch (_fehler) {
+    return { aktion: "konflikt", zielPfad: konfliktDateiname(pfad, probeFuerNamen) };
   }
-  if (lokalText !== null && lokalText !== undefined && lokalText === remoteText) {
-    return { aktion: "unveraendert", zielPfad: relpfad };
+  const lesbar = lokalText !== null && lokalText !== undefined;
+  if (!vorhanden && !lesbar) {
+    return { aktion: "anlegen", zielPfad: pfad };
   }
-  return { aktion: "konflikt", zielPfad: konfliktDateiname(relpfad, existiert) };
+  if (vorhanden && lesbar && lokalText === remoteText) {
+    return { aktion: "unveraendert", zielPfad: pfad };
+  }
+  return { aktion: "konflikt", zielPfad: konfliktDateiname(pfad, probeFuerNamen) };
 }
 
 function indexNachSync(index, hochgeladen) {

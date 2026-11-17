@@ -43,11 +43,19 @@ Die drei Hooks, jeweils wenige Zeilen:
    (objektSchreiben je hochladen-Eintrag, indexNachSync persistieren),
    eingehende Notizen ueber eingehendeNotiz behandeln; bei aktion konflikt
    und requireWriteConfirm greift das bestehende Bestaetigungs-Muster.
-   Vertrag von eingehendeNotiz (fail-closed): existiert ist Pflicht und
-   muss den echten Dateisystem-Stand pruefen (adapter.exists), lokalText
-   null heisst "nicht lesbar" und fuehrt bei existierender Datei zur
-   Konfliktkopie, niemals zum Ueberschreiben. "anlegen" kommt nur fuer
-   nachweislich fehlende Dateien zurueck.
+   Vertrag von eingehendeNotiz (fail-closed, additiv): existiert ist
+   Pflicht und muss den echten Dateisystem-Stand pruefen (adapter.exists).
+   "anlegen" kommt NUR zurueck, wenn existiert false liefert UND lokalText
+   null oder undefined ist. Widerspruechliche Signale (existiert false,
+   aber lokalText vorhanden; oder existiert true, aber lokalText fehlt)
+   und ein werfendes existiert ergeben immer die Konfliktkopie. Der
+   Relpfad wird intern auf NFC normalisiert, konsistent zu keyAusRelpfad.
+
+Einschraenkungen des Second-Brain-Zuschnitts (bewusste Produktentscheidung):
+Synchronisiert werden ausschliesslich Dateien mit den Endungen .md und
+.canvas. Dot-Segmente (insbesondere .obsidian) sind gesperrt, ebenso
+Windows-Geraetenamen, Doppelpunkte, Backslashes und Pfade ausserhalb des
+gewaehlten Ordners. Anhaenge (PDF, Bilder) sind kein Teil von Zuschnitt B.
    Uebersprungene Dateien (zu-gross) und geloeschtIgnoriert in das
    fehler-protokoll schreiben.
 
