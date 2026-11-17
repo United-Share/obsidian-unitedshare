@@ -1,31 +1,46 @@
 # Integration von workspace-sync, ordner-sync und key-pruefung in main.src.js
 
-Stand 2026-11-17, nach der ersten Gate-Runde (Bloecke S, K, V eingearbeitet).
-Die Module sind vollstaendig getestet (70 Vertraege in workspace-sync,
-ordner-sync und key-pruefung; die E2E-Pruefung gegen das echte Gateway wurde
-am 2026-11-17 MANUELL von netcup aus durchgefuehrt: schreiben, listen,
-zuruecklesen mit identischem Inhalt). Sie sind bewusst NICHT in main.src.js
-verdrahtet: der Arbeitsbaum traegt fremde, uncommittete Aenderungen an
-main.src.js und scripts/bundle.mjs; jede Verdrahtung haette diese
-Aenderungen mitcommittet oder beim Bundeln ueberschrieben. Die Verdrahtung
-ist ein eigener, kleiner Schritt NACH dem Review und nachdem der fremde
-Stand committet oder verworfen wurde.
+Stand 2026-11-17 nach Gate-Runde zwei (Bloecke T, P, Q, Z, D eingearbeitet).
+Die Module tragen 94 Vertraege in drei Testdateien; die E2E-Pruefung gegen
+das echte Gateway wurde am 2026-11-17 MANUELL von netcup aus durchgefuehrt
+(schreiben, listen, zuruecklesen mit identischem Inhalt). Verdrahtet wird
+NACH der Freigabe und nachdem der fremde Stand von main.src.js und
+scripts/bundle.mjs committet oder verworfen wurde.
 
 ## Hook 0, Bundler (Pflicht vor allem anderen)
 
-scripts/bundle.mjs muss drei neue Needles aufnehmen: workspace-sync.js,
-ordner-sync.js und key-pruefung.js, damit sie in main.js eingebettet
-werden. Die Eigenstaendigkeitspruefung des Bundlers ist um die drei Module
-zu erweitern. Modulabhaengigkeiten: key-pruefung haengt an nichts,
-workspace-sync haengt nur an key-pruefung, ordner-sync haengt an
-key-pruefung und unitedshare-core (UnitedShareError); ordner-sync hat
-KEINEN require auf workspace-sync, den Transport macht der Aufrufer.
+Drei neue Needles: workspace-sync.js, ordner-sync.js, key-pruefung.js.
+Modulgraph: key-pruefung haengt an nichts, workspace-sync und ordner-sync
+haengen NUR an key-pruefung; keines der drei requirt den Core oder die
+Transportschicht. Beim Inlining gilt: KEIN eingebettetes Modul darf einen
+Top-Level-Namen aus dem Core oder einem Geschwistermodul erneut
+deklarieren (ein Meta-Test sichert utf8ByteLength, MAX_OBJEKT_BYTES und
+chatKennung); bundle.mjs soll kuenftig doppelte Top-Level-Bindings
+generisch pruefen, das ist eine Pflicht fuer den fremden Bundler-Stand.
+
+## Transportvertrag (T1, T3, K4)
+
+transportBauen({settings, fetchImpl, timeoutMs, erlaubeLoopback}) ist der
+EINZIGE Weg zu einem Transport-Kontext: es prueft Basis (Pinning auf
+https://api.unitedshare.ai) und apiKey, versieht jeden Request mit Frist
+(AbortController plus Race) und liefert ein eingefrorenes, out-of-band
+registriertes ctx oder null. objektSchreiben, objektLesen und
+objekteListen lehnen alles andere mit grund ungeprueft ab.
+
+fetchImpl-Vertrag: requestUrlAsFetch() MIT Klammern (Fabrik). Signatur
+(url, init) nach {status, headers, text(), json()}; headers darf ein
+Headers-Objekt mit get ODER ein plain Record sein (case-insensitiv), und
+init.signal MUSS unterstuetzt werden (Anpassung in requestUrlAsFetch ist
+Teil von Hook 1, erst nach Freigabe des fremden Stands). Die eigenen
+Gateway-Endpunkte setzen Content-Length immer; ein fehlender oder
+nicht-dezimaler Header wird deshalb als feindlich abgelehnt. Ein echter
+Streaming-Abbruch grosser Antworten braucht Transportunterstuetzung
+(requestUrl puffert nativ) und bleibt bewusste Grenze.
 
 ## Hook 1, Chat-Spiegel (Zuschnitt A)
 
-Im Speicherpfad der Gespraeche, direkt nach dem erfolgreichen
-chatSpeichern-Aufruf, in try/catch (die Spiegelung darf das lokale
-Chat-Speichern NIE mitreissen):
+Im Speicherpfad der Gespraeche, nach erfolgreichem chatSpeichern, in
+try/catch (die Spiegelung darf das lokale Speichern NIE mitreissen):
 
     const wsync = require("./workspace-sync");
     try {
@@ -34,6 +49,7 @@ Chat-Speichern NIE mitreissen):
           settings: this.settings,
           fetchImpl: requestUrlAsFetch(),
           chatAlsText,
+          kennungFn: chatKennung,
           status: (t) => this.setStatusBarText(t),
           protokoll: (n) => debugLogSchreiben(adapter, n),
         },
@@ -44,99 +60,107 @@ Chat-Speichern NIE mitreissen):
       // Spiegel-Fehler sind protokolliert, das Chat-Speichern bleibt heil.
     }
 
-fetchImpl-Vertrag: requestUrlAsFetch() MIT Klammern (es ist eine Fabrik,
-die die fetch-artige Funktion zurueckgibt). Die Signatur ist
-(url, init) nach {status, headers.get, text(), json()}; init.signal MUSS
-unterstuetzt werden, weil workspace-sync jede Anfrage mit AbortController
-und Frist versieht (die Anpassung in requestUrlAsFetch ist Teil dieses
-Hooks und erst nach Freigabe des fremden Stands moeglich).
+kennungFn: beim Bundeln wird die Core-Funktion chatKennung angebunden;
+ohne sie gilt der gleichwertige lokale Standard aus workspace-sync.
 
-Zustandsbesitz: this.workspaceSyncZustand ist { warteschlange: [] }, wird
-mit loadData geladen und nach JEDEM Lauf mit saveData gespeichert (die
-Warteschlange ueberlebt sonst keinen Neustart).
+Ergebnis-Union von chatSpiegeln und erwartete Reaktion:
+- leer: nichts tun (leere Chats werden nie gespiegelt)
+- kein-schluessel: Statusleiste zeigt den Hinweis, kein Fehler
+- keine-basis: Statusleiste, Settings pruefen lassen
+- verworfen: protokolliert (endgueltige Ablehnung, unmessbarer Body,
+  Chat zu gross fuer die Warteschlange, Key nicht baubar); nicht erneut
+  versuchen
+- aufgeschoben: Warteschlange gefuellt, saveData aufrufen
+- laeuft-bereits: nichts tun, ein Lauf ist aktiv
+- gespiegelt: optional saveData (Warteschlange kann sich geleert haben)
+
+Zustandsbesitz: this.workspaceSyncZustand ist { warteschlange: [] },
+geladen mit loadData, nach JEDEM Lauf saveData. laufend-Zustaende gehoeren
+NICHT in saveData; die Locks leben in WeakSets der Module und sind nach
+jedem Neustart frei.
 
 ## Hook 2, Wiederherstellen (Zuschnitt A)
 
-Command-Palette-Befehl "UnitedShare: Chats aus dem Workspace
-wiederherstellen": objekteListen mit CHATS_PRAEFIX,
-wiederherstellbareChats (filtert feindliche Keys bereits aus), je Key
-objektLesen und ueber den bestehenden Chat-Lade-Pfad in .vault/chats
-ablegen. Es gelten dieselben Regeln wie fuer Hook 3: NUR Keys anlegen,
-die lokal fehlen, und IMMER mit exklusivem Anlegen schreiben. Der lokale
-Dateiname wird NIEMALS aus dem Remote-Key abgeleitet, sondern aus dem
-Inhalt (eintrag.erstellt plus chatKennung(eintrag.id), also
-chatDateiname aus unitedshare-core).
+Befehl "UnitedShare: Chats aus dem Workspace wiederherstellen":
 
-Listing-Vertrag (bekannte Grenze): objekteListen liefert {status, items,
-vollstaendig}. Das heutige Gateway liefert hoechstens die letzten 50
-Objekte (serverseitiges items.slice(-50)); bei vollstaendig: false dem
-Nutzer anzeigen, dass aeltere Chats fehlen koennen. Cursor-Paginierung
-ist ein Gateway-Folgethema, nicht Sache des Plugins. Ein echter
-Streaming-Abbruch grosser Antworten braucht Transportunterstuetzung
-(Obsidians requestUrl puffert nativ, kein ReadableStream); der Schutz
-ist Vorab-Header-Pruefung plus Nachmessung und bleibt als bewusste
-Transportgrenze notiert.
+    const ctx = wsync.transportBauen({ settings: this.settings, fetchImpl: requestUrlAsFetch() });
+    if (!ctx) return; // Statusleiste: Settings pruefen
+    const listing = await wsync.objekteListen(ctx, wsync.CHATS_PRAEFIX);
+    // listing.vollstaendig === false dem Nutzer anzeigen: aeltere Chats
+    // koennen fehlen (Gateway liefert hoechstens die letzten 50 Objekte).
+    for (const key of wsync.wiederherstellbareChats(listing.items)) { ... }
+
+Es gelten dieselben Regeln wie Hook 3: NUR lokal fehlende Chats anlegen,
+IMMER exklusiv (vault.create wirft bei Existenz). Der lokale Dateiname
+wird NIEMALS aus dem Remote-Key abgeleitet, sondern aus dem Inhalt
+(chatDateiname aus erstellt plus chatKennung). wiederherstellbareChats
+akzeptiert nur json-Keys.
 
 ## Hook 3, Ordner-Sync (Zuschnitt B)
 
-Setting secondBrainOrdner (leer = aus). Befehl "UnitedShare:
-Second-Brain-Ordner synchronisieren" plus Spiegelung beim
-Datei-Speichern im gewaehlten Ordner, beide in try/catch.
+Setting secondBrainOrdner (leer = aus), Befehl plus Spiegelung beim
+Speichern, beide in try/catch. Reihenfolge IMMER erst Pull mit
+Konfliktbehandlung, dann Push:
 
-Reihenfolge ist IMMER erst Pull mit Konfliktbehandlung, dann Push:
+1. laufStarten(zustand); bei false sofort zurueck; laufBeenden im finally.
+2. Pull: objekteListen mit NOTES_PRAEFIX; je Key objektLesen;
+   eingehendeNotiz entscheidet. existiert ist Pflicht und DATEISYSTEMTREU
+   (adapter.exists; auf APFS und NTFS case-insensitiv, genau darauf
+   verlaesst sich der Vertrag). anlegen nur fuer nachweislich Fehlendes;
+   Widersprueche, Unlesbares und werfendes existiert ergeben die
+   Konfliktkopie; bestaetigungErforderlich macht die Nachfrage Pflicht;
+   requireWriteConfirm greift zusaetzlich. O-EXCL fuer JEDES Anlegen.
+   Beim Pull je gelesenem Objekt den Inhalt hashen und als
+   remoteStand[pfad] = {size, hash} festhalten: das ist die Grundlage des
+   Push-Schutzes (P2). Ohne Hash vergleicht der Plan nur Groessen, und
+   groessengleiche Fremdaenderungen sieht er nicht; das ist eine
+   DOKUMENTIERTE LUECKE, bis das Gateway ETags liefert.
+3. Push: planeOrdnerSync({dateien, index, entfernt, remoteStand,
+   listingVollstaendig: listing.vollstaendig}). Das Flag MUSS explizit
+   durchgereicht werden; der Modul-Default ist false (sicher). Bei
+   unvollstaendigem Listing laufen Uploads nur fuer gelistete Pfade, der
+   Rest geht nach remoteAbweichung, die Loesch-Auswertung entfaellt, und
+   der Nutzer bekommt eine Statusmeldung. Cursor-Paginierung im Gateway
+   ist die BLOCKIERENDE Voraussetzung fuer Ordner-Sync jenseits von 50
+   Objekten. plan.remoteAbweichung fuehrt in den Konfliktpfad von Schritt
+   2, plan.hochladen per objektSchreiben, indexNachSync persistieren.
+4. saveData: warteschlange, index und remoteStand nach jedem Lauf; der
+   Umfang waechst mit dem Ordner, deshalb gehoeren index und remoteStand
+   in eine eigene Datei unter .vault statt in data.json (D6).
 
-1. laufStarten(zustand); bei false sofort zurueck (ein Lauf laeuft
-   schon). Am Ende laufBeenden(zustand) im finally.
-2. Pull: objekteListen mit NOTES_PRAEFIX, je Key objektLesen,
-   eingehendeNotiz entscheiden lassen. existiert ist Pflicht und muss
-   den echten Dateisystem-Stand pruefen (adapter.exists); die Module
-   befragen zusaetzlich die Kleinschreibvariante (APFS/NTFS sind
-   case-insensitiv). "anlegen" kommt nur fuer nachweislich fehlende
-   Dateien zurueck; Widersprueche, unlesbare Dateien und werfendes
-   existiert ergeben die Konfliktkopie. Konflikt-Ergebnisse tragen
-   bestaetigungErforderlich: true, wenn die Namenssuche unbestaetigt
-   blieb oder die Suchgrenze (100 Kandidaten) erschoepft war; dann ist
-   die Nutzer-Nachfrage Pflicht. requireWriteConfirm greift zusaetzlich.
-   O-EXCL-Pflicht: JEDES Anlegen (aktion anlegen UND Konfliktkopien)
-   laeuft ueber vault.create, das bei Existenz wirft; wirft es, den
-   naechsten Kandidaten versuchen oder den Nutzer fragen. Niemals
-   Ueberschreib-Write.
-3. Danach remoteStand festhalten: je Pfad die gesehene Groesse aus dem
-   Listing (Grundlage des Push-Schutzes).
-4. Push: lokalen Stand einsammeln (Pfad relativ zum Ordner, SHA256 des
-   Inhalts, Groesse), planeOrdnerSync({dateien, index, entfernt,
-   remoteStand}) aufrufen. plan.hochladen per objektSchreiben
-   uebertragen, indexNachSync persistieren. plan.remoteAbweichung NICHT
-   hochladen, sondern in den Konfliktpfad von Schritt 2 geben (die
-   Remote-Fassung hat sich seit dem letzten gesehenen Stand geaendert).
-5. saveData: Zustand (warteschlange, index, remoteStand) nach jedem
-   Lauf speichern.
+Skalierung (D6, Integrationspflichten): mtime-plus-groesse-Vorfilter vor
+dem Hashen, Upload-Parallelitaet drei bis vier, Fortschritt und Abbruch
+ueber das Schritt-Muster aus main.src.js.
 
-Protokollpflicht: ALLE Gruende werden ueber das debugLogSchreiben-Muster
-protokolliert, mit der Nutzlast {zeit, status, meldung, body} (body ist
-der Basename, nie der volle Pfad). Festgelegte meldung-Werte:
-"zu-gross", "ungueltiger-pfad", "ungueltige-groesse", "ungueltiger-hash",
-"geloescht-ignoriert", "remote-abweichung", "endgueltig-abgelehnt",
-"verdraengt", "veraltet-verworfen", "aufgegeben", "aufgeschoben",
-"gedeckelt". Protokoll-Aufrufe sind gegen Wuerfe gekapselt und duerfen
-den Sync nie anhalten.
+## Protokoll (V3, D3, D4)
+
+Nutzlast {zeit, status, meldung, body}; body ist Tag, Stunde und Kennung,
+NIE der Titel-Slug und nie der volle Pfad (Chat-Titel gehoeren nicht ins
+debug.log). Aufrufe sind gegen Wuerfe und Promise-Fehler gekapselt.
+meldung-Werte: zu-gross, zu-gross-fuer-warteschlange, ungueltiger-pfad,
+ungueltige-groesse, ungueltiger-hash, ungueltiger-key, unmessbar,
+unlesbar, geloescht-ignoriert, remote-abweichung, listing-unvollstaendig,
+endgueltig-abgelehnt, verdraengt, veraltet-verworfen, aufgegeben,
+aufgeschoben, gedeckelt. Alle Plan-Gruende sind protokollpflichtig.
 
 ## Einschraenkungen des Second-Brain-Zuschnitts (bewusste Produktentscheidung)
 
-Synchronisiert werden ausschliesslich Dateien mit den Endungen .md und
-.canvas. Dot-Segmente (insbesondere .obsidian) sind gesperrt, ebenso
-Windows-Geraetenamen, Doppelpunkte, Backslashes, unsichtbare
-Formatzeichen, NFKC-Doppelgaenger pfadbedeutsamer Zeichen und Pfade
-ausserhalb des gewaehlten Ordners. Segmente sind auf 255 UTF-8-Bytes
-gedeckelt. Anhaenge (PDF, Bilder) sind kein Teil von Zuschnitt B.
-Loeschungen werden nicht propagiert. Objekte sind auf 16 MB begrenzt.
+Nur .md und .canvas werden gesynct; Chats nur .json. Leere Chats werden
+nicht gespiegelt. Dot-Segmente, Geraetenamen, Doppelpunkte, Backslashes,
+Steuer- und Formatzeichen, Variation Selectors, Mark-Spielereien,
+NFKC-Doppelgaenger, Prozentzeichen und Windows-Sonderzeichen sind
+gesperrt; Segmente maximal 255 UTF-8-Bytes, Objekte maximal 16 MB,
+Loeschungen werden nicht propagiert. Die Prozent-Sperre heisst konkret:
+eine Notiz "100% Plan.md" wird nicht gesynct; die Statusmeldung dafuer
+soll das Zeichen benennen ("Prozentzeichen im Dateinamen werden nicht
+synchronisiert"), nicht nur "ungueltiger Pfad".
 
 ## Sicherheitsrahmen, von den Modulen erzwungen
 
-Ohne gueltigen apiKey (usk-Alphabet nach Trimmen) kein einziger Request.
-Die Basis ist auf https://api.unitedshare.ai gepinnt (Loopback nur
-numerisch und nur mit expliziter Freischaltung durch Tests); jede andere
-Basis waere ein Exfiltrationsvektor. Es gibt keine S3-Credentials im
-Plugin. Downloads werden gegen Groesse, NUL-Bytes und feindliche
-Content-Length-Header geprueft, Listings auf 500 Items gedeckelt.
-Lokale Dateien werden nie stillschweigend ueberschrieben.
+Kein Request ohne gueltigen Key und gepinnte Basis; Transport-Kontexte
+sind eingefroren und nur ueber transportBauen zu bekommen; Downloads
+werden gegen Groesse, NUL-Bytes und feindliche Content-Length geprueft;
+Listings sind auf 500 Items gedeckelt und ab 50 als unvollstaendig
+markiert; die Warteschlange dedupliziert pro Key, nimmt keine Riesen an
+und verdraengt zuerst den groessten Eintrag; lokale Dateien werden nie
+stillschweigend ueberschrieben.
