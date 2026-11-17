@@ -288,6 +288,57 @@ test("eingehendeNotiz normalisiert den Relpfad auf NFC", () => {
   assert.equal(gesehen[0], nfc);
 });
 
+// Nacharbeit S6: unsichtbare Formatzeichen, getarnte Punkt- und
+// Slash-Varianten, Windows-Sonderzeichen, Prozentzeichen und ueberlange
+// Segmente. Alles Zeichenklassen, mit denen ein Key am Validator vorbei
+// anders aussieht als auf dem Dateisystem.
+test("keyAusRelpfad lehnt unsichtbare und getarnte Zeichen ab", () => {
+  const faelle = [
+    "notes/idee\u200b.md",
+    "notes/\u202egetarnt.md",
+    "\u2024obsidian/n.md",
+    "a\uff0f..\uff0fb.md",
+    "a\u2215b.md",
+    "notes/ende\u3000/n.md",
+    "notes/\u3000anfang.md",
+    "notes/50%.md",
+    "notes/stern*.md",
+    "notes/frage?.md",
+    "notes/spitz<.md",
+    "notes/pipe|.md",
+    "notes/punkt\uff0e\uff0e-tarnung\uff0emd",
+  ];
+  for (const pfad of faelle) {
+    assert.equal(keyAusRelpfad(pfad), null, JSON.stringify(pfad));
+  }
+});
+
+test("keyAusRelpfad deckelt Segmente auf 255 UTF-8-Bytes", () => {
+  const genauAmLimit = "a".repeat(252) + ".md";
+  assert.ok(keyAusRelpfad(genauAmLimit), "255 Bytes exakt sind erlaubt");
+  const zuLang = "a".repeat(253) + ".md";
+  assert.equal(keyAusRelpfad(zuLang), null);
+  const umlautGenauAmLimit = "\u00e4".repeat(126) + ".md";
+  assert.ok(keyAusRelpfad(umlautGenauAmLimit), "255 Bytes exakt sind erlaubt");
+  const umlautZuLang = "\u00e4".repeat(127) + ".md";
+  assert.equal(keyAusRelpfad(umlautZuLang), null);
+});
+
+test("konfliktErgebnis kuerzt den Stamm unter die Segmentgrenze", () => {
+  const name = "k".repeat(249) + ".md";
+  const e = eingehendeNotiz({
+    relpfad: name,
+    remoteText: "Remote",
+    lokalText: "Lokal",
+    existiert: (p) => p === name,
+  });
+  assert.equal(e.aktion, "konflikt");
+  const segment = e.zielPfad.split("/").pop();
+  assert.ok(Buffer.byteLength(segment, "utf8") <= 255, String(Buffer.byteLength(segment, "utf8")));
+  assert.ok(segment.includes("(Konflikt)"));
+  assert.ok(segment.endsWith(".md"));
+});
+
 // Nacharbeit S1: eingehendeNotiz verlaesst sich nicht darauf, dass der
 // Aufrufer nur gueltige Pfade liefert, sondern prueft selbst mit derselben
 // Segmentpruefung wie keyAusRelpfad. Auch der erzeugte Konflikt-Zielpfad

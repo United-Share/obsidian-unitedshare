@@ -11,7 +11,7 @@
 // Vertraege und Begruendungen: ordner-sync.test.js.
 
 const { MAX_OBJEKT_BYTES } = require("./workspace-sync");
-const { relpfadGueltig } = require("./key-pruefung");
+const { relpfadGueltig, utf8ByteLength, MAX_SEGMENT_BYTES } = require("./key-pruefung");
 
 const NOTES_PRAEFIX = "obsidian/notes/";
 
@@ -123,9 +123,18 @@ function konfliktErgebnis(pfad, existiert) {
   const stamm = punkt > 0 ? basisName.slice(0, punkt) : basisName;
   const endung = punkt > 0 ? basisName.slice(punkt) : "";
 
+  // S6: der Stamm wird so gekuerzt, dass Stamm plus Konflikt-Zusatz plus
+  // Endung unter der Segmentgrenze bleiben; ein beim Kuerzen entstandenes
+  // einsames Surrogat wird mit abgeschnitten.
   const kandidatFuer = (zaehler) => {
     const zusatz = zaehler === 1 ? "(Konflikt)" : `(Konflikt ${zaehler})`;
-    return `${ordner}${stamm} ${zusatz}${endung}`;
+    let stammKurz = stamm;
+    while (stammKurz.length > 0 && utf8ByteLength(`${stammKurz} ${zusatz}${endung}`) > MAX_SEGMENT_BYTES) {
+      stammKurz = stammKurz.slice(0, -1);
+      const letzter = stammKurz.charCodeAt(stammKurz.length - 1);
+      if (letzter >= 0xd800 && letzter <= 0xdbff) stammKurz = stammKurz.slice(0, -1);
+    }
+    return `${ordner}${stammKurz} ${zusatz}${endung}`;
   };
 
   let unbestaetigt = false;
