@@ -24,6 +24,7 @@ const {
   CHATS_PRAEFIX,
   MAX_OBJEKT_BYTES,
   basisPruefen,
+  transportBauen,
   WARTESCHLANGE_MAX_EINTRAEGE,
   slugAusTitel,
   chatKey,
@@ -148,7 +149,7 @@ test("objektSchreiben, objektLesen und objekteListen sprechen das Gateway-Protok
     res.end();
   });
   try {
-    const ctx = { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "usk_test_1", fetchImpl: fetch };
+    const ctx = testTransport(fetch, `http://127.0.0.1:${port}/v1`);
     const w = await objektSchreiben(ctx, "obsidian/chats/2026-11-17-ä test.md", "Inhalt mit Ümlaut");
     assert.equal(w.status, 200);
     const r = await objektLesen(ctx, "obsidian/chats/2026-11-17-ä test.md");
@@ -186,9 +187,53 @@ function fakeAntwort({ status = 200, body = "", jsonWert, contentLength } = {}) 
   };
 }
 
+// Gate-Runde 2, T1: transportBauen ist der einzige erlaubte Weg zu einem
+// Transport-Kontext. Die Objekt-Funktionen lehnen alles andere fail-closed
+// ab, damit kein Hook an basisPruefen, apiKeyPruefen und mitFrist vorbei
+// einen Request bauen kann.
+function testTransport(fetchImpl, baseUrl) {
+  return transportBauen({
+    settings: { apiKey: "usk_test_1", baseUrl: baseUrl ?? "http://127.0.0.1:1/v1" },
+    fetchImpl,
+    erlaubeLoopback: true,
+  });
+}
+
+test("objekt-Funktionen lehnen ungemarkte Kontexte fail-closed ab", async () => {
+  let treffer = 0;
+  const roh = {
+    baseUrl: "http://127.0.0.1:1/v1",
+    apiKey: "usk_test_1",
+    fetchImpl: async () => {
+      treffer += 1;
+      throw new Error("darf nicht passieren");
+    },
+  };
+  const s = await objektSchreiben(roh, "obsidian/chats/a.json", "x");
+  assert.equal(s.ok, false);
+  assert.equal(s.grund, "ungeprueft");
+  const l = await objektLesen(roh, "obsidian/chats/a.json");
+  assert.equal(l.text, null);
+  assert.equal(l.grund, "ungeprueft");
+  const li = await objekteListen(roh, CHATS_PRAEFIX);
+  assert.deepEqual(li.items, []);
+  assert.equal(li.vollstaendig, false);
+  assert.equal(li.grund, "ungeprueft");
+  assert.equal(treffer, 0);
+});
+
+test("transportBauen liefert null fuer boese Basis oder kaputten Key", () => {
+  assert.equal(transportBauen({ settings: { apiKey: "usk_test_1", baseUrl: "https://angreifer.example/v1" }, fetchImpl: async () => ({}) }), null);
+  assert.equal(transportBauen({ settings: { apiKey: " ", baseUrl: "https://api.unitedshare.ai/v1" }, fetchImpl: async () => ({}) }), null);
+  assert.equal(transportBauen({ settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" } }), null);
+  const ok = transportBauen({ settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" }, fetchImpl: async () => ({}) });
+  assert.ok(ok);
+  assert.equal(ok.baseUrl, "https://api.unitedshare.ai/v1");
+});
+
 test("objekteListen verwirft kaputtes oder leeres JSON als unlesbar", async () => {
   const kaputt = await objekteListen(
-    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: "{kaputt" }) },
+    testTransport(async () => fakeAntwort({ body: "{kaputt" })),
     CHATS_PRAEFIX
   );
   assert.equal(kaputt.status, 200);
@@ -196,14 +241,14 @@ test("objekteListen verwirft kaputtes oder leeres JSON als unlesbar", async () =
   assert.equal(kaputt.grund, "unlesbar");
 
   const nullwert = await objekteListen(
-    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ jsonWert: null }) },
+    testTransport(async () => fakeAntwort({ jsonWert: null })),
     CHATS_PRAEFIX
   );
   assert.deepEqual(nullwert.items, []);
   assert.equal(nullwert.grund, "unlesbar");
 
   const leer = await objekteListen(
-    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: '{"bucket":"b","items":[]}' }) },
+    testTransport(async () => fakeAntwort({ body: '{"bucket":"b","items":[]}' })),
     CHATS_PRAEFIX
   );
   assert.deepEqual(leer.items, []);
@@ -212,29 +257,21 @@ test("objekteListen verwirft kaputtes oder leeres JSON als unlesbar", async () =
 
 test("objektLesen verwirft Riesen-Inhalte und NUL-Bytes fail-closed", async () => {
   const angekuendigt = await objektLesen(
-    {
-      baseUrl: "http://127.0.0.1:1/v1",
-      apiKey: "k",
-      fetchImpl: async () => fakeAntwort({ body: "klein", contentLength: String(MAX_OBJEKT_BYTES + 1) }),
-    },
+    testTransport(async () => fakeAntwort({ body: "klein", contentLength: String(MAX_OBJEKT_BYTES + 1) })),
     "obsidian/chats/a.json"
   );
   assert.equal(angekuendigt.text, null);
   assert.equal(angekuendigt.grund, "zu-gross");
 
   const gelogen = await objektLesen(
-    {
-      baseUrl: "http://127.0.0.1:1/v1",
-      apiKey: "k",
-      fetchImpl: async () => fakeAntwort({ body: "x".repeat(MAX_OBJEKT_BYTES + 1), contentLength: "5" }),
-    },
+    testTransport(async () => fakeAntwort({ body: "x".repeat(MAX_OBJEKT_BYTES + 1), contentLength: "5" })),
     "obsidian/chats/a.json"
   );
   assert.equal(gelogen.text, null);
   assert.equal(gelogen.grund, "zu-gross");
 
   const nul = await objektLesen(
-    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: "ok\u0000boese" }) },
+    testTransport(async () => fakeAntwort({ body: "ok\u0000boese" })),
     "obsidian/chats/a.json"
   );
   assert.equal(nul.text, null);
@@ -253,11 +290,7 @@ test("feindliche Content-Length-Header werden abgelehnt statt ignoriert", async 
   ];
   for (const fall of faelle) {
     const e = await objektLesen(
-      {
-        baseUrl: "http://127.0.0.1:1/v1",
-        apiKey: "k",
-        fetchImpl: async () => fakeAntwort({ body: "klein", contentLength: fall.contentLength }),
-      },
+      testTransport(async () => fakeAntwort({ body: "klein", contentLength: fall.contentLength })),
       "obsidian/chats/a.json"
     );
     assert.equal(e.text, null, fall.contentLength);
@@ -267,14 +300,10 @@ test("feindliche Content-Length-Header werden abgelehnt statt ignoriert", async 
 
 test("objekteListen deckelt Body-Groesse und Item-Anzahl", async () => {
   const riesig = await objekteListen(
-    {
-      baseUrl: "http://127.0.0.1:1/v1",
-      apiKey: "k",
-      fetchImpl: async () => {
-        const body = "x".repeat(MAX_OBJEKT_BYTES + 1);
-        return { status: 200, headers: { get: () => null }, text: async () => body };
-      },
-    },
+    testTransport(async () => {
+      const body = "x".repeat(MAX_OBJEKT_BYTES + 1);
+      return { status: 200, headers: { get: () => String(body.length) }, text: async () => body };
+    }),
     CHATS_PRAEFIX
   );
   assert.deepEqual(riesig.items, []);
@@ -285,11 +314,7 @@ test("objekteListen deckelt Body-Groesse und Item-Anzahl", async () => {
     items: Array.from({ length: 501 }, (_x, i) => ({ key: `obsidian/chats/${i}.json`, size: 1 })),
   };
   const gedeckelt = await objekteListen(
-    {
-      baseUrl: "http://127.0.0.1:1/v1",
-      apiKey: "k",
-      fetchImpl: async () => fakeAntwort({ body: JSON.stringify(viele) }),
-    },
+    testTransport(async () => fakeAntwort({ body: JSON.stringify(viele) })),
     CHATS_PRAEFIX
   );
   assert.equal(gedeckelt.items.length, 500);
@@ -302,12 +327,12 @@ test("objekteListen deckelt Body-Groesse und Item-Anzahl", async () => {
 test("objekteListen meldet vollstaendig nur unter der Gateway-Schwelle", async () => {
   const bau = (n) => ({ bucket: "b", items: Array.from({ length: n }, (_x, i) => ({ key: "obsidian/chats/" + i + ".json", size: 1 })) });
   const klein = await objekteListen(
-    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: JSON.stringify(bau(3)) }) },
+    testTransport(async () => fakeAntwort({ body: JSON.stringify(bau(3)) })),
     CHATS_PRAEFIX
   );
   assert.equal(klein.vollstaendig, true);
   const voll = await objekteListen(
-    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: JSON.stringify(bau(50)) }) },
+    testTransport(async () => fakeAntwort({ body: JSON.stringify(bau(50)) })),
     CHATS_PRAEFIX
   );
   assert.equal(voll.vollstaendig, false);
@@ -357,14 +382,10 @@ test("die Protokoll-Nutzlast traegt zeit, status, meldung und basename", async (
 // entsteht; der Bundler-Buffer-Stub hat kein byteLength.
 test("objektSchreiben misst auch Binaer-Bodies und lehnt Unmessbares ab", async () => {
   let treffer = 0;
-  const ctx = {
-    baseUrl: "http://127.0.0.1:1/v1",
-    apiKey: "k",
-    fetchImpl: async () => {
-      treffer += 1;
-      throw new Error("darf nicht passieren");
-    },
-  };
+  const ctx = testTransport(async () => {
+    treffer += 1;
+    throw new Error("darf nicht passieren");
+  });
   const riesig = await objektSchreiben(ctx, "obsidian/chats/a.json", new ArrayBuffer(32 * 1024 * 1024));
   assert.equal(riesig.ok, false);
   assert.equal(riesig.grund, "zu-gross");
@@ -385,14 +406,10 @@ test("objektSchreiben misst auch Binaer-Bodies und lehnt Unmessbares ab", async 
 // das Geraet gar nicht erst.
 test("objektSchreiben lehnt einen Body ueber dem Gateway-Limit ohne Request ab", async () => {
   let treffer = 0;
-  const ctx = {
-    baseUrl: "http://127.0.0.1:1/v1",
-    apiKey: "usk_test_1",
-    fetchImpl: async () => {
-      treffer += 1;
-      throw new Error("darf nicht passieren");
-    },
-  };
+  const ctx = testTransport(async () => {
+    treffer += 1;
+    throw new Error("darf nicht passieren");
+  });
   const zuGross = "x".repeat(MAX_OBJEKT_BYTES + 1);
   const e = await objektSchreiben(ctx, "obsidian/chats/riesig.md", zuGross);
   assert.equal(e.ok, false);

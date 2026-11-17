@@ -153,6 +153,33 @@ function kopf(apiKey) {
   return { Authorization: `Bearer ${apiKey}` };
 }
 
+// T1: transportBauen ist der EINZIGE erlaubte Weg zu einem Transport-
+// Kontext. Es buendelt basisPruefen, apiKeyPruefen und mitFrist; die
+// Objekt-Funktionen akzeptieren nur so gebaute Kontexte (Marker), damit
+// kein Aufrufer an den Pruefungen vorbei einen Request bauen kann.
+const TRANSPORT_MARKER = Symbol("workspace-sync-transport");
+
+function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}) {
+  const einstellungen = settings || {};
+  const apiKey = apiKeyPruefen(einstellungen.apiKey);
+  if (apiKey === null) return null;
+  const basis = basisPruefen(einstellungen.baseUrl, { erlaubeLoopback: erlaubeLoopback === true });
+  if (basis === null) return null;
+  if (typeof fetchImpl !== "function") return null;
+  const roh = Number(timeoutMs ?? einstellungen.timeoutMs);
+  const frist = Number.isFinite(roh) && roh > 0 ? roh : TIMEOUT_MS_STANDARD;
+  return {
+    [TRANSPORT_MARKER]: true,
+    baseUrl: basis,
+    apiKey,
+    fetchImpl: mitFrist(fetchImpl, frist),
+  };
+}
+
+function transportGueltig(ctx) {
+  return Boolean(ctx && ctx[TRANSPORT_MARKER] === true);
+}
+
 // Hausmuster aus unitedshare-core: Buffer nur mit Guard, der
 // Bundler-Buffer-Stub hat kein byteLength.
 function utf8ByteLength(text) {
@@ -188,6 +215,7 @@ function contentLengthVon(antwort) {
 }
 
 async function objektSchreiben(ctx, key, inhalt) {
+  if (!transportGueltig(ctx)) return { status: 0, ok: false, grund: "ungeprueft" };
   const bytes = bodyBytes(inhalt);
   if (bytes === null) {
     return { status: 0, ok: false, grund: "unmessbar" };
@@ -206,6 +234,7 @@ async function objektSchreiben(ctx, key, inhalt) {
 // S4: Antworten sind Netz-Eingabe. Content-Length vorab, nach dem Lesen
 // erneut messen (fail-closed), NUL-Inhalte verwerfen.
 async function objektLesen(ctx, key) {
+  if (!transportGueltig(ctx)) return { status: 0, text: null, grund: "ungeprueft" };
   const antwort = await ctx.fetchImpl(urlFuerObjekt(ctx.baseUrl, key), {
     method: "GET",
     headers: kopf(ctx.apiKey),
@@ -229,6 +258,7 @@ async function objektLesen(ctx, key) {
 }
 
 async function objekteListen(ctx, praefix) {
+  if (!transportGueltig(ctx)) return { status: 0, items: [], vollstaendig: false, grund: "ungeprueft" };
   const antwort = await ctx.fetchImpl(urlFuerListe(ctx.baseUrl, praefix), {
     method: "GET",
     headers: kopf(ctx.apiKey),
@@ -308,13 +338,16 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     return { ergebnis: "keine-basis", nachgeholt: 0 };
   }
 
-  const rohTimeout = Number(ctx.timeoutMs ?? einstellungen.timeoutMs);
-  const timeoutMs = Number.isFinite(rohTimeout) && rohTimeout > 0 ? rohTimeout : TIMEOUT_MS_STANDARD;
-  const transport = {
-    baseUrl: sichereBasis,
-    apiKey,
-    fetchImpl: mitFrist(ctx.fetchImpl, timeoutMs),
-  };
+  const transport = transportBauen({
+    settings: einstellungen,
+    fetchImpl: ctx.fetchImpl,
+    timeoutMs: ctx.timeoutMs,
+    erlaubeLoopback: ctx.erlaubeLoopback === true,
+  });
+  if (transport === null) {
+    melde("Workspace-Spiegel aus: Transport nicht baubar");
+    return { ergebnis: "keine-basis", nachgeholt: 0 };
+  }
   const key = chatKey(eintrag);
   const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
 
@@ -412,6 +445,7 @@ function wiederherstellbareChats(items) {
 
 module.exports = {
   CHATS_PRAEFIX,
+  transportBauen,
   WARTESCHLANGE_MAX_EINTRAEGE,
   ITEM_DECKEL,
   MAX_OBJEKT_BYTES,
