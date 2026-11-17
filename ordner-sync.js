@@ -26,11 +26,15 @@ function keyAusRelpfad(relpfad) {
   if (rel.includes("\\")) return null;
   if (/^[A-Za-z]:/.test(rel)) return null;
   if (rel.startsWith("/")) return null;
-  for (const segment of rel.split("/")) {
+  const segmente = rel.split("/");
+  for (const segment of segmente) {
     if (segment.length === 0) return null;
-    if (segment === "." || segment === "..") return null;
+    // Dot-Segmente sind tabu: .obsidian/plugins waere Codeausfuehrung.
+    if (segment.startsWith(".")) return null;
     if (segment.endsWith(".") || segment.endsWith(" ")) return null;
   }
+  // Second-Brain-Zuschnitt: nur Markdown und Canvas werden gesynct.
+  if (!/\.(md|canvas)$/i.test(segmente[segmente.length - 1])) return null;
   return NOTES_PRAEFIX + rel;
 }
 

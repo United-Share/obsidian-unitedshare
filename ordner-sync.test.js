@@ -74,6 +74,27 @@ test("keyAusRelpfad lehnt Angriffs- und Grenzpfade je Segment ab", () => {
   assert.ok(keyAusRelpfad("a.b/c-d_e.md"));
 });
 
+// Haertung nach Security-Finding (Dotfiles und Codeausfuehrung): Ein
+// eingehender Pfad wie .obsidian/plugins/x/main.js wuerde in das
+// Konfigurationsverzeichnis schreiben. Dot-Segmente sind deshalb tabu, und
+// nur die Second-Brain-Formate .md und .canvas sind als Endung erlaubt.
+test("keyAusRelpfad lehnt Dot-Segmente und fremde Endungen ab", () => {
+  const boese = [
+    ".obsidian/plugins/evil/main.js",
+    ".hidden/n.md",
+    "notes/.versteckt.md",
+    "notes/script.js",
+    "notes/bild.png",
+    "notes/ohne-endung",
+  ];
+  for (const pfad of boese) {
+    assert.equal(keyAusRelpfad(pfad), null, `muss abgelehnt werden: ${pfad}`);
+  }
+  assert.ok(keyAusRelpfad("notes/idee.md"));
+  assert.ok(keyAusRelpfad("boards/plan.canvas"));
+  assert.ok(keyAusRelpfad("GROSS.MD"));
+});
+
 test("planeOrdnerSync laedt nur Neues und Geaendertes hoch", () => {
   const plan = planeOrdnerSync({
     dateien: [
@@ -92,14 +113,14 @@ test("planeOrdnerSync ueberspringt Dateien ueber dem Gateway-Limit mit Grund", (
   const plan = planeOrdnerSync({
     dateien: [
       { pfad: "klein.md", hash: "h1", groesse: 10 },
-      { pfad: "riesig.pdf", hash: "h2", groesse: MAX_OBJEKT_BYTES + 1 },
+      { pfad: "riesig.md", hash: "h2", groesse: MAX_OBJEKT_BYTES + 1 },
     ],
     index: {},
     entfernt: [],
   });
   assert.deepEqual(plan.hochladen.map((d) => d.pfad), ["klein.md"]);
   assert.equal(plan.uebersprungen.length, 1);
-  assert.equal(plan.uebersprungen[0].pfad, "riesig.pdf");
+  assert.equal(plan.uebersprungen[0].pfad, "riesig.md");
   assert.equal(plan.uebersprungen[0].grund, "zu-gross");
 });
 
