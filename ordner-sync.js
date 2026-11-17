@@ -114,7 +114,7 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand 
         ? erinnert.hash === remoteObjekt.hash
         : erinnert && Number(erinnert.size) === Number(remoteObjekt.size);
       if (!unveraendertGesehen) {
-        remoteAbweichung.push({ pfad, remoteSize: remoteObjekt.size });
+        remoteAbweichung.push({ pfad, grund: "remote-geaendert", remoteSize: remoteObjekt.size });
         continue;
       }
     }

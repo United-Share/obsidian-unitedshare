@@ -917,6 +917,71 @@ test("objekteListen meldet vollstaendig false auf allen Fehlerpfaden", async () 
   assert.equal(kaputt.vollstaendig, false);
 });
 
+// Release-Protokoll, REVIEWER-R1: 408 (Request Timeout) und 425 (Too
+// Early) sind transiente Zustaende und gehoeren in die Warteschlange,
+// nicht in den Verwurf.
+test("408 und 425 gelten als wiederholbar", async () => {
+  for (const status of [408, 425]) {
+    const zustand = { warteschlange: [] };
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+        fetchImpl: async () => ({ status }),
+      },
+      chatVon("retry" + status, "x"),
+      zustand
+    );
+    assert.equal(e.ergebnis, "aufgeschoben", String(status));
+    assert.equal(zustand.warteschlange.length, 1);
+  }
+});
+
+// Release-Protokoll, REVIEWER-R5: ein feindliches kennungFn kann den Key
+// nicht aus dem Chat-Praefix hinaustragen; das Ergebnis ist verworfen mit
+// eigener Meldung.
+test("feindliches kennungFn ergibt verworfen mit ungueltiger-key", async () => {
+  const protokoll = [];
+  const zustand = { warteschlange: [] };
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      fetchImpl: async () => ({ status: 200 }),
+      kennungFn: () => "../../.obsidian/boese",
+      protokoll: (n) => protokoll.push(n),
+    },
+    chatVon("boese", "x"),
+    zustand
+  );
+  assert.equal(e.ergebnis, "verworfen");
+  assert.ok(protokoll.some((n) => n.meldung === "ungueltiger-key"));
+  assert.equal(zustand.warteschlange.length, 0);
+});
+
+test("zwei Brocken betreten die Byte-Verdraengung und der groessere faellt", async () => {
+  const protokoll = [];
+  const zustand = {
+    warteschlange: [
+      { key: "obsidian/chats/brocken-gross.json", inhalt: "g".repeat(3 * 1024 * 1024) },
+      { key: "obsidian/chats/brocken-mittel.json", inhalt: "m".repeat(2 * 1024 * 1024) },
+    ],
+  };
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      fetchImpl: async () => ({ status: 500 }),
+      chatAlsText: () => "n".repeat(100 * 1024),
+      protokoll: (n) => protokoll.push(n),
+    },
+    chatVon("a1q3", "x"),
+    zustand
+  );
+  assert.equal(e.ergebnis, "aufgeschoben");
+  const keys = zustand.warteschlange.map((x) => x.key);
+  assert.ok(!keys.includes("obsidian/chats/brocken-gross.json"), "der groessere Brocken faellt zuerst");
+  assert.ok(keys.includes("obsidian/chats/brocken-mittel.json"));
+  assert.ok(protokoll.some((n) => n.meldung === "verdraengt"));
+});
+
 // Gate-Runde 2, Q1: auch der Chat-Spiegel hat ein Lauf-Lock. Zwei
 // parallele Laeufe auf derselben Warteschlange wuerden sonst Eintraege
 // doppelt senden oder beim blinden shift fremde Koepfe entfernen.

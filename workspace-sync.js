@@ -29,7 +29,8 @@ const VERSUCHE_MAX = 5;
 const NACHHOL_MAX_STUECK = 10;
 
 function wiederholbar(status) {
-  return status === 0 || status === 429 || status >= 500;
+  // 408 und 425 sind transiente Zustaende wie 429 (REVIEWER-R1).
+  return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 // K4: jeder Request bekommt eine Frist. AbortController signalisiert dem
@@ -173,13 +174,13 @@ function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}
   const einstellungen = settings || {};
   const apiKey = apiKeyPruefen(einstellungen.apiKey);
   if (apiKey === null) return null;
-  const basis = basisPruefen(einstellungen.baseUrl, { erlaubeLoopback: erlaubeLoopback === true });
-  if (basis === null) return null;
+  const gepruefteBasis = basisPruefen(einstellungen.baseUrl, { erlaubeLoopback: erlaubeLoopback === true });
+  if (gepruefteBasis === null) return null;
   if (typeof fetchImpl !== "function") return null;
   const roh = Number(timeoutMs ?? einstellungen.timeoutMs);
   const frist = Number.isFinite(roh) && roh > 0 ? roh : TIMEOUT_MS_STANDARD;
   const ctx = Object.freeze({
-    baseUrl: basis,
+    baseUrl: gepruefteBasis,
     apiKey,
     fetchImpl: mitFrist(fetchImpl, frist),
   });

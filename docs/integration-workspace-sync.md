@@ -28,7 +28,8 @@ registriertes ctx oder null. objektSchreiben, objektLesen und
 objekteListen lehnen alles andere mit grund ungeprueft ab.
 
 fetchImpl-Vertrag: requestUrlAsFetch() MIT Klammern (Fabrik). Signatur
-(url, init) nach {status, headers, text(), json()}; headers darf ein
+(url, init) nach {status, headers, text()}; json() wird von keinem Modul
+gerufen und ist nicht Teil des Vertrags; headers darf ein
 Headers-Objekt mit get ODER ein plain Record sein (case-insensitiv), und
 init.signal MUSS unterstuetzt werden (Anpassung in requestUrlAsFetch ist
 Teil von Hook 1, erst nach Freigabe des fremden Stands). Die eigenen
@@ -72,7 +73,8 @@ Ergebnis-Union von chatSpiegeln und erwartete Reaktion:
   versuchen
 - aufgeschoben: Warteschlange gefuellt, saveData aufrufen
 - laeuft-bereits: nichts tun, ein Lauf ist aktiv
-- gespiegelt: optional saveData (Warteschlange kann sich geleert haben)
+- gespiegelt: saveData UNBEDINGT (Versuchszaehler und Verdraengungen
+  leben in den Eintraegen, auch ein erfolgreicher Lauf aendert sie)
 
 Zustandsbesitz: this.workspaceSyncZustand ist { warteschlange: [] },
 geladen mit loadData, nach JEDEM Lauf saveData. laufend-Zustaende gehoeren
@@ -124,6 +126,9 @@ Konfliktbehandlung, dann Push:
    ist die BLOCKIERENDE Voraussetzung fuer Ordner-Sync jenseits von 50
    Objekten. plan.remoteAbweichung fuehrt in den Konfliktpfad von Schritt
    2, plan.hochladen per objektSchreiben, indexNachSync persistieren.
+   Eintragsform von remoteAbweichung, gepinnt: {pfad, grund, remoteSize?}
+   mit grund aus {remote-geaendert, listing-unvollstaendig}; remoteSize
+   nur, wenn das Listing das Objekt traegt.
 4. saveData: warteschlange, index und remoteStand nach jedem Lauf; der
    Umfang waechst mit dem Ordner, deshalb gehoeren index und remoteStand
    in eine eigene Datei unter .vault statt in data.json (D6).
@@ -137,7 +142,7 @@ ueber das Schritt-Muster aus main.src.js.
 Nutzlast {zeit, status, meldung, body}; body ist Tag, Stunde und Kennung,
 NIE der Titel-Slug und nie der volle Pfad (Chat-Titel gehoeren nicht ins
 debug.log). Aufrufe sind gegen Wuerfe und Promise-Fehler gekapselt.
-meldung-Werte: zu-gross, zu-gross-fuer-warteschlange, ungueltiger-pfad,
+meldung-Werte: ungeprueft, zu-gross, zu-gross-fuer-warteschlange, ungueltiger-pfad,
 ungueltige-groesse, ungueltiger-hash, ungueltiger-key, unmessbar,
 unlesbar, geloescht-ignoriert, remote-abweichung, listing-unvollstaendig,
 endgueltig-abgelehnt, verdraengt, veraltet-verworfen, aufgegeben,
