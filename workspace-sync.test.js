@@ -137,13 +137,15 @@ test("objektSchreiben, objektLesen und objekteListen sprechen das Gateway-Protok
         res.writeHead(404, { "content-type": "application/json" });
         return res.end('{"error":"not_found"}');
       }
-      res.writeHead(200, { "content-type": "application/octet-stream" });
-      return res.end(ablage.get(key));
+      const inhalt = ablage.get(key);
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": Buffer.byteLength(inhalt, "utf8") });
+      return res.end(inhalt);
     }
     if (req.method === "GET" && url.pathname === "/v1/workspace/objects") {
       const items = [...ablage.entries()].map(([k, v]) => ({ key: k, size: v.length }));
-      res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ bucket: "ws-test", items }));
+      const antwortText = JSON.stringify({ bucket: "ws-test", items });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(antwortText, "utf8") });
+      return res.end(antwortText);
     }
     res.writeHead(404);
     res.end();
@@ -418,6 +420,40 @@ test("chatKey nimmt die Kennungsfunktion injiziert entgegen", () => {
   assert.ok(key.includes("-INJrohid-"), key);
   const standard = chatKey(eintrag);
   assert.ok(standard.includes("-rohid-"), standard);
+});
+
+// Gate-Runde 2, T3: contentLengthVon versteht beide Header-Formen
+// (Headers mit get UND plain Record, case-insensitiv), und fuer unsere
+// Gateway-Endpunkte gilt fail-closed: ein FEHLENDER Header ist feindlich,
+// denn das eigene Gateway setzt ihn immer.
+test("Record-Header mit Limit-Verletzung feuert vor dem Body-Lesen", async () => {
+  let gelesen = 0;
+  const ctx = testTransport(async () => ({
+    status: 200,
+    headers: { "Content-Length": String(MAX_OBJEKT_BYTES + 1) },
+    text: async () => {
+      gelesen += 1;
+      return "x";
+    },
+  }));
+  const e = await objektLesen(ctx, "obsidian/chats/a.json");
+  assert.equal(e.text, null);
+  assert.equal(e.grund, "zu-gross");
+  assert.equal(gelesen, 0, "text() darf bei angekuendigter Ueberlaenge nicht laufen");
+});
+
+test("fehlender Content-Length-Header wird als feindlich abgelehnt", async () => {
+  const ohneFeld = testTransport(async () => ({
+    status: 200,
+    headers: { get: () => null },
+    text: async () => "klein",
+  }));
+  const e1 = await objektLesen(ohneFeld, "obsidian/chats/a.json");
+  assert.equal(e1.grund, "unlesbar");
+
+  const ohneHeaders = testTransport(async () => ({ status: 200, text: async () => "klein" }));
+  const e2 = await objektLesen(ohneHeaders, "obsidian/chats/a.json");
+  assert.equal(e2.grund, "unlesbar");
 });
 
 // Nacharbeit S5: Body-Messung typfest nach dem utf8ByteLength-Hausmuster.

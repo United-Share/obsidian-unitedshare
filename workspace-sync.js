@@ -189,14 +189,25 @@ function bodyBytes(inhalt) {
   return null;
 }
 
-// S4-Nachtrag: strikt dezimal parsen. Ein nicht-dezimaler oder
-// mehrwertiger Header ist FEINDLICH (Smuggling-Geruch), nicht abwesend.
+// S4-Nachtrag und T3: strikt dezimal parsen, beide Header-Formen verstehen
+// (Headers mit get UND plain Record, case-insensitiv). Fuer die eigenen
+// Gateway-Endpunkte gilt fail-closed: ein FEHLENDER Header, ein fehlendes
+// headers-Objekt oder ein nicht-dezimaler Wert ist FEINDLICH, denn das
+// Gateway setzt Content-Length immer.
 function contentLengthVon(antwort) {
-  if (!antwort || !antwort.headers || typeof antwort.headers.get !== "function") {
-    return { wert: null, feindlich: false };
+  const h = antwort && antwort.headers;
+  let roh;
+  if (h && typeof h.get === "function") {
+    roh = h.get("content-length");
+  } else if (h && typeof h === "object") {
+    for (const name of Object.keys(h)) {
+      if (String(name).toLowerCase() === "content-length") {
+        roh = h[name];
+        break;
+      }
+    }
   }
-  const roh = antwort.headers.get("content-length");
-  if (roh === null || roh === undefined) return { wert: null, feindlich: false };
+  if (roh === null || roh === undefined) return { wert: null, feindlich: true };
   const s = String(roh).trim();
   if (!/^\d+$/.test(s)) return { wert: null, feindlich: true };
   return { wert: Number(s), feindlich: false };
