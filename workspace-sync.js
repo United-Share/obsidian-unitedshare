@@ -11,6 +11,9 @@
 // Vertraege und Begruendungen: workspace-sync.test.js.
 
 const CHATS_PRAEFIX = "obsidian/chats/";
+// Objektgrenze des Gateways. Am tatsaechlichen Body durchgesetzt
+// (Security-Finding 3), nicht nur an Metadaten.
+const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 
 function slugAusTitel(titel) {
   const roh = String(titel ?? "").toLowerCase();
@@ -54,6 +57,10 @@ function kopf(apiKey) {
 }
 
 async function objektSchreiben(ctx, key, inhalt) {
+  const bytes = typeof inhalt === "string" ? Buffer.byteLength(inhalt, "utf8") : (inhalt ? inhalt.length : 0);
+  if (bytes > MAX_OBJEKT_BYTES) {
+    return { status: 413, ok: false, grund: "zu-gross" };
+  }
   const antwort = await ctx.fetchImpl(urlFuerObjekt(ctx.baseUrl, key), {
     method: "POST",
     headers: kopf(ctx.apiKey),
@@ -142,6 +149,7 @@ function wiederherstellbareChats(items) {
 
 module.exports = {
   CHATS_PRAEFIX,
+  MAX_OBJEKT_BYTES,
   slugAusTitel,
   chatKey,
   urlFuerObjekt,

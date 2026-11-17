@@ -22,6 +22,7 @@ const http = require("node:http");
 
 const {
   CHATS_PRAEFIX,
+  MAX_OBJEKT_BYTES,
   slugAusTitel,
   chatKey,
   urlFuerObjekt,
@@ -122,6 +123,27 @@ test("objektSchreiben, objektLesen und objekteListen sprechen das Gateway-Protok
   } finally {
     server.close();
   }
+});
+
+// Haertung nach Security-Finding 3: die Byte-Grenze wird am tatsaechlichen
+// Body durchgesetzt, nicht nur an Metadaten. Ein zu grosser Body verlaesst
+// das Geraet gar nicht erst.
+test("objektSchreiben lehnt einen Body ueber dem Gateway-Limit ohne Request ab", async () => {
+  let treffer = 0;
+  const ctx = {
+    baseUrl: "http://127.0.0.1:1/v1",
+    apiKey: "usk_test_1",
+    fetchImpl: async () => {
+      treffer += 1;
+      throw new Error("darf nicht passieren");
+    },
+  };
+  const zuGross = "x".repeat(MAX_OBJEKT_BYTES + 1);
+  const e = await objektSchreiben(ctx, "obsidian/chats/riesig.md", zuGross);
+  assert.equal(e.ok, false);
+  assert.equal(e.status, 413);
+  assert.equal(e.grund, "zu-gross");
+  assert.equal(treffer, 0);
 });
 
 test("chatSpiegeln ohne apiKey macht keinen Request und meldet sich in der Statusleiste", async () => {

@@ -103,6 +103,25 @@ test("planeOrdnerSync ueberspringt Dateien ueber dem Gateway-Limit mit Grund", (
   assert.equal(plan.uebersprungen[0].grund, "zu-gross");
 });
 
+// Haertung nach Security-Finding 3: fehlende oder unsinnige Groessenangaben
+// duerfen das Limit nicht umgehen. Ohne gueltige Zahl wird nicht hochgeladen.
+test("planeOrdnerSync ueberspringt Dateien ohne gueltige Groesse", () => {
+  const plan = planeOrdnerSync({
+    dateien: [
+      { pfad: "ohne.md", hash: "h1" },
+      { pfad: "nan.md", hash: "h2", groesse: Number.NaN },
+      { pfad: "negativ.md", hash: "h3", groesse: -1 },
+      { pfad: "unendlich.md", hash: "h4", groesse: Infinity },
+      { pfad: "ok.md", hash: "h5", groesse: 5 },
+    ],
+    index: {},
+    entfernt: [],
+  });
+  assert.deepEqual(plan.hochladen.map((d) => d.pfad), ["ok.md"]);
+  assert.equal(plan.uebersprungen.length, 4);
+  for (const u of plan.uebersprungen) assert.equal(u.grund, "ungueltige-groesse", u.pfad);
+});
+
 test("planeOrdnerSync propagiert Loeschungen nicht, sondern weist sie nur aus", () => {
   const plan = planeOrdnerSync({
     dateien: [{ pfad: "bleibt.md", hash: "h1", groesse: 5 }],

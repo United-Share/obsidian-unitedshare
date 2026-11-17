@@ -11,9 +11,9 @@
 // Vertraege und Begruendungen: ordner-sync.test.js.
 
 const { konfliktDateiname } = require("./unitedshare-core");
+const { MAX_OBJEKT_BYTES } = require("./workspace-sync");
 
 const NOTES_PRAEFIX = "obsidian/notes/";
-const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 
 // Haertung (Security-Finding 1): je Segment pruefen, damit kein
 // Parser-Differential (Backslash, Laufwerks-Praefix, leere Segmente,
@@ -55,7 +55,14 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
       uebersprungen.push({ pfad: datei.pfad, grund: "ungueltiger-pfad" });
       continue;
     }
-    if (datei.groesse > MAX_OBJEKT_BYTES) {
+    // Security-Finding 3: ohne gueltige Groesse kein Upload, sonst waere
+    // das Limit mit fehlenden oder unsinnigen Metadaten umgehbar.
+    const groesse = Number(datei.groesse);
+    if (!Number.isFinite(groesse) || groesse < 0) {
+      uebersprungen.push({ pfad: datei.pfad, grund: "ungueltige-groesse" });
+      continue;
+    }
+    if (groesse > MAX_OBJEKT_BYTES) {
       uebersprungen.push({ pfad: datei.pfad, grund: "zu-gross" });
       continue;
     }
