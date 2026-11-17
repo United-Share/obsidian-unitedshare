@@ -417,6 +417,55 @@ test("konfliktErgebnis entspricht konfliktDateiname bei ehrlicher Probe", () => 
   assert.equal(e.zielPfad, konfliktDateiname("Ideen/voll.md", probe));
 });
 
+// Gate-Runde 2, P1: Keys aus dem Netz koennen NFD tragen. relpfadAusKey
+// liefert NFC zurueck und die Pruefungen normalisieren selbst, damit der
+// Push-Schutz NFD-Listing gegen NFD-Datei nicht als fremd einstuft.
+test("relpfadAusKey normalisiert auf NFC und der Plan trifft NFD-Listings", () => {
+  const nfdKey = "obsidian/notes/ide\u0301e.md";
+  assert.equal(relpfadAusKey(nfdKey), "id\u00e9e.md");
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: "ide\u0301e.md", hash: "h1", groesse: 5 }],
+    index: { "id\u00e9e.md": "h1" },
+    entfernt: [{ key: nfdKey, size: 5 }],
+  });
+  assert.deepEqual(plan.geloeschtIgnoriert, []);
+});
+
+// Gate-Runde 2, P2: Groesse ist NIE hinreichend. Liegen Hashes vor
+// (remoteStand aus dem Pull, kuenftig ETag im Listing), entscheiden sie;
+// die Groessen-Rueckfallebene ist eine dokumentierte Luecke.
+test("groessengleiche Fremdaenderung faellt per Hash auf", () => {
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: "doc.md", hash: "h-neu-lokal", groesse: 10 }],
+    index: { "doc.md": "h-alt-lokal" },
+    entfernt: [{ key: "obsidian/notes/doc.md", size: 7, hash: "remote-neu" }],
+    remoteStand: { "doc.md": { size: 7, hash: "remote-alt" } },
+  });
+  assert.deepEqual(plan.hochladen, []);
+  assert.equal(plan.remoteAbweichung.length, 1);
+});
+
+// Gate-Runde 2, P3: ein unvollstaendiges Listing (Gateway liefert nur die
+// letzten 50) macht den Push fail-closed: Uploads nur fuer gelistete
+// Pfade, verwaiste Index-Pfade werden Abweichung, Loesch-Auswertung faellt
+// ganz aus.
+test("unvollstaendiges Listing macht den Push fail-closed", () => {
+  const plan = planeOrdnerSync({
+    dateien: [
+      { pfad: "imListing.md", hash: "h1-neu", groesse: 5 },
+      { pfad: "nichtImListing.md", hash: "h2", groesse: 5 },
+    ],
+    index: { "imListing.md": "h1-alt", "verwaist.md": "h9" },
+    entfernt: [{ key: "obsidian/notes/imListing.md", size: 5, hash: "r1" }],
+    remoteStand: { "imListing.md": { size: 5, hash: "r1" } },
+    listingVollstaendig: false,
+  });
+  assert.deepEqual(plan.hochladen.map((d) => d.pfad), ["imListing.md"]);
+  assert.ok(plan.remoteAbweichung.some((r) => r.pfad === "nichtImListing.md"));
+  assert.ok(plan.remoteAbweichung.some((r) => r.pfad === "verwaist.md"));
+  assert.deepEqual(plan.geloeschtIgnoriert, []);
+});
+
 // Nacharbeit K6: Push-Schutz gegen Last-Writer-Wins. Hat sich die
 // Remote-Fassung seit dem letzten gesehenen Stand geaendert (oder wurde
 // sie nie gesehen), wird NICHT hochgeladen, sondern als remoteAbweichung

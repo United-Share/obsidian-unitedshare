@@ -45,14 +45,16 @@ function keyAusRelpfad(relpfad) {
 function relpfadAusKey(key) {
   const k = String(key ?? "");
   if (!k.startsWith(NOTES_PRAEFIX)) return null;
-  const rel = k.slice(NOTES_PRAEFIX.length);
+  // P1: NFC zurueckgeben, damit Plan-Vergleiche und Index dieselbe Sicht
+  // haben wie keyAusRelpfad.
+  const rel = k.slice(NOTES_PRAEFIX.length).normalize("NFC");
   return keyAusRelpfad(rel) ? rel : null;
 }
 
 // Plant einen Sync-Lauf. dateien = lokaler Ist-Stand des gewaehlten Ordners
 // ({pfad, hash, groesse} mit Pfaden relativ zum Ordner), index = zuletzt
 // gespiegelter Stand (pfad -> hash), entfernt = Listing des Workspace.
-function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {}, maxBytes = MAX_OBJEKT_BYTES } = {}) {
+function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {}, maxBytes = MAX_OBJEKT_BYTES, listingVollstaendig = true } = {}) {
   const hochladen = [];
   const uebersprungen = [];
   // K6: Push-Schutz gegen Last-Writer-Wins. Weicht die Remote-Fassung vom
@@ -92,9 +94,22 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand 
     }
     if (index[pfad] === datei.hash) continue;
     const remoteObjekt = remoteNachPfad.get(pfad);
+    // P3: bei unvollstaendigem Listing ist "nicht gelistet" KEIN Beweis
+    // fuer "remote nicht vorhanden"; solche Pfade gehen in den Konfliktpfad.
+    if (!listingVollstaendig && !remoteObjekt) {
+      remoteAbweichung.push({ pfad, grund: "listing-unvollstaendig" });
+      continue;
+    }
     if (remoteObjekt) {
       const erinnert = Object.hasOwn(remoteStand ?? {}, pfad) ? remoteStand[pfad] : null;
-      const unveraendertGesehen = erinnert && Number(erinnert.size) === Number(remoteObjekt.size);
+      // P2: Hash entscheidet, wenn beide Seiten einen tragen (remoteStand
+      // aus dem Pull, kuenftig ETag im Listing). Die Groessen-Rueckfall-
+      // ebene ist eine DOKUMENTIERTE LUECKE: groessengleiche Fremd-
+      // aenderungen sieht sie nicht.
+      const hashesVorhanden = erinnert && typeof erinnert.hash === "string" && typeof remoteObjekt.hash === "string";
+      const unveraendertGesehen = hashesVorhanden
+        ? erinnert.hash === remoteObjekt.hash
+        : erinnert && Number(erinnert.size) === Number(remoteObjekt.size);
       if (!unveraendertGesehen) {
         remoteAbweichung.push({ pfad, remoteSize: remoteObjekt.size });
         continue;
@@ -103,12 +118,26 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand 
     hochladen.push({ pfad, hash: datei.hash, groesse });
   }
 
+  // P3: verwaiste Index-Pfade (lokal geloescht, im unvollstaendigen
+  // Listing nicht sichtbar) gehen ebenfalls in den Konfliktpfad statt in
+  // eine Entscheidung ohne Datenlage.
+  if (!listingVollstaendig) {
+    for (const indexPfad of Object.keys(index && typeof index === "object" ? index : {})) {
+      if (!remoteNachPfad.has(indexPfad) && !lokalePfade.has(indexPfad)) {
+        remoteAbweichung.push({ pfad: indexPfad, grund: "listing-unvollstaendig" });
+      }
+    }
+  }
+
   // Keys ohne lokale Datei sind KEIN Loeschauftrag: ohne Tombstones ist
-  // "geloescht" von "hier nie gesehen" nicht unterscheidbar.
+  // "geloescht" von "hier nie gesehen" nicht unterscheidbar. Bei
+  // unvollstaendigem Listing wird diese Auswertung GAR NICHT berechnet.
   const geloeschtIgnoriert = [];
-  for (const objekt of entfernt) {
-    const rel = relpfadAusKey(objekt && objekt.key);
-    if (rel !== null && !lokalePfade.has(rel)) geloeschtIgnoriert.push(objekt.key);
+  if (listingVollstaendig) {
+    for (const objekt of entfernt) {
+      const rel = relpfadAusKey(objekt && objekt.key);
+      if (rel !== null && !lokalePfade.has(rel)) geloeschtIgnoriert.push(objekt.key);
+    }
   }
 
   return { hochladen, uebersprungen, geloeschtIgnoriert, remoteAbweichung };

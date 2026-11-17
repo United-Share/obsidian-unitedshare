@@ -78,8 +78,11 @@ function segmentGueltig(segment) {
 
 /// Prueft einen praefixlosen Relpfad (Segmente durch "/") samt
 /// Endungs-Allowlist fuer das letzte Segment.
-function relpfadGueltig(rel, endungen) {
-  if (typeof rel !== "string") return false;
+function relpfadGueltig(relRoh, endungen) {
+  if (typeof relRoh !== "string") return false;
+  // P1: nicht auf Aufrufer verlassen; NFD vom Netz oder vom Dateisystem
+  // wird hier zur NFC-Sicht, mit der auch die Keys gebaut werden.
+  const rel = relRoh.normalize("NFC");
   if (rel.length === 0 || rel.length > 400) return false;
   if (/[\u0000-\u001f\u007f]/.test(rel)) return false;
   if (rel.includes("\\")) return false;
