@@ -48,6 +48,32 @@ test("keyAusRelpfad lehnt gefaehrliche Pfade ab", () => {
   assert.equal(relpfadAusKey("anderes/praefix.md"), null);
 });
 
+// Haertung nach Security-Finding 1: Parser-Differentiale zwischen Obsidian,
+// Gateway und Vault duerfen keinen Weg aus dem Notes-Praefix heraus bieten.
+// Backslash-Separatoren, Laufwerks-Praefixe, leere Segmente sowie Segmente,
+// die "."/".." sind oder mit Punkt/Leerzeichen enden (Windows-Normalisierung),
+// werden je Segment abgelehnt.
+test("keyAusRelpfad lehnt Angriffs- und Grenzpfade je Segment ab", () => {
+  const boese = [
+    "a\\..\\b.md",
+    "C:evil.md",
+    "/abs.md",
+    "\\abs.md",
+    "a//b.md",
+    "a/./b.md",
+    "a/../b.md",
+    "falle. /x.md",
+    "ordner./n.md",
+    "endet-mit-slash/",
+    "punkt-am-ende.md ",
+  ];
+  for (const pfad of boese) {
+    assert.equal(keyAusRelpfad(pfad), null, `muss abgelehnt werden: ${JSON.stringify(pfad)}`);
+  }
+  assert.ok(keyAusRelpfad("Ideen/Café Plan (2026).md"));
+  assert.ok(keyAusRelpfad("a.b/c-d_e.md"));
+});
+
 test("planeOrdnerSync laedt nur Neues und Geaendertes hoch", () => {
   const plan = planeOrdnerSync({
     dateien: [

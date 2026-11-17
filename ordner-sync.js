@@ -15,11 +15,22 @@ const { konfliktDateiname } = require("./unitedshare-core");
 const NOTES_PRAEFIX = "obsidian/notes/";
 const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 
+// Haertung (Security-Finding 1): je Segment pruefen, damit kein
+// Parser-Differential (Backslash, Laufwerks-Praefix, leere Segmente,
+// Windows-Normalisierung von Punkt/Leerzeichen am Ende) aus dem
+// Notes-Praefix herausfuehrt.
 function keyAusRelpfad(relpfad) {
   const rel = String(relpfad ?? "");
   if (rel.length === 0 || rel.length > 400) return null;
-  if (rel.startsWith("/") || rel.includes("..")) return null;
   if (/[\u0000-\u001f\u007f]/.test(rel)) return null;
+  if (rel.includes("\\")) return null;
+  if (/^[A-Za-z]:/.test(rel)) return null;
+  if (rel.startsWith("/")) return null;
+  for (const segment of rel.split("/")) {
+    if (segment.length === 0) return null;
+    if (segment === "." || segment === "..") return null;
+    if (segment.endsWith(".") || segment.endsWith(" ")) return null;
+  }
   return NOTES_PRAEFIX + rel;
 }
 
