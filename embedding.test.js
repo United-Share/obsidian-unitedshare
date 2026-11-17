@@ -420,7 +420,7 @@ test("Anleitung und Fassung nennen das lokale Embedding", () => {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const main = fs.readFileSync(path.join(root, "main.js"), "utf8");
   const src = fs.readFileSync(path.join(root, "main.src.js"), "utf8");
-  assert.equal(manifest.version, "1.2.17");
+  assert.equal(manifest.version, "1.3.0");
   assert.equal(manifest.description.endsWith("."), true);
   assert.equal(manifest.description.length <= 250, true);
   assert.match(manifest.description, /Agent/);
