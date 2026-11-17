@@ -217,6 +217,24 @@ test("chatSpiegeln holt die Warteschlange beim naechsten Erfolg nach", async () 
   }
 });
 
+// Nacharbeit S2: das Listing kommt vom Netz und ist damit fremde Eingabe.
+// Keys werden mit derselben Segmentpruefung wie im Ordner-Sync gefiltert;
+// der lokale Dateiname wird ohnehin NIE aus dem Remote-Key abgeleitet.
+test("wiederherstellbareChats verwirft Angriffs-Keys aus dem Listing", () => {
+  const items = [
+    { key: "obsidian/chats/../geheim.json", size: 1 },
+    { key: "obsidian/chats/.versteckt.json", size: 2 },
+    { key: "obsidian/chats/a:b.json", size: 3 },
+    { key: "obsidian/chats/evil.js", size: 4 },
+    { key: "obsidian/chats/2026-11-17-1200-abc.json", size: 5 },
+    { key: "obsidian/chats/2026-11-15-alt.md", size: 6 },
+  ];
+  assert.deepEqual(wiederherstellbareChats(items), [
+    "obsidian/chats/2026-11-15-alt.md",
+    "obsidian/chats/2026-11-17-1200-abc.json",
+  ]);
+});
+
 test("wiederherstellbareChats filtert auf den Chat-Praefix und sortiert", () => {
   const items = [
     { key: "obsidian/notes/a.md", size: 1 },

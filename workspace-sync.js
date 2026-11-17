@@ -10,6 +10,8 @@
 //
 // Vertraege und Begruendungen: workspace-sync.test.js.
 
+const { keyPruefen } = require("./key-pruefung");
+
 const CHATS_PRAEFIX = "obsidian/chats/";
 // Objektgrenze des Gateways. Am tatsaechlichen Body durchgesetzt
 // (Security-Finding 3), nicht nur an Metadaten.
@@ -140,10 +142,13 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   return { ergebnis: "gespiegelt", nachgeholt };
 }
 
+// S2: das Listing ist fremde Eingabe; Keys laufen durch dieselbe
+// Segmentpruefung wie der Ordner-Sync. Der lokale Dateiname wird ohnehin
+// NIE aus dem Remote-Key abgeleitet (siehe Integrationsdoku).
 function wiederherstellbareChats(items) {
   return (Array.isArray(items) ? items : [])
     .map((o) => o && o.key)
-    .filter((k) => typeof k === "string" && k.startsWith(CHATS_PRAEFIX))
+    .filter((k) => keyPruefen(CHATS_PRAEFIX, k, ["json", "md"]))
     .sort();
 }
 

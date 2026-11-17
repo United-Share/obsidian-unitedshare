@@ -11,6 +11,7 @@
 // Vertraege und Begruendungen: ordner-sync.test.js.
 
 const { MAX_OBJEKT_BYTES } = require("./workspace-sync");
+const { relpfadGueltig } = require("./key-pruefung");
 
 const NOTES_PRAEFIX = "obsidian/notes/";
 
@@ -18,31 +19,14 @@ const NOTES_PRAEFIX = "obsidian/notes/";
 // Parser-Differential (Backslash, Laufwerks-Praefix, leere Segmente,
 // Windows-Normalisierung von Punkt/Leerzeichen am Ende) aus dem
 // Notes-Praefix herausfuehrt.
-// Reservierte NTFS-Basisnamen, in jedem Ordner und case-insensitiv.
-const GERAETENAMEN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+const ENDUNGEN = ["md", "canvas"];
 
+// Delegiert an die gemeinsame Segmentpruefung in key-pruefung.js; NFC vor
+// Validierung und Key-Bau, damit Validator und Dateisystem dieselbe Sicht
+// haben (macOS liefert NFD, der Key traegt NFC).
 function keyAusRelpfad(relpfad) {
-  // NFC vor Validierung und Key-Bau: Validator und Dateisystem muessen
-  // dieselbe Sicht haben (macOS liefert NFD, der Key traegt NFC).
   const rel = String(relpfad ?? "").normalize("NFC");
-  if (rel.length === 0 || rel.length > 400) return null;
-  if (/[\u0000-\u001f\u007f]/.test(rel)) return null;
-  if (rel.includes("\\")) return null;
-  if (/^[A-Za-z]:/.test(rel)) return null;
-  if (rel.startsWith("/")) return null;
-  const segmente = rel.split("/");
-  for (const segment of segmente) {
-    if (segment.length === 0) return null;
-    // Dot-Segmente sind tabu: .obsidian/plugins waere Codeausfuehrung.
-    if (segment.startsWith(".")) return null;
-    if (segment.endsWith(".") || segment.endsWith(" ")) return null;
-    if (GERAETENAMEN.test(segment)) return null;
-    // NTFS Alternate Data Streams und laufwerksrelative Pfade.
-    if (segment.includes(":")) return null;
-  }
-  // Second-Brain-Zuschnitt: nur Markdown und Canvas werden gesynct.
-  if (!/\.(md|canvas)$/i.test(segmente[segmente.length - 1])) return null;
-  return NOTES_PRAEFIX + rel;
+  return relpfadGueltig(rel, ENDUNGEN) ? NOTES_PRAEFIX + rel : null;
 }
 
 function relpfadAusKey(key) {
@@ -101,6 +85,12 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
     throw new TypeError("eingehendeNotiz braucht existiert als Funktion");
   }
   const pfad = String(relpfad ?? "").normalize("NFC");
+  // S1: eigene Pruefung statt Vertrauen in den Aufrufer. Dieselben Regeln
+  // wie beim Key-Bau; ein Pfad, der dort nie zum Key wuerde, darf hier
+  // auch nie zu einer Schreibaktion werden.
+  if (!relpfadGueltig(pfad, ENDUNGEN)) {
+    return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
+  }
   let vorhanden;
   try {
     vorhanden = Boolean(existiert(pfad));
@@ -149,6 +139,10 @@ function konfliktErgebnis(pfad, existiert) {
       belegt = true;
     }
     if (!belegt) {
+      // S1: auch der erzeugte Zielpfad muss die Pruefung bestehen.
+      if (!relpfadGueltig(kandidat, ENDUNGEN)) {
+        return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
+      }
       return { aktion: "konflikt", zielPfad: kandidat, bestaetigungErforderlich: unbestaetigt };
     }
   }

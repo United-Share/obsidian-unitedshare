@@ -288,6 +288,24 @@ test("eingehendeNotiz normalisiert den Relpfad auf NFC", () => {
   assert.equal(gesehen[0], nfc);
 });
 
+// Nacharbeit S1: eingehendeNotiz verlaesst sich nicht darauf, dass der
+// Aufrufer nur gueltige Pfade liefert, sondern prueft selbst mit derselben
+// Segmentpruefung wie keyAusRelpfad. Auch der erzeugte Konflikt-Zielpfad
+// wird vor Rueckgabe gegen die Pruefung gehalten.
+test("eingehendeNotiz lehnt ungueltige Relpfade selbst ab", () => {
+  const faelle = [
+    "../../.obsidian/plugins/x/main.js",
+    "/etc/passwd.md",
+    ".obsidian/plugins/x/main.js",
+    "notes/skript.js",
+  ];
+  for (const relpfad of faelle) {
+    const e = eingehendeNotiz({ relpfad, remoteText: "x", lokalText: null, existiert: () => false });
+    assert.equal(e.aktion, "abgelehnt", relpfad);
+    assert.equal(e.grund, "ungueltiger-pfad", relpfad);
+  }
+});
+
 // Haertung (Finding Namenssuche): eine werfende Probe heisst BELEGT, nie
 // frei. Sonst koennte die Konfliktkopie einen vergebenen Namen treffen und
 // ihn ueberschreiben. Bleibt die Lage unbestaetigt (Wurf) oder ist die
