@@ -713,6 +713,64 @@ test("die Warteschlange verdraengt bei Ueberlauf das Aelteste", async () => {
   }
 });
 
+// Nacharbeit K4: jeder Request bekommt eine Frist (AbortController plus
+// Race), der Nachhol-Lauf zusaetzlich ein Stueckzahl- und Zeitbudget mit
+// injizierbarer Uhr. Ein fetchImpl, das nie aufloest, darf den Spiegel
+// nicht ewig blockieren.
+test("das Zeitbudget beendet den Nachhol-Lauf", async () => {
+  const ablage = [];
+  const { server, port } = await listen((req, res) => {
+    const url = new URL(req.url, "http://x");
+    ablage.push(url.searchParams.get("key"));
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"key":"x","bytes":1}');
+    });
+  });
+  try {
+    const uhrWerte = [0, 999999, 999999, 999999];
+    const zustand = {
+      warteschlange: [
+        { key: "obsidian/chats/warte-1.json", inhalt: "a" },
+        { key: "obsidian/chats/warte-2.json", inhalt: "b" },
+      ],
+    };
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+        jetzt: () => uhrWerte.shift() ?? 999999,
+      },
+      chatVon("budget", "frisch"),
+      zustand
+    );
+    assert.equal(e.ergebnis, "gespiegelt");
+    assert.equal(e.nachgeholt, 0, "Budget abgelaufen, nichts nachgeholt");
+    assert.equal(zustand.warteschlange.length, 2);
+  } finally {
+    server.close();
+  }
+});
+
+test("eine Frist bricht ein haengendes fetchImpl ab", async () => {
+  const zustand = { warteschlange: [] };
+  const start = Date.now();
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      timeoutMs: 25,
+      fetchImpl: () => new Promise(() => {}),
+    },
+    chatVon("haengt", "x"),
+    zustand
+  );
+  assert.equal(e.ergebnis, "aufgeschoben");
+  assert.ok(Date.now() - start < 5000, "muss durch die Frist enden, nicht haengen");
+  assert.equal(zustand.warteschlange.length, 1);
+});
+
 test("wiederherstellbareChats verwirft Angriffs-Keys aus dem Listing", () => {
   const items = [
     { key: "obsidian/chats/../geheim.json", size: 1 },

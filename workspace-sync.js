@@ -30,6 +30,30 @@ function wiederholbar(status) {
   return status === 0 || status === 429 || status >= 500;
 }
 
+// K4: jeder Request bekommt eine Frist. AbortController signalisiert dem
+// Transport den Abbruch (requestUrlAsFetch muss init.signal unterstuetzen,
+// siehe Integrationsdoku), das Race beendet den Aufruf auch dann, wenn der
+// Transport das Signal ignoriert.
+const TIMEOUT_MS_STANDARD = 15000;
+const NACHHOL_BUDGET_MS = 30000;
+
+function mitFrist(fetchImpl, timeoutMs) {
+  return (url, init) => {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timer;
+    const frist = new Promise((_aufloesen, ablehnen) => {
+      timer = setTimeout(() => {
+        if (controller) controller.abort();
+        ablehnen(new Error("zeitueberschreitung"));
+      }, timeoutMs);
+    });
+    const anfrage = Promise.resolve(
+      fetchImpl(url, controller ? { ...(init || {}), signal: controller.signal } : init)
+    );
+    return Promise.race([anfrage, frist]).finally(() => clearTimeout(timer));
+  };
+}
+
 function slugAusTitel(titel) {
   const roh = String(titel ?? "").toLowerCase();
   let slug = "";
@@ -261,11 +285,14 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     return { ergebnis: "keine-basis", nachgeholt: 0 };
   }
 
+  const rohTimeout = Number(ctx.timeoutMs ?? einstellungen.timeoutMs);
+  const timeoutMs = Number.isFinite(rohTimeout) && rohTimeout > 0 ? rohTimeout : TIMEOUT_MS_STANDARD;
   const transport = {
     baseUrl: sichereBasis,
     apiKey,
-    fetchImpl: ctx.fetchImpl,
+    fetchImpl: mitFrist(ctx.fetchImpl, timeoutMs),
   };
+  const jetzt = typeof ctx.jetzt === "function" ? ctx.jetzt : Date.now;
   const key = chatKey(eintrag);
   const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
 
@@ -316,7 +343,10 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
 
   let nachgeholt = 0;
   let bearbeitet = 0;
+  const nachholStart = jetzt();
   while (z.warteschlange.length > 0 && bearbeitet < NACHHOL_MAX_STUECK) {
+    // K4: Zeitbudget fuer den gesamten Nachhol-Lauf.
+    if (jetzt() - nachholStart >= NACHHOL_BUDGET_MS) break;
     const kopfEintrag = z.warteschlange[0];
     bearbeitet += 1;
     let r;
