@@ -107,6 +107,15 @@ test("keyAusRelpfad lehnt Windows-Geraetenamen case-insensitiv ab", () => {
   assert.ok(keyAusRelpfad("compendium1.md"));
 });
 
+// Haertungsrunde 2, Finding 3: Doppelpunkte sind auf NTFS Alternate Data
+// Streams und machen Pfade laufwerksrelativ; das Laufwerks-Praefix allein
+// deckt "a:b" mitten im Pfad nicht ab.
+test("keyAusRelpfad lehnt Doppelpunkte in jedem Segment ab", () => {
+  for (const pfad of ["notes/datei.md:stream", "a:b/n.md", "x/y:z.md"]) {
+    assert.equal(keyAusRelpfad(pfad), null, `muss abgelehnt werden: ${pfad}`);
+  }
+});
+
 test("keyAusRelpfad normalisiert NFD und NFC auf denselben Key", () => {
   const nfc = "id\u00e9e.md";
   const nfd = "ide\u0301e.md";

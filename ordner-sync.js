@@ -38,6 +38,8 @@ function keyAusRelpfad(relpfad) {
     if (segment.startsWith(".")) return null;
     if (segment.endsWith(".") || segment.endsWith(" ")) return null;
     if (GERAETENAMEN.test(segment)) return null;
+    // NTFS Alternate Data Streams und laufwerksrelative Pfade.
+    if (segment.includes(":")) return null;
   }
   // Second-Brain-Zuschnitt: nur Markdown und Canvas werden gesynct.
   if (!/\.(md|canvas)$/i.test(segmente[segmente.length - 1])) return null;
