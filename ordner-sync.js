@@ -4,14 +4,20 @@
 //
 // Reine Planungs- und Entscheidungslogik: was hochgeladen wird (Hash-Index
 // statt Blind-Upload), wie eingehende Notizen behandelt werden (Konfliktkopie
-// statt Ueberschreiben, konfliktDateiname aus unitedshare-core) und dass
-// Loeschungen im MVP ausdruecklich nicht propagiert werden. Transport laeuft
-// ueber workspace-sync (objektSchreiben, objektLesen, objekteListen).
+// statt Ueberschreiben, eigene begrenzte Namenssuche kompatibel zum
+// Namensschema von konfliktDateiname) und dass Loeschungen im MVP
+// ausdruecklich nicht propagiert werden. Den Transport macht der Aufrufer
+// (Hooks in main.src.js) ueber die workspace-sync-Funktionen; dieses Modul
+// ist bewusst ein Standalone-Modul ohne Quer-require.
 //
 // Vertraege und Begruendungen: ordner-sync.test.js.
 
-const { MAX_OBJEKT_BYTES } = require("./workspace-sync");
+const { UnitedShareError } = require("./unitedshare-core");
 const { relpfadGueltig, utf8ByteLength, MAX_SEGMENT_BYTES } = require("./key-pruefung");
+
+// V2: lokaler Default statt Quer-require auf die Transportschicht; die
+// Grenze ist ein Parameter von planeOrdnerSync.
+const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 
 const NOTES_PRAEFIX = "obsidian/notes/";
 
@@ -39,7 +45,7 @@ function relpfadAusKey(key) {
 // Plant einen Sync-Lauf. dateien = lokaler Ist-Stand des gewaehlten Ordners
 // ({pfad, hash, groesse} mit Pfaden relativ zum Ordner), index = zuletzt
 // gespiegelter Stand (pfad -> hash), entfernt = Listing des Workspace.
-function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {} } = {}) {
+function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {}, maxBytes = MAX_OBJEKT_BYTES } = {}) {
   const hochladen = [];
   const uebersprungen = [];
   // K6: Push-Schutz gegen Last-Writer-Wins. Weicht die Remote-Fassung vom
@@ -73,7 +79,7 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand 
       uebersprungen.push({ pfad, grund: "ungueltige-groesse" });
       continue;
     }
-    if (groesse > MAX_OBJEKT_BYTES) {
+    if (groesse > maxBytes) {
       uebersprungen.push({ pfad, grund: "zu-gross" });
       continue;
     }
@@ -121,7 +127,7 @@ function laufBeenden(zustand) {
 // gewaehlt. Der Relpfad wird wie in keyAusRelpfad auf NFC normalisiert.
 function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (typeof existiert !== "function") {
-    throw new TypeError("eingehendeNotiz braucht existiert als Funktion");
+    throw new UnitedShareError("eingehendeNotiz braucht existiert als Funktion", 400);
   }
   const pfad = String(relpfad ?? "").normalize("NFC");
   // S1: eigene Pruefung statt Vertrauen in den Aufrufer. Dieselben Regeln

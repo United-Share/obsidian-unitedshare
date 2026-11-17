@@ -18,6 +18,11 @@ const CHATS_PRAEFIX = "obsidian/chats/";
 const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 // S4-Nachtrag: Deckel fuer Listing-Items; Ueberschuss wird verworfen.
 const ITEM_DECKEL = 500;
+// V5: das Gateway liefert hoechstens die letzten 50 Objekte
+// (serverseitiges items.slice(-50)); ab dieser Schwelle ist ein Listing
+// als unvollstaendig zu betrachten. Cursor-Paginierung ist ein
+// Gateway-Folgethema.
+const GATEWAY_LISTING_SCHWELLE = 50;
 // K3: die Warteschlange ist ein Puffer, kein Archiv. Obergrenzen mit
 // Verdraengung des Aeltesten, Versuchslimit je Eintrag, und endgueltige
 // Ablehnungen werden gar nicht erst eingereiht.
@@ -252,10 +257,11 @@ async function objekteListen(ctx, praefix) {
   if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
     return { status: 200, items: [], grund: "unlesbar" };
   }
+  const vollstaendig = daten.items.length < GATEWAY_LISTING_SCHWELLE;
   if (daten.items.length > ITEM_DECKEL) {
-    return { status: 200, items: daten.items.slice(0, ITEM_DECKEL), grund: "gedeckelt" };
+    return { status: 200, items: daten.items.slice(0, ITEM_DECKEL), grund: "gedeckelt", vollstaendig: false };
   }
-  return { status: 200, items: daten.items };
+  return { status: 200, items: daten.items, vollstaendig };
 }
 
 // Spiegelt einen frisch gespeicherten Chat und holt bei Erfolg die
@@ -265,7 +271,24 @@ async function objekteListen(ctx, praefix) {
 async function chatSpiegeln(ctx, eintrag, zustand) {
   const einstellungen = (ctx && ctx.settings) || {};
   const melde = typeof ctx.status === "function" ? ctx.status : () => {};
-  const protokolliere = typeof ctx.protokoll === "function" ? ctx.protokoll : () => {};
+  const jetzt = typeof ctx.jetzt === "function" ? ctx.jetzt : Date.now;
+  // V3: feste Nutzlast {zeit, status, meldung, body}; body ist der Basename
+  // des Keys, nie der volle Pfad. Ein werfendes oder asynchron scheiterndes
+  // protokoll reisst den Spiegel nicht mit.
+  const protokolliere = (eintrag) => {
+    if (typeof ctx.protokoll !== "function") return;
+    const nutzlast = {
+      zeit: jetzt(),
+      status: eintrag.status ?? 0,
+      meldung: eintrag.meldung ?? "",
+      body: String(eintrag.key ?? "").split("/").pop(),
+    };
+    try {
+      Promise.resolve(ctx.protokoll(nutzlast)).catch(() => {});
+    } catch (_fehler) {
+      // bewusst geschluckt, siehe Kommentar oben
+    }
+  };
   // K1: leere Chats werden nicht gespiegelt; es gaebe nichts zurueckzuholen.
   if (!eintrag || !Array.isArray(eintrag.messages) || eintrag.messages.length === 0) {
     return { ergebnis: "leer", nachgeholt: 0 };
@@ -292,7 +315,6 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     apiKey,
     fetchImpl: mitFrist(ctx.fetchImpl, timeoutMs),
   };
-  const jetzt = typeof ctx.jetzt === "function" ? ctx.jetzt : Date.now;
   const key = chatKey(eintrag);
   const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
 
@@ -310,7 +332,7 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   if (!geschrieben.ok) {
     if (!wiederholbar(geschrieben.status)) {
       // Endgueltige Ablehnung: einmal protokollieren, nie einreihen.
-      protokolliere({ quelle: "workspace-sync", key, status: geschrieben.status, endgueltig: true });
+      protokolliere({ key, status: geschrieben.status, meldung: "endgueltig-abgelehnt" });
       melde("Workspace-Spiegel verworfen");
       return { ergebnis: "verworfen", nachgeholt: 0 };
     }
@@ -320,15 +342,15 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     // Obergrenzen: Anzahl und Gesamtbytes, Verdraengung des Aeltesten.
     while (z.warteschlange.length > WARTESCHLANGE_MAX_EINTRAEGE) {
       const raus = z.warteschlange.shift();
-      protokolliere({ quelle: "workspace-sync", key: raus.key, status: 0, verdraengt: true });
+      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt" });
     }
     let gesamt = z.warteschlange.reduce((summe, w) => summe + utf8ByteLength(String(w.inhalt ?? "")), 0);
     while (gesamt > WARTESCHLANGE_MAX_BYTES && z.warteschlange.length > 1) {
       const raus = z.warteschlange.shift();
       gesamt -= utf8ByteLength(String(raus.inhalt ?? ""));
-      protokolliere({ quelle: "workspace-sync", key: raus.key, status: 0, verdraengt: true });
+      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt" });
     }
-    protokolliere({ quelle: "workspace-sync", key, status: geschrieben.status });
+    protokolliere({ key, status: geschrieben.status, meldung: "aufgeschoben" });
     melde("Workspace-Spiegel aufgeschoben");
     return { ergebnis: "aufgeschoben", nachgeholt: 0 };
   }
@@ -338,7 +360,7 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   const vorher = z.warteschlange.length;
   z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
   if (z.warteschlange.length < vorher) {
-    protokolliere({ quelle: "workspace-sync", key, status: 0, veraltetVerworfen: true });
+    protokolliere({ key, status: 0, meldung: "veraltet-verworfen" });
   }
 
   let nachgeholt = 0;
@@ -363,13 +385,13 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     if (!wiederholbar(r.status)) {
       // Endgueltig abgelehnt: raus damit, der Kopf blockiert nicht.
       z.warteschlange.shift();
-      protokolliere({ quelle: "workspace-sync", key: kopfEintrag.key, status: r.status, endgueltig: true });
+      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "endgueltig-abgelehnt" });
       continue;
     }
     kopfEintrag.versuche = (kopfEintrag.versuche ?? 0) + 1;
     if (kopfEintrag.versuche >= VERSUCHE_MAX) {
       z.warteschlange.shift();
-      protokolliere({ quelle: "workspace-sync", key: kopfEintrag.key, status: r.status, aufgegeben: true });
+      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "aufgegeben" });
       continue;
     }
     break;

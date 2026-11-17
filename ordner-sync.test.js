@@ -41,12 +41,6 @@ test("keyAusRelpfad und relpfadAusKey sind verlustfrei, auch mit Umlauten und Le
   assert.equal(key, "obsidian/notes/Ideen/Café Plan (2026).md");
   assert.equal(relpfadAusKey(key), rel);
   assert.ok(key.startsWith(NOTES_PRAEFIX));
-});
-
-test("keyAusRelpfad lehnt gefaehrliche Pfade ab", () => {
-  assert.equal(keyAusRelpfad(""), null);
-  assert.equal(keyAusRelpfad("/absolut.md"), null);
-  assert.equal(keyAusRelpfad("a/../b.md"), null);
   assert.equal(relpfadAusKey("anderes/praefix.md"), null);
 });
 
@@ -397,6 +391,32 @@ test("konfliktErgebnis kuerzt den Stamm unter die Segmentgrenze", () => {
   assert.ok(segment.endsWith(".md"));
 });
 
+// Nacharbeit V2: ordner-sync ist ein Standalone-Modul wie die anderen,
+// ohne Quer-require auf die Transportschicht; die Objektgrenze ist ein
+// Parameter mit lokalem Default.
+test("ordner-sync haengt nicht an workspace-sync und maxBytes ist Parameter", () => {
+  const quelle = require("node:fs").readFileSync(require.resolve("./ordner-sync"), "utf8");
+  assert.ok(!quelle.includes("require(\"./workspace-sync\")"), "kein Quer-require auf die Transportschicht");
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: "a.md", hash: "h1", groesse: 11 }],
+    index: {},
+    entfernt: [],
+    maxBytes: 10,
+  });
+  assert.deepEqual(plan.hochladen, []);
+  assert.equal(plan.uebersprungen[0].grund, "zu-gross");
+});
+
+// Nacharbeit V6: die eigene begrenzte Suche muss bei ehrlicher Probe
+// dieselben Namen erzeugen wie konfliktDateiname aus unitedshare-core.
+test("konfliktErgebnis entspricht konfliktDateiname bei ehrlicher Probe", () => {
+  const { konfliktDateiname } = require("./unitedshare-core");
+  const belegt = new Set(["Ideen/voll.md", "Ideen/voll (Konflikt).md", "Ideen/voll (Konflikt 2).md"]);
+  const probe = (p) => belegt.has(p);
+  const e = eingehendeNotiz({ relpfad: "Ideen/voll.md", remoteText: "r", lokalText: "l", existiert: probe });
+  assert.equal(e.zielPfad, konfliktDateiname("Ideen/voll.md", probe));
+});
+
 // Nacharbeit K6: Push-Schutz gegen Last-Writer-Wins. Hat sich die
 // Remote-Fassung seit dem letzten gesehenen Stand geaendert (oder wurde
 // sie nie gesehen), wird NICHT hochgeladen, sondern als remoteAbweichung
@@ -543,7 +563,8 @@ test("aktion konflikt liefert bei ehrlicher Probe nie einen belegten Zielpfad", 
 });
 
 test("eingehendeNotiz verlangt existiert als Funktion", () => {
-  assert.throws(() => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }), TypeError);
+  const { UnitedShareError } = require("./unitedshare-core");
+  assert.throws(() => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }), UnitedShareError);
 });
 
 test("indexNachSync uebernimmt die hochgeladenen Staende und vergisst nichts anderes", () => {

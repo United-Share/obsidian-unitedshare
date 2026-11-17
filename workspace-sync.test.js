@@ -296,6 +296,62 @@ test("objekteListen deckelt Body-Groesse und Item-Anzahl", async () => {
   assert.equal(gedeckelt.grund, "gedeckelt");
 });
 
+// Nacharbeit V5: das Gateway liefert hoechstens die letzten 50 Objekte
+// (serverseitiges items.slice(-50)); ab 50 Eintraegen ist das Listing
+// deshalb als unvollstaendig zu betrachten.
+test("objekteListen meldet vollstaendig nur unter der Gateway-Schwelle", async () => {
+  const bau = (n) => ({ bucket: "b", items: Array.from({ length: n }, (_x, i) => ({ key: "obsidian/chats/" + i + ".json", size: 1 })) });
+  const klein = await objekteListen(
+    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: JSON.stringify(bau(3)) }) },
+    CHATS_PRAEFIX
+  );
+  assert.equal(klein.vollstaendig, true);
+  const voll = await objekteListen(
+    { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", fetchImpl: async () => fakeAntwort({ body: JSON.stringify(bau(50)) }) },
+    CHATS_PRAEFIX
+  );
+  assert.equal(voll.vollstaendig, false);
+});
+
+// Nacharbeit V3: die Protokoll-Nutzlast ist {zeit, status, meldung, body},
+// body ist der Basename des Keys (nie der volle Pfad), und ein werfendes
+// protokoll reisst den Spiegel nicht mit.
+test("die Protokoll-Nutzlast traegt zeit, status, meldung und basename", async () => {
+  const { server, port } = await listen((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end("{}");
+    });
+  });
+  try {
+    const protokoll = [];
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+        erlaubeLoopback: true,
+        fetchImpl: fetch,
+        protokoll: (eintrag) => {
+          protokoll.push(eintrag);
+          throw new Error("Protokoll kaputt");
+        },
+      },
+      chatVon("nutzlast", "x"),
+      { warteschlange: [] }
+    );
+    assert.equal(e.ergebnis, "verworfen");
+    assert.equal(protokoll.length, 1);
+    const n = protokoll[0];
+    assert.equal(typeof n.zeit, "number");
+    assert.equal(n.status, 401);
+    assert.equal(typeof n.meldung, "string");
+    assert.ok(!n.body.includes("/"), "body ist der Basename");
+    assert.ok(n.body.endsWith(".json"));
+  } finally {
+    server.close();
+  }
+});
+
 // Nacharbeit S5: Body-Messung typfest nach dem utf8ByteLength-Hausmuster.
 // Alles ohne messbare Groesse wird fail-closed abgelehnt, bevor ein Request
 // entsteht; der Bundler-Buffer-Stub hat kein byteLength.
