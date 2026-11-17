@@ -31,6 +31,8 @@ const {
   planeOrdnerSync,
   eingehendeNotiz,
   indexNachSync,
+  laufStarten,
+  laufBeenden,
 } = require("./ordner-sync");
 
 test("keyAusRelpfad und relpfadAusKey sind verlustfrei, auch mit Umlauten und Leerzeichen", () => {
@@ -393,6 +395,67 @@ test("konfliktErgebnis kuerzt den Stamm unter die Segmentgrenze", () => {
   assert.ok(Buffer.byteLength(segment, "utf8") <= 255, String(Buffer.byteLength(segment, "utf8")));
   assert.ok(segment.includes("(Konflikt)"));
   assert.ok(segment.endsWith(".md"));
+});
+
+// Nacharbeit K6: Push-Schutz gegen Last-Writer-Wins. Hat sich die
+// Remote-Fassung seit dem letzten gesehenen Stand geaendert (oder wurde
+// sie nie gesehen), wird NICHT hochgeladen, sondern als remoteAbweichung
+// in den Konfliktpfad gegeben. Reihenfolge ist immer erst Pull, dann Push.
+test("fremd geaenderte Remote-Fassungen werden nicht ueberschrieben", () => {
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: "doc.md", hash: "h-neu", groesse: 10 }],
+    index: { "doc.md": "h-alt" },
+    entfernt: [{ key: "obsidian/notes/doc.md", size: 99 }],
+    remoteStand: { "doc.md": { size: 10 } },
+  });
+  assert.deepEqual(plan.hochladen, []);
+  assert.deepEqual(plan.remoteAbweichung.map((r) => r.pfad), ["doc.md"]);
+});
+
+test("nie gesehene Remote-Fassung zaehlt als Abweichung, bekannte nicht", () => {
+  const nieGesehen = planeOrdnerSync({
+    dateien: [{ pfad: "neu.md", hash: "h1", groesse: 5 }],
+    index: {},
+    entfernt: [{ key: "obsidian/notes/neu.md", size: 7 }],
+    remoteStand: {},
+  });
+  assert.deepEqual(nieGesehen.hochladen, []);
+  assert.equal(nieGesehen.remoteAbweichung.length, 1);
+
+  const bekannt = planeOrdnerSync({
+    dateien: [{ pfad: "ok.md", hash: "h-neu", groesse: 5 }],
+    index: { "ok.md": "h-alt" },
+    entfernt: [{ key: "obsidian/notes/ok.md", size: 7 }],
+    remoteStand: { "ok.md": { size: 7 } },
+  });
+  assert.deepEqual(bekannt.hochladen.map((d) => d.pfad), ["ok.md"]);
+  assert.deepEqual(bekannt.remoteAbweichung, []);
+
+  const ohneRemote = planeOrdnerSync({
+    dateien: [{ pfad: "frisch.md", hash: "h1", groesse: 5 }],
+    index: {},
+    entfernt: [],
+  });
+  assert.deepEqual(ohneRemote.hochladen.map((d) => d.pfad), ["frisch.md"]);
+});
+
+// Nacharbeit K7: ueberlappende Laeufe und case-insensitive Dateisysteme.
+test("laufStarten verhindert ueberlappende Laeufe", () => {
+  const zustand = {};
+  assert.equal(laufStarten(zustand), true);
+  assert.equal(laufStarten(zustand), false);
+  laufBeenden(zustand);
+  assert.equal(laufStarten(zustand), true);
+});
+
+test("existiert wird case-insensitiv befragt (APFS)", () => {
+  const e = eingehendeNotiz({
+    relpfad: "README.md",
+    remoteText: "Remote",
+    lokalText: null,
+    existiert: (p) => p === "readme.md",
+  });
+  assert.equal(e.aktion, "konflikt", "readme.md belegt den Namen auf APFS");
 });
 
 // Nacharbeit S1: eingehendeNotiz verlaesst sich nicht darauf, dass der

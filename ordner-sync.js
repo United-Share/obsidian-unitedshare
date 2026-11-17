@@ -39,9 +39,18 @@ function relpfadAusKey(key) {
 // Plant einen Sync-Lauf. dateien = lokaler Ist-Stand des gewaehlten Ordners
 // ({pfad, hash, groesse} mit Pfaden relativ zum Ordner), index = zuletzt
 // gespiegelter Stand (pfad -> hash), entfernt = Listing des Workspace.
-function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
+function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {} } = {}) {
   const hochladen = [];
   const uebersprungen = [];
+  // K6: Push-Schutz gegen Last-Writer-Wins. Weicht die Remote-Fassung vom
+  // zuletzt gesehenen Stand ab (oder wurde sie nie gesehen), wird nicht
+  // hochgeladen, sondern der Konfliktpfad gewaehlt. Erst Pull, dann Push.
+  const remoteAbweichung = [];
+  const remoteNachPfad = new Map();
+  for (const objekt of entfernt) {
+    const rel = relpfadAusKey(objekt && objekt.key);
+    if (rel !== null) remoteNachPfad.set(rel, objekt);
+  }
   const lokalePfade = new Set();
 
   for (const datei of dateien) {
@@ -68,7 +77,17 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
       uebersprungen.push({ pfad, grund: "zu-gross" });
       continue;
     }
-    if (index[pfad] !== datei.hash) hochladen.push({ pfad, hash: datei.hash, groesse });
+    if (index[pfad] === datei.hash) continue;
+    const remoteObjekt = remoteNachPfad.get(pfad);
+    if (remoteObjekt) {
+      const erinnert = Object.hasOwn(remoteStand ?? {}, pfad) ? remoteStand[pfad] : null;
+      const unveraendertGesehen = erinnert && Number(erinnert.size) === Number(remoteObjekt.size);
+      if (!unveraendertGesehen) {
+        remoteAbweichung.push({ pfad, remoteSize: remoteObjekt.size });
+        continue;
+      }
+    }
+    hochladen.push({ pfad, hash: datei.hash, groesse });
   }
 
   // Keys ohne lokale Datei sind KEIN Loeschauftrag: ohne Tombstones ist
@@ -79,7 +98,20 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
     if (rel !== null && !lokalePfade.has(rel)) geloeschtIgnoriert.push(objekt.key);
   }
 
-  return { hochladen, uebersprungen, geloeschtIgnoriert };
+  return { hochladen, uebersprungen, geloeschtIgnoriert, remoteAbweichung };
+}
+
+// K7: ein laufend-Flag im Zustand verhindert ueberlappende Sync-Laeufe;
+// beide Kommandos (manuell und Datei-Speichern) kehren dann frueh zurueck.
+function laufStarten(zustand) {
+  if (!zustand || typeof zustand !== "object") return false;
+  if (zustand.laufend === true) return false;
+  zustand.laufend = true;
+  return true;
+}
+
+function laufBeenden(zustand) {
+  if (zustand && typeof zustand === "object") zustand.laufend = false;
 }
 
 // Entscheidung fuer eine eingehende Notiz. Niemals stilles Ueberschreiben,
@@ -98,11 +130,18 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (!relpfadGueltig(pfad, ENDUNGEN)) {
     return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
   }
+  // K7: case-insensitiv befragen. Auf APFS und NTFS belegt readme.md den
+  // Namen README.md; wer nur exakt fragt, legt an und ueberschreibt.
+  const befrage = (p) => {
+    if (existiert(p)) return true;
+    const klein = p.toLowerCase();
+    return klein !== p ? Boolean(existiert(klein)) : false;
+  };
   let vorhanden;
   try {
-    vorhanden = Boolean(existiert(pfad));
+    vorhanden = befrage(pfad);
   } catch (_fehler) {
-    return konfliktErgebnis(pfad, existiert);
+    return konfliktErgebnis(pfad, befrage);
   }
   const lesbar = lokalText !== null && lokalText !== undefined;
   if (!vorhanden && !lesbar) {
@@ -111,7 +150,7 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (vorhanden && lesbar && lokalText === remoteText) {
     return { aktion: "unveraendert", zielPfad: pfad };
   }
-  return konfliktErgebnis(pfad, existiert);
+  return konfliktErgebnis(pfad, befrage);
 }
 
 // Begrenzte, fail-closed Namenssuche fuer die Konfliktkopie, Namensschema
@@ -192,6 +231,8 @@ function indexNachSync(index, hochgeladen) {
 
 module.exports = {
   NOTES_PRAEFIX,
+  laufStarten,
+  laufBeenden,
   MAX_OBJEKT_BYTES,
   keyAusRelpfad,
   relpfadAusKey,
