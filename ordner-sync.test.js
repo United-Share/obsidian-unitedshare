@@ -124,6 +124,7 @@ test("keyAusRelpfad normalisiert NFD und NFC auf denselben Key", () => {
 
 test("planeOrdnerSync laedt nur Neues und Geaendertes hoch", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [
       { pfad: "a.md", hash: "h1", groesse: 10 },
       { pfad: "b.md", hash: "h2-neu", groesse: 10 },
@@ -138,6 +139,7 @@ test("planeOrdnerSync laedt nur Neues und Geaendertes hoch", () => {
 
 test("planeOrdnerSync ueberspringt Dateien ueber dem Gateway-Limit mit Grund", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [
       { pfad: "klein.md", hash: "h1", groesse: 10 },
       { pfad: "riesig.md", hash: "h2", groesse: MAX_OBJEKT_BYTES + 1 },
@@ -155,6 +157,7 @@ test("planeOrdnerSync ueberspringt Dateien ueber dem Gateway-Limit mit Grund", (
 // duerfen das Limit nicht umgehen. Ohne gueltige Zahl wird nicht hochgeladen.
 test("planeOrdnerSync ueberspringt Dateien ohne gueltige Groesse", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [
       { pfad: "ohne.md", hash: "h1" },
       { pfad: "nan.md", hash: "h2", groesse: Number.NaN },
@@ -176,6 +179,7 @@ test("planeOrdnerSync ueberspringt Dateien ohne gueltige Groesse", () => {
 test("planeOrdnerSync normalisiert lokale Pfade auf NFC", () => {
   const nfdPfad = "ide\u0301e.md";
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: nfdPfad, hash: "h1", groesse: 5 }],
     index: { "id\u00e9e.md": "h1" },
     entfernt: [{ key: "obsidian/notes/id\u00e9e.md", size: 5 }],
@@ -187,6 +191,7 @@ test("planeOrdnerSync normalisiert lokale Pfade auf NFC", () => {
 // Nacharbeit K5: ohne gueltigen Hash ist Aenderungserkennung Raten.
 test("planeOrdnerSync ueberspringt Dateien ohne gueltigen hash", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [
       { pfad: "fehlt.md", groesse: 1 },
       { pfad: "zahl.md", hash: 42, groesse: 1 },
@@ -208,6 +213,7 @@ test("indexNachSync ueberspringt Eintraege ohne gueltigen hash", () => {
 
 test("planeOrdnerSync propagiert Loeschungen nicht, sondern weist sie nur aus", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "bleibt.md", hash: "h1", groesse: 5 }],
     index: { "bleibt.md": "h1", "lokal-geloescht.md": "h9" },
     entfernt: [
@@ -398,6 +404,7 @@ test("ordner-sync haengt nicht an workspace-sync und maxBytes ist Parameter", ()
   const quelle = require("node:fs").readFileSync(require.resolve("./ordner-sync"), "utf8");
   assert.ok(!quelle.includes("require(\"./workspace-sync\")"), "kein Quer-require auf die Transportschicht");
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "a.md", hash: "h1", groesse: 11 }],
     index: {},
     entfernt: [],
@@ -424,6 +431,7 @@ test("relpfadAusKey normalisiert auf NFC und der Plan trifft NFD-Listings", () =
   const nfdKey = "obsidian/notes/ide\u0301e.md";
   assert.equal(relpfadAusKey(nfdKey), "id\u00e9e.md");
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "ide\u0301e.md", hash: "h1", groesse: 5 }],
     index: { "id\u00e9e.md": "h1" },
     entfernt: [{ key: nfdKey, size: 5 }],
@@ -436,6 +444,7 @@ test("relpfadAusKey normalisiert auf NFC und der Plan trifft NFD-Listings", () =
 // die Groessen-Rueckfallebene ist eine dokumentierte Luecke.
 test("groessengleiche Fremdaenderung faellt per Hash auf", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "doc.md", hash: "h-neu-lokal", groesse: 10 }],
     index: { "doc.md": "h-alt-lokal" },
     entfernt: [{ key: "obsidian/notes/doc.md", size: 7, hash: "remote-neu" }],
@@ -449,6 +458,21 @@ test("groessengleiche Fremdaenderung faellt per Hash auf", () => {
 // letzten 50) macht den Push fail-closed: Uploads nur fuer gelistete
 // Pfade, verwaiste Index-Pfade werden Abweichung, Loesch-Auswertung faellt
 // ganz aus.
+// P3-Nachtrag: der Default ist der SICHERE Zustand. Wer das Flag nicht
+// durchreicht, bekommt das Verhalten fuer unvollstaendige Listings, nie
+// stillschweigend den ungeschuetzten Push.
+test("ohne listingVollstaendig gilt das Listing als unvollstaendig", () => {
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: "neu.md", hash: "h1", groesse: 5 }],
+    index: { "verwaist.md": "h9" },
+    entfernt: [],
+  });
+  assert.deepEqual(plan.hochladen, []);
+  assert.ok(plan.remoteAbweichung.some((r) => r.pfad === "neu.md"));
+  assert.ok(plan.remoteAbweichung.some((r) => r.pfad === "verwaist.md"));
+  assert.deepEqual(plan.geloeschtIgnoriert, []);
+});
+
 test("unvollstaendiges Listing macht den Push fail-closed", () => {
   const plan = planeOrdnerSync({
     dateien: [
@@ -472,6 +496,7 @@ test("unvollstaendiges Listing macht den Push fail-closed", () => {
 // in den Konfliktpfad gegeben. Reihenfolge ist immer erst Pull, dann Push.
 test("fremd geaenderte Remote-Fassungen werden nicht ueberschrieben", () => {
   const plan = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "doc.md", hash: "h-neu", groesse: 10 }],
     index: { "doc.md": "h-alt" },
     entfernt: [{ key: "obsidian/notes/doc.md", size: 99 }],
@@ -483,6 +508,7 @@ test("fremd geaenderte Remote-Fassungen werden nicht ueberschrieben", () => {
 
 test("nie gesehene Remote-Fassung zaehlt als Abweichung, bekannte nicht", () => {
   const nieGesehen = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "neu.md", hash: "h1", groesse: 5 }],
     index: {},
     entfernt: [{ key: "obsidian/notes/neu.md", size: 7 }],
@@ -492,6 +518,7 @@ test("nie gesehene Remote-Fassung zaehlt als Abweichung, bekannte nicht", () => 
   assert.equal(nieGesehen.remoteAbweichung.length, 1);
 
   const bekannt = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "ok.md", hash: "h-neu", groesse: 5 }],
     index: { "ok.md": "h-alt" },
     entfernt: [{ key: "obsidian/notes/ok.md", size: 7 }],
@@ -501,6 +528,7 @@ test("nie gesehene Remote-Fassung zaehlt als Abweichung, bekannte nicht", () => 
   assert.deepEqual(bekannt.remoteAbweichung, []);
 
   const ohneRemote = planeOrdnerSync({
+    listingVollstaendig: true,
     dateien: [{ pfad: "frisch.md", hash: "h1", groesse: 5 }],
     index: {},
     entfernt: [],

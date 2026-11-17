@@ -54,7 +54,10 @@ function relpfadAusKey(key) {
 // Plant einen Sync-Lauf. dateien = lokaler Ist-Stand des gewaehlten Ordners
 // ({pfad, hash, groesse} mit Pfaden relativ zum Ordner), index = zuletzt
 // gespiegelter Stand (pfad -> hash), entfernt = Listing des Workspace.
-function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {}, maxBytes = MAX_OBJEKT_BYTES, listingVollstaendig = true } = {}) {
+// P3-Nachtrag: der Default von listingVollstaendig ist FALSE, der
+// sichere Zustand. Vollstaendigkeit muss der Aufrufer ausdruecklich aus
+// objekteListen(...).vollstaendig durchreichen.
+function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {}, maxBytes = MAX_OBJEKT_BYTES, listingVollstaendig = false } = {}) {
   const hochladen = [];
   const uebersprungen = [];
   // K6: Push-Schutz gegen Last-Writer-Wins. Weicht die Remote-Fassung vom
