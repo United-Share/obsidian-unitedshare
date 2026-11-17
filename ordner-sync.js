@@ -45,23 +45,30 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [] } = {}) {
   const lokalePfade = new Set();
 
   for (const datei of dateien) {
-    lokalePfade.add(datei.pfad);
-    if (keyAusRelpfad(datei.pfad) === null) {
-      uebersprungen.push({ pfad: datei.pfad, grund: "ungueltiger-pfad" });
+    // K2: macOS liefert NFD; Index, Keys und Vergleiche laufen auf NFC.
+    const pfad = String(datei.pfad ?? "").normalize("NFC");
+    lokalePfade.add(pfad);
+    if (keyAusRelpfad(pfad) === null) {
+      uebersprungen.push({ pfad, grund: "ungueltiger-pfad" });
+      continue;
+    }
+    // K5: ohne gueltigen Hash ist Aenderungserkennung Raten.
+    if (typeof datei.hash !== "string" || datei.hash.length === 0) {
+      uebersprungen.push({ pfad, grund: "ungueltiger-hash" });
       continue;
     }
     // Security-Finding 3: ohne gueltige Groesse kein Upload, sonst waere
     // das Limit mit fehlenden oder unsinnigen Metadaten umgehbar.
     const groesse = Number(datei.groesse);
     if (!Number.isFinite(groesse) || groesse < 0) {
-      uebersprungen.push({ pfad: datei.pfad, grund: "ungueltige-groesse" });
+      uebersprungen.push({ pfad, grund: "ungueltige-groesse" });
       continue;
     }
     if (groesse > MAX_OBJEKT_BYTES) {
-      uebersprungen.push({ pfad: datei.pfad, grund: "zu-gross" });
+      uebersprungen.push({ pfad, grund: "zu-gross" });
       continue;
     }
-    if (index[datei.pfad] !== datei.hash) hochladen.push(datei);
+    if (index[pfad] !== datei.hash) hochladen.push({ pfad, hash: datei.hash, groesse });
   }
 
   // Keys ohne lokale Datei sind KEIN Loeschauftrag: ohne Tombstones ist
@@ -176,6 +183,8 @@ function indexNachSync(index, hochgeladen) {
   for (const datei of Array.isArray(hochgeladen) ? hochgeladen : []) {
     if (!datei || typeof datei.pfad !== "string") continue;
     if (VERBOTENE_SCHLUESSEL.has(datei.pfad)) continue;
+    // K5: nur bestaetigte Staende mit echtem Hash in den Index.
+    if (typeof datei.hash !== "string" || datei.hash.length === 0) continue;
     neu[datei.pfad] = datei.hash;
   }
   return neu;

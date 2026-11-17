@@ -174,6 +174,42 @@ test("planeOrdnerSync ueberspringt Dateien ohne gueltige Groesse", () => {
   for (const u of plan.uebersprungen) assert.equal(u.grund, "ungueltige-groesse", u.pfad);
 });
 
+// Nacharbeit K2: macOS liefert NFD, Index und Keys tragen NFC. Ohne
+// Normalisierung am Eingang landet dieselbe Notiz als "fremd geloescht"
+// im Plan oder wird doppelt hochgeladen.
+test("planeOrdnerSync normalisiert lokale Pfade auf NFC", () => {
+  const nfdPfad = "ide\u0301e.md";
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: nfdPfad, hash: "h1", groesse: 5 }],
+    index: { "id\u00e9e.md": "h1" },
+    entfernt: [{ key: "obsidian/notes/id\u00e9e.md", size: 5 }],
+  });
+  assert.deepEqual(plan.hochladen, []);
+  assert.deepEqual(plan.geloeschtIgnoriert, []);
+});
+
+// Nacharbeit K5: ohne gueltigen Hash ist Aenderungserkennung Raten.
+test("planeOrdnerSync ueberspringt Dateien ohne gueltigen hash", () => {
+  const plan = planeOrdnerSync({
+    dateien: [
+      { pfad: "fehlt.md", groesse: 1 },
+      { pfad: "zahl.md", hash: 42, groesse: 1 },
+      { pfad: "ok.md", hash: "h", groesse: 1 },
+    ],
+    index: {},
+    entfernt: [],
+  });
+  assert.deepEqual(plan.hochladen.map((d) => d.pfad), ["ok.md"]);
+  assert.equal(plan.uebersprungen.length, 2);
+  for (const u of plan.uebersprungen) assert.equal(u.grund, "ungueltiger-hash", u.pfad);
+});
+
+test("indexNachSync ueberspringt Eintraege ohne gueltigen hash", () => {
+  const neu = indexNachSync({}, [{ pfad: "ohne.md" }, { pfad: "mit.md", hash: "h2" }]);
+  assert.equal(neu["mit.md"], "h2");
+  assert.equal(Object.keys(neu).length, 1);
+});
+
 test("planeOrdnerSync propagiert Loeschungen nicht, sondern weist sie nur aus", () => {
   const plan = planeOrdnerSync({
     dateien: [{ pfad: "bleibt.md", hash: "h1", groesse: 5 }],
