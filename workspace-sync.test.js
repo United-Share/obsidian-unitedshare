@@ -165,6 +165,73 @@ test("chatSpiegeln ohne apiKey macht keinen Request und meldet sich in der Statu
   assert.equal(hinweise.length, 1);
 });
 
+// Nacharbeit S3: Basis-URL und apiKey sind Settings und damit beeinflussbar.
+// Nur https (Ausnahme loopback fuer Tests), keine Zugangsdaten, kein Hash
+// und kein Query in der Basis; der Key muss nach dem Trimmen dem
+// usk-Alphabet entsprechen. Bei Verstoss verlaesst kein Request das Geraet.
+test("chatSpiegeln lehnt unsichere Basis-URLs ohne Request ab", async () => {
+  const faelle = [
+    "http://api.unitedshare.ai/v1",
+    "ftp://api.unitedshare.ai/v1",
+    "https://api.unitedshare.ai/v1#frag",
+    "https://api.unitedshare.ai/v1?x=1",
+    "https://user:pw@api.unitedshare.ai/v1",
+    "",
+  ];
+  for (const baseUrl of faelle) {
+    let treffer = 0;
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey: "usk_test_1", baseUrl },
+        fetchImpl: async () => {
+          treffer += 1;
+          throw new Error("darf nicht passieren");
+        },
+      },
+      { title: "T", erstellt: "2026-11-17T10:00:00Z", id: "c1", messages: [{ role: "user", content: "x" }] },
+      { warteschlange: [] }
+    );
+    assert.equal(e.ergebnis, "keine-basis", baseUrl);
+    assert.equal(treffer, 0, baseUrl);
+  }
+});
+
+test("chatSpiegeln erlaubt fremde Hosts, solange es https ist", async () => {
+  let gesehen = "";
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://andere.example/v1" },
+      fetchImpl: async (url) => {
+        gesehen = url;
+        return { status: 200 };
+      },
+    },
+    { title: "T", erstellt: "2026-11-17T10:00:00Z", id: "c1", messages: [{ role: "user", content: "x" }] },
+    { warteschlange: [] }
+  );
+  assert.equal(e.ergebnis, "gespiegelt");
+  assert.ok(gesehen.startsWith("https://andere.example/v1/workspace/object?key="));
+});
+
+test("chatSpiegeln lehnt unbrauchbare apiKeys ohne Request ab", async () => {
+  for (const apiKey of [" ", "usk\r\nX-Injekt: 1", "usk test", "usk,komma"]) {
+    let treffer = 0;
+    const e = await chatSpiegeln(
+      {
+        settings: { apiKey, baseUrl: "https://api.unitedshare.ai/v1" },
+        fetchImpl: async () => {
+          treffer += 1;
+          throw new Error("darf nicht passieren");
+        },
+      },
+      { title: "T", erstellt: "2026-11-17T10:00:00Z", id: "c1", messages: [{ role: "user", content: "x" }] },
+      { warteschlange: [] }
+    );
+    assert.equal(e.ergebnis, "kein-schluessel", JSON.stringify(apiKey));
+    assert.equal(treffer, 0);
+  }
+});
+
 test("chatSpiegeln bei 401 schreibt ins Protokoll und stellt den Chat in die Warteschlange", async () => {
   const protokoll = [];
   const { server, port } = await listen((req, res) => {

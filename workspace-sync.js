@@ -44,6 +44,28 @@ function basis(baseUrl) {
   return String(baseUrl ?? "").replace(/\/+$/, "");
 }
 
+// S3: Basis-URL und apiKey sind Settings und damit beeinflussbare Eingabe.
+// Nur https verlaesst das Geraet (Ausnahme loopback fuer lokale Tests);
+// Zugangsdaten, Fragment oder Query in der Basis sind verboten, der Key
+// muss nach dem Trimmen dem usk-Alphabet entsprechen.
+function basisPruefen(baseUrl) {
+  let u;
+  try {
+    u = new URL(String(baseUrl ?? ""));
+  } catch (_fehler) {
+    return null;
+  }
+  const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost";
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && loopback)) return null;
+  if (u.username || u.password || u.hash || u.search) return null;
+  return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
+}
+
+function apiKeyPruefen(apiKey) {
+  const k = String(apiKey ?? "").trim();
+  return /^[A-Za-z0-9_-]+$/.test(k) ? k : null;
+}
+
 function urlFuerObjekt(baseUrl, key) {
   return `${basis(baseUrl)}/workspace/object?key=${encodeURIComponent(String(key ?? ""))}`;
 }
@@ -102,10 +124,20 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     melde("Workspace-Spiegel aus: kein API-Key hinterlegt");
     return { ergebnis: "kein-schluessel", nachgeholt: 0 };
   }
+  const apiKey = apiKeyPruefen(einstellungen.apiKey);
+  if (apiKey === null) {
+    melde("Workspace-Spiegel aus: API-Key unbrauchbar");
+    return { ergebnis: "kein-schluessel", nachgeholt: 0 };
+  }
+  const sichereBasis = basisPruefen(einstellungen.baseUrl);
+  if (sichereBasis === null) {
+    melde("Workspace-Spiegel aus: Basis-URL unsicher");
+    return { ergebnis: "keine-basis", nachgeholt: 0 };
+  }
 
   const transport = {
-    baseUrl: einstellungen.baseUrl,
-    apiKey: einstellungen.apiKey,
+    baseUrl: sichereBasis,
+    apiKey,
     fetchImpl: ctx.fetchImpl,
   };
   const datum = ctx.datum ?? new Date().toISOString();
@@ -155,6 +187,8 @@ function wiederherstellbareChats(items) {
 module.exports = {
   CHATS_PRAEFIX,
   MAX_OBJEKT_BYTES,
+  basisPruefen,
+  apiKeyPruefen,
   slugAusTitel,
   chatKey,
   urlFuerObjekt,
