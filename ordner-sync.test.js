@@ -95,6 +95,28 @@ test("keyAusRelpfad lehnt Dot-Segmente und fremde Endungen ab", () => {
   assert.ok(keyAusRelpfad("GROSS.MD"));
 });
 
+// Haertungsrunde 2, Finding 2: Windows-Geraetenamen sind auf NTFS in jedem
+// Ordner reserviert und loesen beim Sync auf ein Windows-Geraet Fehler oder
+// Umleitungen aus. Und ohne Unicode-Normalisierung sehen Validator und
+// Dateisystem verschiedene Pfade (NFD vom Mac, NFC im Key).
+test("keyAusRelpfad lehnt Windows-Geraetenamen case-insensitiv ab", () => {
+  for (const pfad of ["CON.md", "com1.md", "ordner/NUL.canvas", "prn.md", "LPT9.md", "aux.canvas"]) {
+    assert.equal(keyAusRelpfad(pfad), null, `muss abgelehnt werden: ${pfad}`);
+  }
+  assert.ok(keyAusRelpfad("console.md"));
+  assert.ok(keyAusRelpfad("compendium1.md"));
+});
+
+test("keyAusRelpfad normalisiert NFD und NFC auf denselben Key", () => {
+  const nfc = "id\u00e9e.md";
+  const nfd = "ide\u0301e.md";
+  assert.notEqual(nfc, nfd);
+  const keyNfc = keyAusRelpfad(nfc);
+  const keyNfd = keyAusRelpfad(nfd);
+  assert.ok(keyNfc);
+  assert.equal(keyNfc, keyNfd);
+});
+
 test("planeOrdnerSync laedt nur Neues und Geaendertes hoch", () => {
   const plan = planeOrdnerSync({
     dateien: [

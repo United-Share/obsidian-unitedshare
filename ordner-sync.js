@@ -19,8 +19,13 @@ const NOTES_PRAEFIX = "obsidian/notes/";
 // Parser-Differential (Backslash, Laufwerks-Praefix, leere Segmente,
 // Windows-Normalisierung von Punkt/Leerzeichen am Ende) aus dem
 // Notes-Praefix herausfuehrt.
+// Reservierte NTFS-Basisnamen, in jedem Ordner und case-insensitiv.
+const GERAETENAMEN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
 function keyAusRelpfad(relpfad) {
-  const rel = String(relpfad ?? "");
+  // NFC vor Validierung und Key-Bau: Validator und Dateisystem muessen
+  // dieselbe Sicht haben (macOS liefert NFD, der Key traegt NFC).
+  const rel = String(relpfad ?? "").normalize("NFC");
   if (rel.length === 0 || rel.length > 400) return null;
   if (/[\u0000-\u001f\u007f]/.test(rel)) return null;
   if (rel.includes("\\")) return null;
@@ -32,6 +37,7 @@ function keyAusRelpfad(relpfad) {
     // Dot-Segmente sind tabu: .obsidian/plugins waere Codeausfuehrung.
     if (segment.startsWith(".")) return null;
     if (segment.endsWith(".") || segment.endsWith(" ")) return null;
+    if (GERAETENAMEN.test(segment)) return null;
   }
   // Second-Brain-Zuschnitt: nur Markdown und Canvas werden gesynct.
   if (!/\.(md|canvas)$/i.test(segmente[segmente.length - 1])) return null;
