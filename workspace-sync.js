@@ -97,8 +97,17 @@ function chatKey(eintrag, kennungFn = kennungStandard) {
   const iso = Number.isNaN(zeitpunkt.getTime()) ? "1970-01-01T00:00:00.000Z" : zeitpunkt.toISOString();
   const tag = iso.slice(0, 10);
   const stunde = iso.slice(11, 16).replace(":", "");
-  const slug = slugAusTitel(eintrag && eintrag.title).slice(0, 80);
-  return `${CHATS_PRAEFIX}${tag}-${stunde}-${kennungFn(eintrag && eintrag.id)}-${slug}.json`;
+  let kennung = String(kennungFn(eintrag && eintrag.id) ?? "");
+  let slug = slugAusTitel(eintrag && eintrag.title).slice(0, 80);
+  // Z3: Kennung plus Slug unter die 255-Byte-Segmentgrenze kuerzen (der
+  // Slug zuerst, die Kennung behaelt mindestens acht Zeichen) und das
+  // Ergebnis mit DERSELBEN Pruefung validieren wie die Rueckholung. Ein
+  // Key, der nicht rueckholbar waere, wird nie gebaut.
+  const segmentVon = () => `${tag}-${stunde}-${kennung}-${slug}.json`;
+  while (utf8ByteLength(segmentVon()) > 255 && slug.length > 1) slug = slug.slice(0, -1);
+  while (utf8ByteLength(segmentVon()) > 255 && kennung.length > 8) kennung = kennung.slice(0, -1);
+  const key = `${CHATS_PRAEFIX}${segmentVon()}`;
+  return keyPruefen(CHATS_PRAEFIX, key, ["json"]) ? key : null;
 }
 
 function basis(baseUrl) {
@@ -352,7 +361,12 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     melde("Workspace-Spiegel aus: Transport nicht baubar");
     return { ergebnis: "keine-basis", nachgeholt: 0 };
   }
-  const key = chatKey(eintrag);
+  const key = chatKey(eintrag, typeof ctx.kennungFn === "function" ? ctx.kennungFn : undefined);
+  if (key === null) {
+    protokolliere({ key: "", status: 0, meldung: "ungueltiger-key" });
+    melde("Workspace-Spiegel verworfen: Key nicht baubar");
+    return { ergebnis: "verworfen", nachgeholt: 0 };
+  }
   const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
 
   // K3: defensive Defaults, ein leerer Zustand wirft nicht.
@@ -476,10 +490,12 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
 // S2: das Listing ist fremde Eingabe; Keys laufen durch dieselbe
 // Segmentpruefung wie der Ordner-Sync. Der lokale Dateiname wird ohnehin
 // NIE aus dem Remote-Key abgeleitet (siehe Integrationsdoku).
+// Z3: nur noch json; der Inhalt der Chats IST JSON, md-Keys im Listing
+// sind Fremdkoerper.
 function wiederherstellbareChats(items) {
   return (Array.isArray(items) ? items : [])
     .map((o) => o && o.key)
-    .filter((k) => keyPruefen(CHATS_PRAEFIX, k, ["json", "md"]))
+    .filter((k) => keyPruefen(CHATS_PRAEFIX, k, ["json"]))
     .sort();
 }
 

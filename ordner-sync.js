@@ -180,18 +180,16 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (!relpfadGueltig(pfad, ENDUNGEN)) {
     return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
   }
-  // K7: case-insensitiv befragen. Auf APFS und NTFS belegt readme.md den
-  // Namen README.md; wer nur exakt fragt, legt an und ueberschreibt.
-  const befrage = (p) => {
-    if (existiert(p)) return true;
-    const klein = p.toLowerCase();
-    return klein !== p ? Boolean(existiert(klein)) : false;
-  };
+  // Z2: der existiert-Vertrag ist DATEISYSTEMTREU (adapter.exists ist auf
+  // APFS und NTFS case-insensitiv); die fruehere toLowerCase-Kruecke haette
+  // nur einen Teil der Falt-Kollisionen erwischt und die Verantwortung
+  // verschleiert. Zwei Keys mit identischem Casefold sind damit derselbe
+  // Zielpfad: existiert liefert fuer beide dasselbe Urteil.
   let vorhanden;
   try {
-    vorhanden = befrage(pfad);
+    vorhanden = Boolean(existiert(pfad));
   } catch (_fehler) {
-    return konfliktErgebnis(pfad, befrage);
+    return konfliktErgebnis(pfad, existiert);
   }
   const lesbar = lokalText !== null && lokalText !== undefined;
   if (!vorhanden && !lesbar) {
@@ -200,7 +198,7 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (vorhanden && lesbar && lokalText === remoteText) {
     return { aktion: "unveraendert", zielPfad: pfad };
   }
-  return konfliktErgebnis(pfad, befrage);
+  return konfliktErgebnis(pfad, existiert);
 }
 
 // Begrenzte, fail-closed Namenssuche fuer die Konfliktkopie, Namensschema
@@ -252,8 +250,13 @@ function konfliktErgebnis(pfad, existiert) {
     }
   }
   // Grenze erschoepft: unerprobter Kandidat jenseits der Grenze, nur mit
-  // exklusivem Anlegen zu schreiben.
-  return { aktion: "konflikt", zielPfad: kandidatFuer(KONFLIKT_SUCHGRENZE + 1), bestaetigungErforderlich: true };
+  // exklusivem Anlegen zu schreiben. Z4: auch er besteht die Pfadpruefung
+  // oder das Ergebnis ist abgelehnt.
+  const grenzKandidat = kandidatFuer(KONFLIKT_SUCHGRENZE + 1);
+  if (!relpfadGueltig(grenzKandidat, ENDUNGEN)) {
+    return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
+  }
+  return { aktion: "konflikt", zielPfad: grenzKandidat, bestaetigungErforderlich: true };
 }
 
 // S7: der Index kommt deserialisiert aus den Plugin-Daten und ist damit

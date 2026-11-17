@@ -75,6 +75,27 @@ test("chatKey vertraegt Date, Millisekunden und Muell als erstellt", () => {
   assert.ok(chatKey(muell).startsWith("obsidian/chats/1970-01-01-0000-xy-"));
 });
 
+// Gate-Runde 2, Z3: chatKey validiert sein Ergebnis selbst mit derselben
+// Pruefung wie die Rueckholung und kuerzt Kennung plus Slug unter die
+// 255-Byte-Segmentgrenze. Ein Key, der nicht rueckholbar waere, wird nie
+// geschrieben.
+test("chatKey kuerzt unter die Segmentgrenze und bleibt rueckholbar", () => {
+  const monster = { title: "T".repeat(120), erstellt: "2026-11-17T09:15:00Z", id: "K".repeat(452), messages: [{}] };
+  const key = chatKey(monster);
+  assert.ok(key, "muss trotz Monster-Kennung einen Key liefern");
+  const segment = key.split("/").pop();
+  assert.ok(Buffer.byteLength(segment, "utf8") <= 255, String(Buffer.byteLength(segment, "utf8")));
+  assert.deepEqual(wiederherstellbareChats([{ key, size: 1 }]), [key], "rueckholbar");
+});
+
+test("wiederherstellbareChats akzeptiert nur noch json", () => {
+  const items = [
+    { key: "obsidian/chats/2026-11-15-0900-alt-chat.md", size: 1 },
+    { key: "obsidian/chats/2026-11-17-1200-neu-chat.json", size: 2 },
+  ];
+  assert.deepEqual(wiederherstellbareChats(items), ["obsidian/chats/2026-11-17-1200-neu-chat.json"]);
+});
+
 test("chatKey deckelt den Titel-Slug auf 80 Zeichen", () => {
   const lang = { title: "w".repeat(200), erstellt: "2026-11-17T00:00:00Z", id: "l1", messages: [{}] };
   const slugTeil = chatKey(lang).split("-l1-")[1];
@@ -1054,21 +1075,18 @@ test("wiederherstellbareChats verwirft Angriffs-Keys aus dem Listing", () => {
     { key: "obsidian/chats/2026-11-17-1200-abc.json", size: 5 },
     { key: "obsidian/chats/2026-11-15-alt.md", size: 6 },
   ];
-  assert.deepEqual(wiederherstellbareChats(items), [
-    "obsidian/chats/2026-11-15-alt.md",
-    "obsidian/chats/2026-11-17-1200-abc.json",
-  ]);
+  assert.deepEqual(wiederherstellbareChats(items), ["obsidian/chats/2026-11-17-1200-abc.json"]);
 });
 
 test("wiederherstellbareChats filtert auf den Chat-Praefix und sortiert", () => {
   const items = [
-    { key: "obsidian/notes/a.md", size: 1 },
-    { key: "obsidian/chats/2026-11-17-b.md", size: 2 },
-    { key: "obsidian/chats/2026-11-15-a.md", size: 3 },
-    { key: "anderes/x.md", size: 4 },
+    { key: "obsidian/notes/a.json", size: 1 },
+    { key: "obsidian/chats/2026-11-17-b.json", size: 2 },
+    { key: "obsidian/chats/2026-11-15-a.json", size: 3 },
+    { key: "anderes/x.json", size: 4 },
   ];
   assert.deepEqual(wiederherstellbareChats(items), [
-    "obsidian/chats/2026-11-15-a.md",
-    "obsidian/chats/2026-11-17-b.md",
+    "obsidian/chats/2026-11-15-a.json",
+    "obsidian/chats/2026-11-17-b.json",
   ]);
 });

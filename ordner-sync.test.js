@@ -371,6 +371,26 @@ test("keyAusRelpfad lehnt NFKC-faltbare und NFKC-resistente Doppelgaenger ab", (
   assert.ok(keyAusRelpfad("Ideen/Caf\u00e9 Plan \u00e4\u00f6\u00fc.md"), "Umlaute bleiben erlaubt");
 });
 
+// Gate-Runde 2, Z1: restliche Zeichenklassen. Steuerzeichen jenseits
+// ASCII (Cc), unzugewiesene Codepoints (Cn), Variation Selectors und
+// fuehrende oder reine Combining Marks tarnen Keys gegenueber dem
+// Dateisystem.
+test("keyAusRelpfad lehnt Steuerzeichen, Unzugewiesenes, Variation Selectors und Mark-Spielereien ab", () => {
+  const faelle = [
+    "notes/nel\u0085.md",
+    "notes/apc\u009f.md",
+    "notes/emoji\ufe0f.md",
+    "notes/supplement\u{e0101}b.md",
+    "notes/\u0301fuehrend.md",
+    "notes/\u0301\u0302.md",
+    "notes/unzugewiesen\u0378.md",
+  ];
+  for (const pfad of faelle) {
+    assert.equal(keyAusRelpfad(pfad), null, JSON.stringify(pfad));
+  }
+  assert.ok(keyAusRelpfad("notes/ganz normal \u00e4\u00f6\u00fc.md"));
+});
+
 test("keyAusRelpfad deckelt Segmente auf 255 UTF-8-Bytes", () => {
   const genauAmLimit = "a".repeat(252) + ".md";
   assert.ok(keyAusRelpfad(genauAmLimit), "255 Bytes exakt sind erlaubt");
@@ -556,14 +576,34 @@ test("persistiertes laufend-Flag blockiert keinen neuen Lauf", () => {
   assert.equal(laufStarten(geladen), true);
 });
 
-test("existiert wird case-insensitiv befragt (APFS)", () => {
-  const e = eingehendeNotiz({
-    relpfad: "README.md",
+// Gate-Runde 2, Z2: der existiert-Vertrag ist DATEISYSTEMTREU, also auf
+// APFS und NTFS case-insensitiv; die fruehere toLowerCase-Kruecke im Modul
+// ist entfernt. Zwei Keys mit identischem Casefold sind derselbe Zielpfad.
+test("case-kollidierende Pfade ergeben nie stilles Anlegen (APFS-Faelle)", () => {
+  const dateisystemtreu = (bestand) => (p) => bestand.some((b) => b.toLowerCase() === String(p).toLowerCase());
+  const faelle = [
+    { relpfad: "README.md", bestand: ["readme.md"] },
+    { relpfad: "Readme.MD", bestand: ["readme.md"] },
+    { relpfad: "Ideen/NEU.md", bestand: ["Ideen/neu.md"] },
+    { relpfad: "ideen/neu.md", bestand: ["Ideen/Neu.md"] },
+    { relpfad: "A.md", bestand: ["a.md"] },
+  ];
+  for (const fall of faelle) {
+    const e = eingehendeNotiz({
+      relpfad: fall.relpfad,
+      remoteText: "Remote",
+      lokalText: null,
+      existiert: dateisystemtreu(fall.bestand),
+    });
+    assert.equal(e.aktion, "konflikt", fall.relpfad);
+  }
+  const frei = eingehendeNotiz({
+    relpfad: "wirklich-neu.md",
     remoteText: "Remote",
     lokalText: null,
-    existiert: (p) => p === "readme.md",
+    existiert: dateisystemtreu(["anderes.md"]),
   });
-  assert.equal(e.aktion, "konflikt", "readme.md belegt den Namen auf APFS");
+  assert.equal(frei.aktion, "anlegen");
 });
 
 // Nacharbeit S1: eingehendeNotiz verlaesst sich nicht darauf, dass der
@@ -634,6 +674,7 @@ test("erschoepfte Suchgrenze ergibt bestaetigungErforderlich mit unerprobtem Kan
   assert.equal(e.aktion, "konflikt");
   assert.equal(e.bestaetigungErforderlich, true);
   assert.equal(e.zielPfad, "Ideen/uebervoll (Konflikt 101).md");
+  assert.ok(keyAusRelpfad(e.zielPfad), "auch der Grenzkandidat besteht die Pfadpruefung");
   assert.ok(proben <= 102, `Suchgrenze verletzt: ${proben} Proben`);
 });
 

@@ -36,7 +36,13 @@ function utf8ByteLength(text) {
 // Leerraum am Segmentrand (Zs, auch U+3000), getarnte Punkt- und
 // Slash-Varianten, Windows-Sonderzeichen, Prozent (Encoding-Differential)
 // und ueberlange Segmente (Dateisystem-Grenze 255 Bytes).
-const UNSICHTBAR = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
+// METHODIK (Z1): Die Regel ist die NFKC-Faltung gegen pfadbedeutsame
+// Zeichen plus Unicode-KATEGORIEN, keine Einzelzeichen-Listen. Aufgezaehlt
+// wird nur, was belegt durch beide Raster faellt (NFKC-resistente
+// Slash-Doppelgaenger, Variation Selectors als Mn-Sonderfall).
+const UNSICHTBAR = /[\p{Cf}\p{Cs}\p{Co}\p{Cc}\p{Cn}\p{Zl}\p{Zp}]/u;
+const VARIATION_SELECTORS = /[\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u;
+const MARK_AM_ANFANG = /^\p{M}/u;
 const RAND_LEERRAUM = /^\p{Zs}|\p{Zs}$/u;
 const WINDOWS_ZEICHEN = /[*?"<>|]/;
 // NFKC-resistente Slash-Doppelgaenger: normalize("NFKC") laesst U+2044
@@ -52,6 +58,10 @@ const PFADBEDEUTSAM = [".", "/", "\\", ":"];
 function segmentGueltig(segment) {
   if (segment.length === 0) return false;
   if (UNSICHTBAR.test(segment)) return false;
+  if (VARIATION_SELECTORS.test(segment)) return false;
+  // Eine fuehrende Combining Mark haengt sich an den Pfadtrenner; ein
+  // Segment NUR aus Marks faellt damit ebenfalls.
+  if (MARK_AM_ANFANG.test(segment)) return false;
   if (RAND_LEERRAUM.test(segment)) return false;
   if (WINDOWS_ZEICHEN.test(segment)) return false;
   if (segment.includes("%")) return false;
@@ -92,11 +102,9 @@ function relpfadGueltig(relRoh, endungen) {
   for (const segment of segmente) {
     if (!segmentGueltig(segment)) return false;
   }
-  const letzter = segmente[segmente.length - 1];
-  const endungOk = (Array.isArray(endungen) ? endungen : []).some((e) =>
-    new RegExp(`\\.${e}$`, "i").test(letzter)
-  );
-  return endungOk;
+  // Z4: endsWith statt unescaptem RegExp-Bau; kein Ausdruck, kein Cache.
+  const letzter = segmente[segmente.length - 1].toLowerCase();
+  return (Array.isArray(endungen) ? endungen : []).some((e) => letzter.endsWith("." + String(e).toLowerCase()));
 }
 
 /// Prueft einen vollen Key aus fremder Quelle gegen Praefix und Regeln.
