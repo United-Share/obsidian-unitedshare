@@ -201,6 +201,61 @@ test("objektLesen verwirft Riesen-Inhalte und NUL-Bytes fail-closed", async () =
   assert.equal(nul.grund, "unlesbar");
 });
 
+// S4-Nachtrag: Content-Length wird strikt geparst; ein nicht-dezimaler
+// oder mehrwertiger Header ist FEINDLICH und wird abgelehnt, nicht wie ein
+// fehlender behandelt. Und das Listing bekommt dieselbe Groessen-Schranke
+// wie das Objekt-Lesen plus einen Item-Deckel.
+test("feindliche Content-Length-Header werden abgelehnt statt ignoriert", async () => {
+  const faelle = [
+    { contentLength: "abc", grund: "unlesbar" },
+    { contentLength: "1,2", grund: "unlesbar" },
+    { contentLength: ` ${MAX_OBJEKT_BYTES + 1} `, grund: "zu-gross" },
+  ];
+  for (const fall of faelle) {
+    const e = await objektLesen(
+      {
+        baseUrl: "http://127.0.0.1:1/v1",
+        apiKey: "k",
+        fetchImpl: async () => fakeAntwort({ body: "klein", contentLength: fall.contentLength }),
+      },
+      "obsidian/chats/a.json"
+    );
+    assert.equal(e.text, null, fall.contentLength);
+    assert.equal(e.grund, fall.grund, fall.contentLength);
+  }
+});
+
+test("objekteListen deckelt Body-Groesse und Item-Anzahl", async () => {
+  const riesig = await objekteListen(
+    {
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "k",
+      fetchImpl: async () => {
+        const body = "x".repeat(MAX_OBJEKT_BYTES + 1);
+        return { status: 200, headers: { get: () => null }, text: async () => body };
+      },
+    },
+    CHATS_PRAEFIX
+  );
+  assert.deepEqual(riesig.items, []);
+  assert.equal(riesig.grund, "zu-gross");
+
+  const viele = {
+    bucket: "b",
+    items: Array.from({ length: 501 }, (_x, i) => ({ key: `obsidian/chats/${i}.json`, size: 1 })),
+  };
+  const gedeckelt = await objekteListen(
+    {
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "k",
+      fetchImpl: async () => fakeAntwort({ body: JSON.stringify(viele) }),
+    },
+    CHATS_PRAEFIX
+  );
+  assert.equal(gedeckelt.items.length, 500);
+  assert.equal(gedeckelt.grund, "gedeckelt");
+});
+
 // Nacharbeit S5: Body-Messung typfest nach dem utf8ByteLength-Hausmuster.
 // Alles ohne messbare Groesse wird fail-closed abgelehnt, bevor ein Request
 // entsteht; der Bundler-Buffer-Stub hat kein byteLength.

@@ -16,6 +16,8 @@ const CHATS_PRAEFIX = "obsidian/chats/";
 // Objektgrenze des Gateways. Am tatsaechlichen Body durchgesetzt
 // (Security-Finding 3), nicht nur an Metadaten.
 const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
+// S4-Nachtrag: Deckel fuer Listing-Items; Ueberschuss wird verworfen.
+const ITEM_DECKEL = 500;
 
 function slugAusTitel(titel) {
   const roh = String(titel ?? "").toLowerCase();
@@ -111,12 +113,17 @@ function bodyBytes(inhalt) {
   return null;
 }
 
+// S4-Nachtrag: strikt dezimal parsen. Ein nicht-dezimaler oder
+// mehrwertiger Header ist FEINDLICH (Smuggling-Geruch), nicht abwesend.
 function contentLengthVon(antwort) {
-  if (!antwort || !antwort.headers || typeof antwort.headers.get !== "function") return null;
+  if (!antwort || !antwort.headers || typeof antwort.headers.get !== "function") {
+    return { wert: null, feindlich: false };
+  }
   const roh = antwort.headers.get("content-length");
-  if (roh === null || roh === undefined) return null;
-  const n = Number(roh);
-  return Number.isFinite(n) && n >= 0 ? n : null;
+  if (roh === null || roh === undefined) return { wert: null, feindlich: false };
+  const s = String(roh).trim();
+  if (!/^\d+$/.test(s)) return { wert: null, feindlich: true };
+  return { wert: Number(s), feindlich: false };
 }
 
 async function objektSchreiben(ctx, key, inhalt) {
@@ -144,7 +151,10 @@ async function objektLesen(ctx, key) {
   });
   if (antwort.status !== 200) return { status: antwort.status, text: null };
   const angekuendigt = contentLengthVon(antwort);
-  if (angekuendigt !== null && angekuendigt > MAX_OBJEKT_BYTES) {
+  if (angekuendigt.feindlich) {
+    return { status: 200, text: null, grund: "unlesbar" };
+  }
+  if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
     return { status: 200, text: null, grund: "zu-gross" };
   }
   const text = await antwort.text();
@@ -164,17 +174,30 @@ async function objekteListen(ctx, praefix) {
   });
   if (antwort.status !== 200) return { status: antwort.status, items: [] };
   const angekuendigt = contentLengthVon(antwort);
-  if (angekuendigt !== null && angekuendigt > MAX_OBJEKT_BYTES) {
+  if (angekuendigt.feindlich) {
+    return { status: 200, items: [], grund: "unlesbar" };
+  }
+  if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
+    return { status: 200, items: [], grund: "zu-gross" };
+  }
+  // Dieselbe Schranke wie beim Objekt-Lesen: erst den Text messen, dann
+  // parsen. Ein echter Streaming-Abbruch braucht Transportunterstuetzung
+  // (requestUrl puffert nativ) und bleibt bewusste Grenze, siehe Doku.
+  const text = await antwort.text();
+  if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
     return { status: 200, items: [], grund: "zu-gross" };
   }
   let daten;
   try {
-    daten = await antwort.json();
+    daten = JSON.parse(text);
   } catch (_fehler) {
     return { status: 200, items: [], grund: "unlesbar" };
   }
   if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
     return { status: 200, items: [], grund: "unlesbar" };
+  }
+  if (daten.items.length > ITEM_DECKEL) {
+    return { status: 200, items: daten.items.slice(0, ITEM_DECKEL), grund: "gedeckelt" };
   }
   return { status: 200, items: daten.items };
 }
