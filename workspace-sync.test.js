@@ -430,17 +430,44 @@ test("die Protokoll-Nutzlast traegt zeit, status, meldung und basename", async (
   }
 });
 
-// Gate-Runde 2, T2: beim dokumentierten Inlining der Module in main.js
-// waere jede doppelte Top-Level-Deklaration ein harter SyntaxError.
-// utf8ByteLength und MAX_OBJEKT_BYTES leben deshalb NUR in key-pruefung,
-// und die Kennungsfunktion ist injizierbar statt kopiert.
-test("keine doppelten Top-Level-Namen in den Sync-Modulen", () => {
+// Gate-Runde 2, T2 und ARCHITECT-R1: beim Inlining in main.js waere jede
+// doppelte Top-Level-Deklaration mit const ein harter SyntaxError und bei
+// Funktionen ein stilles Gewinnen der letzten Fassung. Der Test berechnet
+// die Schnittmenge ALLER eingebetteten Top-Level-Bindings und repliziert
+// dabei die Strips des Bundlers (module.exports, require-Zeilen, die
+// Core-Fassung von utf8ByteLength).
+test("die eingebetteten Module teilen keine Top-Level-Bindings", () => {
   const nfs = require("node:fs");
-  const verboten = /^(const|function|class) (utf8ByteLength|MAX_OBJEKT_BYTES|chatKennung)\b/m;
-  for (const datei of ["workspace-sync.js", "ordner-sync.js"]) {
-    const quelle = nfs.readFileSync(require.resolve("./" + datei.replace(".js", "")), "utf8");
-    assert.ok(!verboten.test(quelle), datei + " dekliniert einen Core- oder Geschwisternamen erneut");
+  const lese = (name) => nfs.readFileSync(require.resolve("./" + name), "utf8");
+  const topLevel = (quelle) => {
+    const namen = new Set();
+    for (const m of quelle.matchAll(/^(?:const|let|var|class|function)\s+([A-Za-z_$][\w$]*)/gm)) namen.add(m[1]);
+    return namen;
+  };
+  const strippe = (quelle) =>
+    quelle
+      .replace(/^const \{[^}]*\} = require\("\.\/key-pruefung"\);$/m, "")
+      .replace(/\nmodule\.exports[\s\S]*$/, "");
+  const coreRoh = lese("unitedshare-core").replace(/\nmodule\.exports[\s\S]*$/, "");
+  const coreGestrippt = coreRoh.replace(/\nfunction utf8ByteLength\(text\) \{[\s\S]*?\n\}\n/, "\n");
+  const module = {
+    core: topLevel(coreGestrippt),
+    "key-pruefung": topLevel(strippe(lese("key-pruefung"))),
+    "workspace-sync": topLevel(strippe(lese("workspace-sync"))),
+    "ordner-sync": topLevel(strippe(lese("ordner-sync"))),
+  };
+  const namenZuModulen = new Map();
+  for (const [modul, namen] of Object.entries(module)) {
+    for (const name of namen) {
+      if (!namenZuModulen.has(name)) namenZuModulen.set(name, []);
+      namenZuModulen.get(name).push(modul);
+    }
   }
+  const kollisionen = [...namenZuModulen.entries()].filter(([, wo]) => wo.length > 1);
+  assert.deepEqual(kollisionen, [], JSON.stringify(kollisionen));
+  // Negativkontrolle: OHNE den utf8-Strip MUSS die Kollision sichtbar sein,
+  // sonst prueft der Test nichts.
+  assert.ok(topLevel(coreRoh).has("utf8ByteLength"), "Kontrolle: Core traegt die Funktion im Rohzustand");
 });
 
 test("die Byte-Grenze haelt auch ohne Buffer und TextEncoder (Euro-Beweis)", async () => {
@@ -1189,4 +1216,19 @@ test("wiederherstellbareChats filtert auf den Chat-Praefix und sortiert", () => 
     "obsidian/chats/2026-11-15-a.json",
     "obsidian/chats/2026-11-17-b.json",
   ]);
+});
+
+// DEVSECOPS-Nachreview: der Spiegel-Body ist die LOKALE Ablageform OHNE
+// Bildlast. ANLASS: Hook 1 spiegelte mit rohem JSON.stringify, umging damit
+// nachrichtOhneBildlast (Base64-Bilddaten gingen ans Gateway) und schickte
+// die Spiegel-Form (title) statt der lokalen Form (titel, geaendert, offen);
+// ein zurueckgeholter Chat waere unbeschriftet gewesen. WARUM Muster-Pruefung:
+// der Hook lebt in main.src.js und ist nicht als Modul ladbar; die
+// ausgelieferte main.js ist die pruefbare Wahrheit (Hausstil community-scan).
+test("Hook 1 spiegelt die lokale Form ueber die Core-Fassung chatAlsText", () => {
+  const nfs = require("node:fs");
+  const npath = require("node:path");
+  const main = nfs.readFileSync(npath.join(__dirname, "main.js"), "utf8");
+  assert.equal(main.includes("chatAlsText: (e) => JSON.stringify(e)"), false);
+  assert.equal(main.includes("chatAlsText: () => chatAlsText(eintrag)"), true);
 });

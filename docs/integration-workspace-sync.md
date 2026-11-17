@@ -169,3 +169,13 @@ Listings sind auf 500 Items gedeckelt und ab 50 als unvollstaendig
 markiert; die Warteschlange dedupliziert pro Key, nimmt keine Riesen an
 und verdraengt zuerst den groessten Eintrag; lokale Dateien werden nie
 stillschweigend ueberschrieben.
+
+## Offener Nachweis nach dem DEVSECOPS-Nachreview
+
+Nach den Korrekturen am Spiegel-Body (Core-Fassung chatAlsText statt
+rohem JSON.stringify) und an der Standdatei (Ordner-Bindung) ist EIN
+echter E2E-Durchlauf auf Desktop und Mobil faellig. Er dient als
+Content-Length-Nachweis: requestUrlAsFetch entfernt den Header bewusst,
+auf Mobile berechnet Capacitors natives requestUrl ihn selbst, auf
+Desktop der Browser-Fetch; dass das Gateway beide Varianten korrekt
+beantwortet, muss einmal real belegt werden.

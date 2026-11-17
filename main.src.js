@@ -2,9 +2,14 @@
 
 const { privateVorlageVorbereiten, privateAntwortAufloesen } = require("./privacy-template");
 const { rmxosEigenschaftenErsetzen } = require("./rmxos-template");
+// Workspace-Sync (Zuschnitte A und B): der Bundler ersetzt diese drei
+// Zeilen in Abhaengigkeitsreihenfolge durch die Modulquellen (Hook 0).
+const { MAX_OBJEKT_BYTES } = require("./key-pruefung");
+const { CHATS_PRAEFIX, transportBauen, chatSpiegeln, objektSchreiben, objektLesen, objekteListen, wiederherstellbareChats } = require("./workspace-sync");
+const { NOTES_PRAEFIX, laufStarten, laufBeenden, keyAusRelpfad, relpfadAusKey, planeOrdnerSync, eingehendeNotiz, indexNachSync } = require("./ordner-sync");
 
 const { FileView, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
-const { absichtLokal, adapterVaultHost, akzeptierePairing, applyComposerAnswer, assertLoopbackEmbedUrl, assertTailscaleAdresse, assertSyncRequest, assertVaultRelative, auftragSpalten, aufladenAdresse, bedieneSyncAnfrage, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, dateienAusTreffern, DUCKDB_ANSICHT_ENDUNGEN, duckdbDateiverweiseAusSql, duckdbLaufzeitLuecken, duckdbLaufzeitMeldung, duckdbSqlAusDatei, duckdbTabelleAusZeilen, duckdbVorschauAbfrage, erkenneICloudTresor, erkenneTailscaleAdresse, erzeugePairingAnfrage, erzeugePairingAngebot, executeVaultAction, fluentScriptAlsZeilen, fluentScriptKarten, fluentScriptParsen, fuehreSyncDurch, indexNachziehen, isObsidianModel, istDuckdbAnsichtEndung, keyboardCoverPx, konfliktDateiname, lanAdresseAusInterfaces, leiteSessionSchluesselAb, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, lokalText, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, mischeDateien, pairingEntschluesseln, pairingVerschluesseln, pairingVersuchErlaubt, pairingVersuchVermerken, PEER_SYNC_TOKEN_HEADER, prepareContextFiles, readIndexedOrHidden, readMeshInventory, runReemax, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, sucheImTresor, tresorIndexPfad, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
+const { absichtLokal, adapterVaultHost, akzeptierePairing, applyComposerAnswer, assertLoopbackEmbedUrl, assertTailscaleAdresse, assertSyncRequest, assertVaultRelative, auftragSpalten, aufladenAdresse, bedieneSyncAnfrage, bildAusKoerper, bytesFromB64, b64FromBytes, generateImage, CHAT_ORDNER, chatAlsText, chatDateiname, chatKennung, chatsLaden, chatSpeichern, completeMessages, composerDock, composerPrompt, composerViewState, debugLogSchreiben, dateienAusTreffern, DUCKDB_ANSICHT_ENDUNGEN, duckdbDateiverweiseAusSql, duckdbLaufzeitLuecken, duckdbLaufzeitMeldung, duckdbSqlAusDatei, duckdbTabelleAusZeilen, duckdbVorschauAbfrage, erkenneICloudTresor, erkenneTailscaleAdresse, erzeugePairingAnfrage, erzeugePairingAngebot, executeVaultAction, fluentScriptAlsZeilen, fluentScriptKarten, fluentScriptParsen, fuehreSyncDurch, indexNachziehen, isObsidianModel, istDuckdbAnsichtEndung, keyboardCoverPx, konfliktDateiname, lanAdresseAusInterfaces, leiteSessionSchluesselAb, limitMeldung, listIndexedOrHidden, listModels, loadMentionedNotes, loadNamedNotes, localObsidianCommand, lokalText, meshOptionLines, meshPossibilities, mermaidZumEinfuegen, mischeDateien, pairingEntschluesseln, pairingVerschluesseln, pairingVersuchErlaubt, pairingVersuchVermerken, PEER_SYNC_TOKEN_HEADER, prepareContextFiles, readIndexedOrHidden, readMeshInventory, runReemax, runVaultFile, runVaultInstruction, schrittText, sidebarPromptOpen, sucheImTresor, tresorIndexPfad, UnitedShareError, verbrauchKompakt, verbrauchProzent, verbrauchZeile, viewSitsUnderKeyboard, visibleStreamText, wikilinkAusPfad } = require("./unitedshare-core");
 
 // Ein 400 oder eine leere Antwort tritt "ab und zu" auf -- meist ohne offene
 // Entwicklerkonsole. console.error bleibt das Erste, aber das Fehlerprotokoll
@@ -251,6 +256,8 @@ const DEFAULT_SETTINGS = {
   embedModel: "",
   absichtModell: "",
   requireWriteConfirm: true,
+  secondBrainOrdner: "",
+  workspaceSyncWarteschlange: [],
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
@@ -441,13 +448,44 @@ function requestUrlAsFetch() {
       if (key.toLowerCase() === "content-length") continue;
       headers[key] = given[key];
     }
-    const res = await requestUrl({
+    // Obsidians requestUrl kennt kein Abort. init.signal wird trotzdem
+    // eingeloest: der Wrapper bricht per Race ab, der native Request laeuft
+    // ins Leere aus (dokumentierte Transportgrenze). Ohne das wuerde die
+    // Frist aus workspace-sync (mitFrist) nie greifen.
+    const anfrage = requestUrl({
       url,
       method: init.method,
       headers,
       body: init.body,
       throw: false,
     });
+    let res;
+    if (init && init.signal) {
+      if (init.signal.aborted) {
+        const abbruch = new Error("abgebrochen");
+        abbruch.name = "AbortError";
+        // anfrage laeuft weiter; ohne Beobachter wuerde eine spaetere
+        // Ablehnung als unbeobachtete Rejection knallen.
+        anfrage.catch(() => {});
+        throw abbruch;
+      }
+      res = await Promise.race([
+        anfrage,
+        new Promise((_aufloesen, ablehnen) => {
+          init.signal.addEventListener(
+            "abort",
+            () => {
+              const abbruch = new Error("abgebrochen");
+              abbruch.name = "AbortError";
+              ablehnen(abbruch);
+            },
+            { once: true }
+          );
+        }),
+      ]);
+    } else {
+      res = await anfrage;
+    }
     const wrapped = {
       ok: res.status >= 200 && res.status < 300,
       status: res.status,
@@ -1691,6 +1729,324 @@ class UnitedShareView extends ItemView {
       // das diese Ablage loesen soll.
       console.error("UnitedShare: das Gespräch ließ sich nicht ablegen.", error);
     }
+    try {
+      // Hook 1: Spiegel in den Vault-Workspace. Eigener try/catch, die
+      // Spiegelung darf das lokale Speichern nie mitreissen.
+      await this.spiegleChatInWorkspace(eintrag, adapter);
+    } catch (fehler) {
+      console.error("UnitedShare: Workspace-Spiegel fehlgeschlagen.", fehler);
+    }
+  }
+
+  async spiegleChatInWorkspace(eintrag, adapter) {
+    const zustand = this.workspaceSyncZustand;
+    if (!zustand) return;
+    const ergebnis = await chatSpiegeln(
+      {
+        settings: this.settings,
+        fetchImpl: requestUrlAsFetch(),
+        // DEVSECOPS: der Spiegel-Body ist die LOKALE Ablageform OHNE
+        // Bildlast; die Core-Fassung chatAlsText wendet
+        // nachrichtOhneBildlast an. Der Eintrag im zweiten Parameter
+        // unten liefert chatSpiegeln nur Slug-Quelle und Leerpruefung.
+        chatAlsText: () => chatAlsText(eintrag),
+        kennungFn: chatKennung,
+        status: () => {},
+        protokoll: (nutzlast) => {
+          void debugLogSchreiben(adapter || this.chatAdapter(), nutzlast);
+        },
+      },
+      // title ist hier NUR Slug-Quelle, messages NUR Leerpruefung; der
+      // gespiegelte Body kommt aus chatAlsText des Original-Eintrags oben.
+      { title: eintrag.titel, erstellt: eintrag.erstellt, id: eintrag.id, messages: eintrag.messages },
+      zustand
+    );
+    // Reaktionen laut Ergebnis-Union der Integrationsdoku: aufgeschoben und
+    // gespiegelt persistieren den Zustand UNBEDINGT (Versuchszaehler und
+    // Verdraengungen leben in den Eintraegen); alles andere ist still und
+    // steht im Protokoll.
+    if (ergebnis.ergebnis === "aufgeschoben" || ergebnis.ergebnis === "gespiegelt") {
+      await this.speichereWorkspaceZustand();
+    }
+    return ergebnis;
+  }
+
+  async speichereWorkspaceZustand() {
+    this.settings.workspaceSyncWarteschlange = this.workspaceSyncZustand.warteschlange;
+    await this.saveSettings();
+  }
+
+  async stelleChatsAusWorkspaceWieder() {
+    const ctx = transportBauen({ settings: this.settings, fetchImpl: requestUrlAsFetch() });
+    if (!ctx) {
+      new Notice("UnitedShare: API-Key oder Basis-URL sind fuer den Workspace unbrauchbar.");
+      return;
+    }
+    const adapter = this.chatAdapter();
+    if (!adapter) {
+      new Notice("UnitedShare: kein Tresor-Zugriff.");
+      return;
+    }
+    const listing = await objekteListen(ctx, CHATS_PRAEFIX);
+    if (listing.status !== 200) {
+      new Notice(`UnitedShare: Workspace nicht erreichbar (Status ${listing.status}).`);
+      return;
+    }
+    if (listing.vollstaendig === false) {
+      new Notice("UnitedShare: Das Workspace-Listing ist unvollstaendig, aeltere Chats koennen fehlen.");
+    }
+    let geholt = 0;
+    let uebersprungen = 0;
+    for (const key of wiederherstellbareChats(listing.items)) {
+      const antwort = await objektLesen(ctx, key);
+      if (antwort.status !== 200 || antwort.text === null) {
+        uebersprungen += 1;
+        continue;
+      }
+      let chat;
+      try {
+        chat = JSON.parse(antwort.text);
+      } catch (_fehler) {
+        uebersprungen += 1;
+        continue;
+      }
+      // Der lokale Dateiname kommt NIE aus dem Remote-Key, sondern aus dem
+      // Inhalt (erstellt plus Kennung, dasselbe Muster wie chatSpeichern).
+      const pfad = `${CHAT_ORDNER}/${chatDateiname(chat)}`;
+      // exists plus exklusiv: .vault ist versteckt, dort gibt es nur den
+      // Adapter (vault.create kann keine versteckten Pfade); die
+      // exists-Pruefung direkt vor dem Schreiben ist das exklusivste, was
+      // der Adapter hergibt, und NUR lokal fehlende Chats werden angelegt.
+      if (await adapter.exists(pfad)) {
+        uebersprungen += 1;
+        continue;
+      }
+      await adapter.write(pfad, antwort.text);
+      geholt += 1;
+    }
+    new Notice(`UnitedShare: ${geholt} Chats geholt, ${uebersprungen} uebersprungen.`);
+  }
+
+  async syncSecondBrainOrdner() {
+    const ordner = String(this.settings.secondBrainOrdner || "").trim().replace(/\/+$/, "");
+    if (!ordner) {
+      new Notice("UnitedShare: kein Second-Brain-Ordner gesetzt (Einstellungen).");
+      return;
+    }
+    if (!this.secondBrainLock) this.secondBrainLock = {};
+    if (!laufStarten(this.secondBrainLock)) {
+      new Notice("UnitedShare: ein Second-Brain-Sync laeuft bereits.");
+      return;
+    }
+    try {
+      const ctx = transportBauen({ settings: this.settings, fetchImpl: requestUrlAsFetch() });
+      if (!ctx) {
+        new Notice("UnitedShare: API-Key oder Basis-URL sind fuer den Workspace unbrauchbar.");
+        return;
+      }
+      const adapter = this.chatAdapter();
+      if (!adapter) {
+        new Notice("UnitedShare: kein Tresor-Zugriff.");
+        return;
+      }
+      const listing = await objekteListen(ctx, NOTES_PRAEFIX);
+      if (listing.status !== 200) {
+        new Notice(`UnitedShare: Workspace nicht erreichbar (Status ${listing.status}).`);
+        return;
+      }
+      const vollstaendig = listing.vollstaendig === true;
+
+      const standPfad = ".vault/second-brain-sync.json";
+      let stand = {};
+      try {
+        if (await adapter.exists(standPfad)) stand = JSON.parse(await adapter.read(standPfad));
+      } catch (_fehler) {
+        stand = {};
+      }
+      if (!stand || typeof stand !== "object") stand = {};
+      stand.index = stand.index && typeof stand.index === "object" ? stand.index : {};
+      stand.remoteStand = stand.remoteStand && typeof stand.remoteStand === "object" ? stand.remoteStand : {};
+      stand.meta = stand.meta && typeof stand.meta === "object" ? stand.meta : {};
+      // Der Stand gehoert zu GENAU einem Ordner. Nach einem
+      // Setting-Wechsel traefe ein alter Index auf den falschen
+      // Teilbaum, darum wird er bei Abweichung verworfen.
+      if (stand.meta.ordner !== ordner) {
+        stand.index = {};
+        stand.remoteStand = {};
+      }
+      stand.meta.ordner = ordner;
+
+      const sha256Hex = async (text) => {
+        const bytes = new TextEncoder().encode(text);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return Array.from(new Uint8Array(digest))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+      };
+
+      // existiert ist DATEISYSTEMTREU (case-insensitiv wie APFS/NTFS) und
+      // synchron: casefold-Menge aller Tresorpfade.
+      // Community-Scan: das Plugin listet NIE den ganzen Tresor auf
+      // (die Vault-weiten Listenaufrufe sind gemeldete Pruef-Muster).
+      // Es laeuft ausschliesslich der gewaehlte Ordner-Teilbaum.
+      const vault = this.app.vault;
+      const wurzel = vault.getAbstractFileByPath(ordner);
+      if (!wurzel || !Array.isArray(wurzel.children)) {
+        new Notice(`UnitedShare: der Ordner ${ordner} existiert nicht im Tresor.`);
+        return;
+      }
+      const ordnerDateien = [];
+      const stapel = [wurzel];
+      while (stapel.length) {
+        const knoten = stapel.pop();
+        for (const kind of knoten.children) {
+          if (Array.isArray(kind.children)) stapel.push(kind);
+          else ordnerDateien.push(kind);
+        }
+      }
+      const belegt = new Set(ordnerDateien.map((f) => String(f.path).toLowerCase()));
+      const existiert = (rel) => belegt.has(`${ordner}/${rel}`.toLowerCase());
+
+      const protokoll = (nutzlast) => {
+        void debugLogSchreiben(adapter, nutzlast);
+      };
+
+      // PULL mit Konfliktbehandlung, dann erst PUSH.
+      let angelegt = 0;
+      let konfliktKopien = 0;
+      let nachfragen = 0;
+      for (const objekt of listing.items) {
+        const rel = relpfadAusKey(objekt && objekt.key);
+        if (rel === null) continue;
+        const antwort = await objektLesen(ctx, objekt.key);
+        if (antwort.status !== 200 || antwort.text === null) continue;
+        stand.remoteStand[rel] = { size: objekt.size, hash: await sha256Hex(antwort.text) };
+        const voll = `${ordner}/${rel}`;
+        let lokalText = null;
+        if (existiert(rel)) {
+          try {
+            lokalText = await vault.adapter.read(voll);
+          } catch (_fehler) {
+            lokalText = null;
+          }
+        }
+        const entscheidung = eingehendeNotiz({ relpfad: rel, remoteText: antwort.text, lokalText, existiert });
+        if (entscheidung.aktion === "anlegen") {
+          const ordnerTeil = voll.split("/").slice(0, -1).join("/");
+          if (ordnerTeil) {
+            try {
+              await vault.createFolder(ordnerTeil);
+            } catch (_fehler) {
+              // Ordner existiert schon.
+            }
+          }
+          try {
+            // O-EXCL: vault.create wirft bei Existenz.
+            await vault.create(voll, antwort.text);
+            belegt.add(voll.toLowerCase());
+            angelegt += 1;
+          } catch (_fehler) {
+            protokoll({ zeit: Date.now(), status: 0, meldung: "anlegen-kollidiert", body: rel.split("/").pop() });
+          }
+        } else if (entscheidung.aktion === "konflikt") {
+          if (entscheidung.bestaetigungErforderlich) {
+            nachfragen += 1;
+            protokoll({ zeit: Date.now(), status: 0, meldung: "konflikt-nachfrage", body: rel.split("/").pop() });
+            continue;
+          }
+          const zielVoll = `${ordner}/${entscheidung.zielPfad}`;
+          try {
+            await vault.create(zielVoll, antwort.text);
+            belegt.add(zielVoll.toLowerCase());
+            konfliktKopien += 1;
+          } catch (_fehler) {
+            protokoll({ zeit: Date.now(), status: 0, meldung: "konflikt-kollidiert", body: rel.split("/").pop() });
+          }
+        }
+      }
+
+      // PUSH haengt am Feature-Gate Listing vollstaendig (REVIEWER-R13).
+      let hochgeladenAnzahl = 0;
+      let abweichungen = 0;
+      if (!vollstaendig) {
+        new Notice(
+          "UnitedShare: Das Gateway lieferte ein unvollstaendiges Listing (mehr als 50 Objekte). " +
+            "Hochladen ist deaktiviert, bis das Gateway Paginierung kann; Herunterladen und Konflikte liefen normal."
+        );
+      } else {
+        const dateien = [];
+        const neueMeta = {};
+        for (const datei of ordnerDateien) {
+          if (!datei.path.startsWith(`${ordner}/`)) continue;
+          const rel = datei.path.slice(ordner.length + 1);
+          if (keyAusRelpfad(rel) === null) continue;
+          neueMeta[rel] = { mtime: datei.stat.mtime, size: datei.stat.size };
+          if (datei.stat.size > MAX_OBJEKT_BYTES) {
+            // Vorfilter: gar nicht erst hashen; der Plan meldet zu-gross.
+            dateien.push({ pfad: rel, hash: "uebergross-nicht-gehasht", groesse: datei.stat.size });
+            continue;
+          }
+          const meta = stand.meta[rel];
+          let hash;
+          if (meta && meta.mtime === datei.stat.mtime && meta.size === datei.stat.size && stand.index[rel]) {
+            // Vorfilter mtime plus groesse: unveraenderte Dateien behalten
+            // ihren Index-Hash ohne erneutes Lesen.
+            hash = stand.index[rel];
+          } else {
+            hash = await sha256Hex(await vault.cachedRead(datei));
+          }
+          dateien.push({ pfad: rel, hash, groesse: datei.stat.size });
+        }
+        const plan = planeOrdnerSync({
+          dateien,
+          index: stand.index,
+          entfernt: listing.items,
+          remoteStand: stand.remoteStand,
+          listingVollstaendig: vollstaendig,
+        });
+        for (const u of plan.uebersprungen) {
+          protokoll({ zeit: Date.now(), status: 0, meldung: u.grund, body: u.pfad.split("/").pop() });
+        }
+        for (const a of plan.remoteAbweichung) {
+          protokoll({ zeit: Date.now(), status: 0, meldung: a.grund || "remote-abweichung", body: a.pfad.split("/").pop() });
+        }
+        abweichungen = plan.remoteAbweichung.length;
+        // Upload-Parallelitaet 3.
+        const hochgeladen = [];
+        let naechster = 0;
+        const arbeiter = Array.from({ length: 3 }, async () => {
+          while (naechster < plan.hochladen.length) {
+            const auftrag = plan.hochladen[naechster];
+            naechster += 1;
+            let inhalt;
+            try {
+              inhalt = await vault.adapter.read(`${ordner}/${auftrag.pfad}`);
+            } catch (_fehler) {
+              continue;
+            }
+            const r = await objektSchreiben(ctx, keyAusRelpfad(auftrag.pfad), inhalt);
+            if (r.ok) {
+              hochgeladen.push(auftrag);
+              stand.remoteStand[auftrag.pfad] = { size: auftrag.groesse, hash: auftrag.hash };
+            } else {
+              protokoll({ zeit: Date.now(), status: r.status, meldung: r.grund || "upload-fehlgeschlagen", body: auftrag.pfad.split("/").pop() });
+            }
+          }
+        });
+        await Promise.all(arbeiter);
+        hochgeladenAnzahl = hochgeladen.length;
+        stand.index = indexNachSync(stand.index, hochgeladen);
+        stand.meta = neueMeta;
+      }
+
+      await adapter.write(standPfad, JSON.stringify(stand));
+      const teile = [`${angelegt} neu`, `${konfliktKopien} Konfliktkopien`, `${hochgeladenAnzahl} hochgeladen`];
+      if (abweichungen) teile.push(`${abweichungen} Remote-Abweichungen`);
+      if (nachfragen) teile.push(`${nachfragen} brauchen Bestaetigung`);
+      new Notice(`UnitedShare Second-Brain: ${teile.join(", ")}.`);
+    } finally {
+      laufBeenden(this.secondBrainLock);
+    }
   }
 
   async chatsWiederherstellen() {
@@ -2602,6 +2958,16 @@ class UnitedShareSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "Prompt" });
     new Setting(containerEl)
+      .setName("Second-Brain-Ordner")
+      .setDesc("Relativer Ordner, der in den Vault-Workspace synchronisiert wird (nur .md und .canvas). Leer = aus.")
+      .addText((text) => {
+        text.setValue(this.plugin.settings.secondBrainOrdner || "");
+        text.onChange(async (value) => {
+          this.plugin.settings.secondBrainOrdner = String(value || "").trim();
+          await this.plugin.saveSettings();
+        });
+      });
+    new Setting(containerEl)
       .setName("Bildordner")
       .setDesc("Relativer Ordner im Tresor. Leer oder ungültig setzt UnitedShare/bilder.")
       .addText((text) => {
@@ -3136,6 +3502,16 @@ module.exports = class UnitedSharePlugin extends Plugin {
       id: "vault-index-bge",
       name: "Tresor-Index für bge-m3 nachziehen",
       callback: () => this.tresorIndexNachziehen(),
+    });
+    this.addCommand({
+      id: "workspace-chats-wiederherstellen",
+      name: "UnitedShare: Chats aus dem Workspace wiederherstellen",
+      callback: () => this.stelleChatsAusWorkspaceWieder(),
+    });
+    this.addCommand({
+      id: "second-brain-sync",
+      name: "UnitedShare: Second-Brain-Ordner synchronisieren",
+      callback: () => this.syncSecondBrainOrdner(),
     });
     this.app.workspace.onLayoutReady(() => {
       void this.openSidebar();
@@ -4350,6 +4726,11 @@ module.exports = class UnitedSharePlugin extends Plugin {
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (!Array.isArray(this.settings.workspaceSyncWarteschlange)) this.settings.workspaceSyncWarteschlange = [];
+    // Der Spiegel-Zustand teilt sich das Array mit den Settings (data.json);
+    // laufend-Zustaende leben in WeakSets der Module und werden NIE
+    // persistiert.
+    this.workspaceSyncZustand = { warteschlange: this.settings.workspaceSyncWarteschlange };
     if (!isObsidianModel(this.settings.model)) this.settings.model = "";
     this.settings.embedModel = String(this.settings.embedModel || "").trim();
     this.settings.absichtModell = String(this.settings.absichtModell || "").trim();

@@ -131,6 +131,913 @@ function rmxosEigenschaftenErsetzen(ketten, frontmatter) {
     })),
   }));
 }
+// Workspace-Sync (Zuschnitte A und B): der Bundler ersetzt diese drei
+// Zeilen in Abhaengigkeitsreihenfolge durch die Modulquellen (Hook 0).
+// Gemeinsame Pfad- und Key-Pruefung fuer den Workspace-Sync (Zuschnitte A
+// und B). Eine einzige Segmentpruefung fuer beide Richtungen: lokale
+// Relpfade, die zu Keys werden (ordner-sync.keyAusRelpfad), und Keys aus
+// dem Netz, die gelistet werden (workspace-sync.wiederherstellbareChats).
+// Zwei Implementierungen derselben Regeln wuerden frueher oder spaeter
+// auseinanderlaufen, und genau in der Luecke saesse der Angriff.
+//
+// Vertraege: ordner-sync.test.js und workspace-sync.test.js.
+
+// Reservierte NTFS-Basisnamen, in jedem Ordner und case-insensitiv.
+const GERAETENAMEN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+// Hausmuster aus unitedshare-core: Buffer nur mit Guard, der
+// Bundler-Buffer-Stub hat kein byteLength.
+function utf8ByteLength(text) {
+  if (typeof Buffer !== "undefined" && typeof Buffer.byteLength === "function") {
+    return Buffer.byteLength(text, "utf8");
+  }
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
+  // Fail-closed-Fallback: text.length wuerde Mehrbyte-Zeichen unterzaehlen
+  // und die Byte-Grenzen aufweichen. Manuelle Codepoint-Zaehlung,
+  // Surrogatpaare korrekt als 4 Bytes.
+  let bytes = 0;
+  for (const zeichen of text) {
+    const cp = zeichen.codePointAt(0);
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
+
+// S6: Zeichenklassen, mit denen ein Key am Validator vorbei auf dem
+// Dateisystem anders aussieht: unsichtbare Formatzeichen (Cf), einsame
+// Surrogate (Cs), Private Use (Co), Zeilen- und Absatztrenner (Zl, Zp),
+// Leerraum am Segmentrand (Zs, auch U+3000), getarnte Punkt- und
+// Slash-Varianten, Windows-Sonderzeichen, Prozent (Encoding-Differential)
+// und ueberlange Segmente (Dateisystem-Grenze 255 Bytes).
+// METHODIK (Z1): Die Regel ist die NFKC-Faltung gegen pfadbedeutsame
+// Zeichen plus Unicode-KATEGORIEN, keine Einzelzeichen-Listen. Aufgezaehlt
+// wird nur, was belegt durch beide Raster faellt (NFKC-resistente
+// Slash-Doppelgaenger, Variation Selectors als Mn-Sonderfall).
+const UNSICHTBAR = /[\p{Cf}\p{Cs}\p{Co}\p{Cc}\p{Cn}\p{Zl}\p{Zp}]/u;
+const VARIATION_SELECTORS = /[\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u;
+const MARK_AM_ANFANG = /^\p{M}/u;
+const RAND_LEERRAUM = /^\p{Zs}|\p{Zs}$/u;
+const WINDOWS_ZEICHEN = /[*?"<>|]/;
+// NFKC-resistente Slash-Doppelgaenger: normalize("NFKC") laesst U+2044
+// (Fraction Slash) und U+2215 (Division Slash) gemessen unveraendert
+// stehen, deshalb bleiben genau diese beiden als Restliste gesperrt.
+const NFKC_RESISTENTE_SLASHES = /[\u2044\u2215]/;
+const MAX_SEGMENT_BYTES = 255;
+// T2: gemeinsame Objektgrenze des Gateways. Lebt hier im Leaf, damit beim
+// Inlining in main.js keine doppelte Top-Level-Deklaration entsteht.
+const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
+const PFADBEDEUTSAM = [".", "/", "\\", ":"];
+
+function segmentGueltig(segment) {
+  if (segment.length === 0) return false;
+  if (UNSICHTBAR.test(segment)) return false;
+  if (VARIATION_SELECTORS.test(segment)) return false;
+  // Eine fuehrende Combining Mark haengt sich an den Pfadtrenner; ein
+  // Segment NUR aus Marks faellt damit ebenfalls.
+  if (MARK_AM_ANFANG.test(segment)) return false;
+  if (RAND_LEERRAUM.test(segment)) return false;
+  if (WINDOWS_ZEICHEN.test(segment)) return false;
+  if (segment.includes("%")) return false;
+  if (utf8ByteLength(segment) > MAX_SEGMENT_BYTES) return false;
+  // S6-Nachtrag: die Kompatibilitaets-Form entscheidet. Faltet NFKC ein
+  // pfadbedeutsames Zeichen herbei, das die Originalform nicht hatte,
+  // wird abgelehnt: eine nachgelagerte Faltung darf nie Pfadbedeutung
+  // erzeugen.
+  const nfkc = segment.normalize("NFKC");
+  for (const zeichen of PFADBEDEUTSAM) {
+    if (nfkc.includes(zeichen) && !segment.includes(zeichen)) return false;
+  }
+  if (NFKC_RESISTENTE_SLASHES.test(nfkc)) return false;
+  // Dot-Segmente sind tabu: .obsidian/plugins waere Codeausfuehrung.
+  if (nfkc.startsWith(".")) return false;
+  if (nfkc.endsWith(".") || nfkc.endsWith(" ")) return false;
+  // Konservativ: ".." auch mitten im Segment ablehnen.
+  if (nfkc.includes("..")) return false;
+  if (GERAETENAMEN.test(nfkc)) return false;
+  // NTFS Alternate Data Streams und laufwerksrelative Pfade.
+  if (nfkc.includes(":")) return false;
+  return true;
+}
+
+/// Prueft einen praefixlosen Relpfad (Segmente durch "/") samt
+/// Endungs-Allowlist fuer das letzte Segment.
+function relpfadGueltig(relRoh, endungen) {
+  if (typeof relRoh !== "string") return false;
+  // P1: nicht auf Aufrufer verlassen; NFD vom Netz oder vom Dateisystem
+  // wird hier zur NFC-Sicht, mit der auch die Keys gebaut werden.
+  const rel = relRoh.normalize("NFC");
+  if (rel.length === 0 || rel.length > 400) return false;
+  if (/[\u0000-\u001f\u007f]/.test(rel)) return false;
+  if (rel.includes("\\")) return false;
+  if (/^[A-Za-z]:/.test(rel)) return false;
+  if (rel.startsWith("/")) return false;
+  const segmente = rel.split("/");
+  for (const segment of segmente) {
+    if (!segmentGueltig(segment)) return false;
+  }
+  // Z4: endsWith statt unescaptem RegExp-Bau; kein Ausdruck, kein Cache.
+  const letzter = segmente[segmente.length - 1].toLowerCase();
+  return (Array.isArray(endungen) ? endungen : []).some((e) => letzter.endsWith("." + String(e).toLowerCase()));
+}
+
+/// Prueft einen vollen Key aus fremder Quelle gegen Praefix und Regeln.
+function keyPruefen(praefix, key, endungen) {
+  if (typeof key !== "string" || !key.startsWith(praefix)) return false;
+  return relpfadGueltig(key.slice(praefix.length), endungen);
+}
+// Chat-Backup in den persoenlichen Vault-Workspace (Zuschnitt A).
+//
+// Das Gateway api.unitedshare.ai/v1/workspace ist identitaetsgebunden: der
+// vorhandene apiKey (usk) der Modellaufrufe oeffnet auch den eigenen
+// ws-Bucket, der Client traegt nie S3-Credentials. Dieses Modul ist reine
+// Logik plus Transport ueber ein injiziertes fetch (requestUrlAsFetch auf
+// Mobil, fetch im Test); es kennt weder Obsidian noch main.src.js.
+//
+// Vertraege und Begruendungen: workspace-sync.test.js.
+
+
+const CHATS_PRAEFIX = "obsidian/chats/";
+// S4-Nachtrag: Deckel fuer Listing-Items; Ueberschuss wird verworfen.
+const ITEM_DECKEL = 500;
+// V5: das Gateway liefert hoechstens die letzten 50 Objekte
+// (serverseitiges items.slice(-50)); ab dieser Schwelle ist ein Listing
+// als unvollstaendig zu betrachten. Cursor-Paginierung ist ein
+// Gateway-Folgethema.
+const GATEWAY_LISTING_SCHWELLE = 50;
+// K3: die Warteschlange ist ein Puffer, kein Archiv. Obergrenzen mit
+// Verdraengung des Aeltesten, Versuchslimit je Eintrag, und endgueltige
+// Ablehnungen werden gar nicht erst eingereiht.
+const WARTESCHLANGE_MAX_EINTRAEGE = 50;
+const WARTESCHLANGE_MAX_BYTES = 4 * 1024 * 1024;
+const VERSUCHE_MAX = 5;
+const NACHHOL_MAX_STUECK = 10;
+
+function wiederholbar(status) {
+  // 408 und 425 sind transiente Zustaende wie 429 (REVIEWER-R1).
+  return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+// K4: jeder Request bekommt eine Frist. AbortController signalisiert dem
+// Transport den Abbruch (requestUrlAsFetch muss init.signal unterstuetzen,
+// siehe Integrationsdoku), das Race beendet den Aufruf auch dann, wenn der
+// Transport das Signal ignoriert.
+const TIMEOUT_MS_STANDARD = 15000;
+const NACHHOL_BUDGET_MS = 30000;
+
+function mitFrist(fetchImpl, timeoutMs) {
+  return (url, init) => {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timer;
+    const frist = new Promise((_aufloesen, ablehnen) => {
+      timer = setTimeout(() => {
+        if (controller) controller.abort();
+        ablehnen(new Error("zeitueberschreitung"));
+      }, timeoutMs);
+    });
+    const anfrage = Promise.resolve(
+      fetchImpl(url, controller ? { ...(init || {}), signal: controller.signal } : init)
+    );
+    return Promise.race([anfrage, frist]).finally(() => clearTimeout(timer));
+  };
+}
+
+function slugAusTitel(titel) {
+  const roh = String(titel ?? "").toLowerCase();
+  let slug = "";
+  let strich = false;
+  for (const zeichen of roh) {
+    if (/[a-z0-9]/.test(zeichen)) {
+      slug += zeichen;
+      strich = false;
+    } else if (!strich && slug.length > 0) {
+      slug += "-";
+      strich = true;
+    }
+  }
+  slug = slug.replace(/-+$/, "");
+  return slug.length > 0 ? slug : "chat";
+}
+
+// T2: KEINE Kopie von chatKennung aus dem Core (beim Inlining waere das
+// eine doppelte Top-Level-Deklaration). Dieser lokale Standard traegt den
+// Vertrag; beim Bundeln bindet Hook 1 die Core-Funktion als kennungFn an.
+function kennungStandard(id) {
+  const roh = String(id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+  return roh || "ohne-kennung";
+}
+
+// K1: nach ERSTELLT plus Kennung benannt, wie das Hausmuster chatDateiname.
+// UTC, nicht Ortszeit: sonst bekaeme dasselbe Gespraech nach einem Flug
+// einen anderen Namen. Der Titel-Slug ist nur lesbares Suffix (maximal 80
+// Zeichen), die Endung ist .json, weil der Inhalt JSON ist und chatsLaden
+// auf .json filtert.
+function chatKey(eintrag, kennungFn = kennungStandard) {
+  const roh = eintrag ? eintrag.erstellt : undefined;
+  const zeitpunkt =
+    roh instanceof Date
+      ? roh
+      : typeof roh === "number" && Number.isFinite(roh)
+        ? new Date(roh)
+        : new Date(String(roh ?? ""));
+  const iso = Number.isNaN(zeitpunkt.getTime()) ? "1970-01-01T00:00:00.000Z" : zeitpunkt.toISOString();
+  const tag = iso.slice(0, 10);
+  const stunde = iso.slice(11, 16).replace(":", "");
+  let kennung = String(kennungFn(eintrag && eintrag.id) ?? "");
+  let slug = slugAusTitel(eintrag && eintrag.title).slice(0, 80);
+  // Z3: Kennung plus Slug unter die 255-Byte-Segmentgrenze kuerzen (der
+  // Slug zuerst, die Kennung behaelt mindestens acht Zeichen) und das
+  // Ergebnis mit DERSELBEN Pruefung validieren wie die Rueckholung. Ein
+  // Key, der nicht rueckholbar waere, wird nie gebaut.
+  const segmentVon = () => `${tag}-${stunde}-${kennung}-${slug}.json`;
+  while (utf8ByteLength(segmentVon()) > 255 && slug.length > 1) slug = slug.slice(0, -1);
+  while (utf8ByteLength(segmentVon()) > 255 && kennung.length > 8) kennung = kennung.slice(0, -1);
+  const key = `${CHATS_PRAEFIX}${segmentVon()}`;
+  return keyPruefen(CHATS_PRAEFIX, key, ["json"]) ? key : null;
+}
+
+function basis(baseUrl) {
+  return String(baseUrl ?? "").replace(/\/+$/, "");
+}
+
+// S3: Basis-URL und apiKey sind Settings und damit beeinflussbare Eingabe.
+// Host-Pinning: Solange es keine kundeneigenen Gateways gibt, ist jede
+// andere Basis ein Exfiltrationsvektor fuer Key und Inhalte. Kommen
+// Enterprise-eigene Gateways, wird deren Freigabe ein bewusster,
+// dokumentierter Konfigurationsschritt, kein freies Textfeld. Die
+// Loopback-Ausnahme gilt nur numerisch (127.0.0.1, [::1]) und nur, wenn
+// der Aufrufer sie explizit freischaltet (Tests); localhost loest ueber
+// den Resolver auf und bleibt deshalb immer verboten.
+const ERLAUBTER_ORIGIN = "https://api.unitedshare.ai";
+
+function basisPruefen(baseUrl, optionen) {
+  let u;
+  try {
+    u = new URL(String(baseUrl ?? ""));
+  } catch (_fehler) {
+    return null;
+  }
+  if (u.username || u.password || u.hash || u.search) return null;
+  const loopbackFrei = Boolean(optionen && optionen.erlaubeLoopback === true);
+  const numerischLokal = u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+  const erlaubt =
+    u.origin === ERLAUBTER_ORIGIN ||
+    (loopbackFrei && u.protocol === "http:" && numerischLokal);
+  if (!erlaubt) return null;
+  return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
+}
+
+function apiKeyPruefen(apiKey) {
+  const k = String(apiKey ?? "").trim();
+  return /^[A-Za-z0-9_-]+$/.test(k) ? k : null;
+}
+
+function urlFuerObjekt(baseUrl, key) {
+  return `${basis(baseUrl)}/workspace/object?key=${encodeURIComponent(String(key ?? ""))}`;
+}
+
+function urlFuerListe(baseUrl, praefix) {
+  const grund = `${basis(baseUrl)}/workspace/objects`;
+  if (!praefix) return grund;
+  return `${grund}?prefix=${encodeURIComponent(praefix)}`;
+}
+
+function kopf(apiKey) {
+  return { Authorization: `Bearer ${apiKey}` };
+}
+
+// T1: transportBauen ist der EINZIGE erlaubte Weg zu einem Transport-
+// Kontext. Es buendelt basisPruefen, apiKeyPruefen und mitFrist.
+// T1-Nachtrag: das Register ist out-of-band (WeakSet), weil ein Marker im
+// Objekt per Spread kopierbar waere; das ctx ist eingefroren, damit nach
+// der Pruefung nichts mutierbar ist, und transportGueltig prueft die Basis
+// zur Tiefenverteidigung erneut (rein und billig).
+const GEPRUEFTE_TRANSPORTE = new WeakSet();
+const AKTIVE_SPIEGEL = new WeakSet();
+
+function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}) {
+  const einstellungen = settings || {};
+  const apiKey = apiKeyPruefen(einstellungen.apiKey);
+  if (apiKey === null) return null;
+  const gepruefteBasis = basisPruefen(einstellungen.baseUrl, { erlaubeLoopback: erlaubeLoopback === true });
+  if (gepruefteBasis === null) return null;
+  if (typeof fetchImpl !== "function") return null;
+  const roh = Number(timeoutMs ?? einstellungen.timeoutMs);
+  const frist = Number.isFinite(roh) && roh > 0 ? roh : TIMEOUT_MS_STANDARD;
+  const ctx = Object.freeze({
+    baseUrl: gepruefteBasis,
+    apiKey,
+    fetchImpl: mitFrist(fetchImpl, frist),
+  });
+  GEPRUEFTE_TRANSPORTE.add(ctx);
+  return ctx;
+}
+
+// D4: Tag, Stunde und Kennung fuer das Protokoll; der Titel-Slug bleibt
+// draussen.
+function bodyKurzVon(key, kennung) {
+  const basename = String(key ?? "").split("/").pop();
+  return `${basename.slice(0, 15)}-${kennung}`;
+}
+
+function transportGueltig(ctx) {
+  if (!ctx || !GEPRUEFTE_TRANSPORTE.has(ctx)) return false;
+  return basisPruefen(ctx.baseUrl, { erlaubeLoopback: true }) !== null;
+}
+
+// S5: typfeste Messung. Alles ohne messbare Groesse wird abgelehnt statt
+// geraten; URLSearchParams und beliebige Objekte haben keine Byte-Laenge.
+function bodyBytes(inhalt) {
+  if (typeof inhalt === "string") return utf8ByteLength(inhalt);
+  if (typeof ArrayBuffer !== "undefined") {
+    if (inhalt instanceof ArrayBuffer) return inhalt.byteLength;
+    if (ArrayBuffer.isView(inhalt)) return inhalt.byteLength;
+  }
+  return null;
+}
+
+// S4-Nachtrag und T3: strikt dezimal parsen, beide Header-Formen verstehen
+// (Headers mit get UND plain Record, case-insensitiv). Fuer die eigenen
+// Gateway-Endpunkte gilt fail-closed: ein FEHLENDER Header, ein fehlendes
+// headers-Objekt oder ein nicht-dezimaler Wert ist FEINDLICH, denn das
+// Gateway setzt Content-Length immer.
+function contentLengthVon(antwort) {
+  const h = antwort && antwort.headers;
+  let roh;
+  if (h && typeof h.get === "function") {
+    roh = h.get("content-length");
+  } else if (h && typeof h === "object") {
+    for (const name of Object.keys(h)) {
+      if (String(name).toLowerCase() === "content-length") {
+        roh = h[name];
+        break;
+      }
+    }
+  }
+  if (roh === null || roh === undefined) return { wert: null, feindlich: true };
+  const s = String(roh).trim();
+  if (!/^\d+$/.test(s)) return { wert: null, feindlich: true };
+  return { wert: Number(s), feindlich: false };
+}
+
+async function objektSchreiben(ctx, key, inhalt) {
+  if (!transportGueltig(ctx)) return { status: 0, ok: false, grund: "ungeprueft" };
+  const bytes = bodyBytes(inhalt);
+  if (bytes === null) {
+    return { status: 0, ok: false, grund: "unmessbar" };
+  }
+  if (bytes > MAX_OBJEKT_BYTES) {
+    return { status: 413, ok: false, grund: "zu-gross" };
+  }
+  // D5: expliziter Content-Type. application/octet-stream statt json,
+  // weil der Workspace beliebige Inhalte traegt (Chats sind JSON, Notizen
+  // Markdown); das Gateway behandelt den Body ohnehin als Bytes.
+  const antwort = await ctx.fetchImpl(urlFuerObjekt(ctx.baseUrl, key), {
+    method: "POST",
+    headers: { ...kopf(ctx.apiKey), "Content-Type": "application/octet-stream" },
+    body: inhalt,
+  });
+  return { status: antwort.status, ok: antwort.status >= 200 && antwort.status < 300 };
+}
+
+// S4: Antworten sind Netz-Eingabe. Content-Length vorab, nach dem Lesen
+// erneut messen (fail-closed), NUL-Inhalte verwerfen.
+async function objektLesen(ctx, key) {
+  if (!transportGueltig(ctx)) return { status: 0, text: null, grund: "ungeprueft" };
+  const antwort = await ctx.fetchImpl(urlFuerObjekt(ctx.baseUrl, key), {
+    method: "GET",
+    headers: kopf(ctx.apiKey),
+  });
+  if (antwort.status !== 200) return { status: antwort.status, text: null };
+  const angekuendigt = contentLengthVon(antwort);
+  if (angekuendigt.feindlich) {
+    return { status: 200, text: null, grund: "unlesbar" };
+  }
+  if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
+    return { status: 200, text: null, grund: "zu-gross" };
+  }
+  const text = await antwort.text();
+  if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
+    return { status: 200, text: null, grund: "zu-gross" };
+  }
+  if (text.includes("\u0000")) {
+    return { status: 200, text: null, grund: "unlesbar" };
+  }
+  return { status: 200, text };
+}
+
+async function objekteListen(ctx, praefix) {
+  if (!transportGueltig(ctx)) return { status: 0, items: [], vollstaendig: false, grund: "ungeprueft" };
+  const antwort = await ctx.fetchImpl(urlFuerListe(ctx.baseUrl, praefix), {
+    method: "GET",
+    headers: kopf(ctx.apiKey),
+  });
+  if (antwort.status !== 200) return { status: antwort.status, items: [], vollstaendig: false };
+  const angekuendigt = contentLengthVon(antwort);
+  if (angekuendigt.feindlich) {
+    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+  }
+  if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
+    return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
+  }
+  // Dieselbe Schranke wie beim Objekt-Lesen: erst den Text messen, dann
+  // parsen. Ein echter Streaming-Abbruch braucht Transportunterstuetzung
+  // (requestUrl puffert nativ) und bleibt bewusste Grenze, siehe Doku.
+  const text = await antwort.text();
+  if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
+    return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
+  }
+  let daten;
+  try {
+    daten = JSON.parse(text);
+  } catch (_fehler) {
+    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+  }
+  if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
+    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+  }
+  const vollstaendig = daten.items.length < GATEWAY_LISTING_SCHWELLE;
+  if (daten.items.length > ITEM_DECKEL) {
+    return { status: 200, items: daten.items.slice(0, ITEM_DECKEL), grund: "gedeckelt", vollstaendig: false };
+  }
+  return { status: 200, items: daten.items, vollstaendig };
+}
+
+// Spiegelt einen frisch gespeicherten Chat und holt bei Erfolg die
+// Warteschlange nach. Der lokale Chat wird hier nie angefasst; Fehlschlaege
+// landen als {key, inhalt} in zustand.warteschlange (persistiert der Aufrufer
+// in den Plugin-Daten).
+async function chatSpiegeln(ctx, eintrag, zustand) {
+  const einstellungen = (ctx && ctx.settings) || {};
+  const melde = typeof ctx.status === "function" ? ctx.status : () => {};
+  const jetzt = typeof ctx.jetzt === "function" ? ctx.jetzt : Date.now;
+  // V3: feste Nutzlast {zeit, status, meldung, body}; body ist der Basename
+  // des Keys, nie der volle Pfad. Ein werfendes oder asynchron scheiterndes
+  // protokoll reisst den Spiegel nicht mit.
+  // D4: body ist Tag, Stunde und Kennung, NIE der Titel-Slug; Chat-Titel
+  // gehoeren nicht ins debug.log. Fuer Alt-Eintraege ohne bodyKurz bleibt
+  // der datumsgenaue Anfang des Basenames.
+  const protokolliere = (eintrag) => {
+    if (typeof ctx.protokoll !== "function") return;
+    const basename = String(eintrag.key ?? "").split("/").pop();
+    const nutzlast = {
+      zeit: jetzt(),
+      status: eintrag.status ?? 0,
+      meldung: eintrag.meldung ?? "",
+      body: eintrag.bodyKurz ?? basename.slice(0, 15),
+    };
+    try {
+      Promise.resolve(ctx.protokoll(nutzlast)).catch(() => {});
+    } catch (_fehler) {
+      // bewusst geschluckt, siehe Kommentar oben
+    }
+  };
+  // K1: leere Chats werden nicht gespiegelt; es gaebe nichts zurueckzuholen.
+  if (!eintrag || !Array.isArray(eintrag.messages) || eintrag.messages.length === 0) {
+    return { ergebnis: "leer", nachgeholt: 0 };
+  }
+  if (!einstellungen.apiKey) {
+    melde("Workspace-Spiegel aus: kein API-Key hinterlegt");
+    return { ergebnis: "kein-schluessel", nachgeholt: 0 };
+  }
+  const apiKey = apiKeyPruefen(einstellungen.apiKey);
+  if (apiKey === null) {
+    melde("Workspace-Spiegel aus: API-Key unbrauchbar");
+    return { ergebnis: "kein-schluessel", nachgeholt: 0 };
+  }
+  const sichereBasis = basisPruefen(einstellungen.baseUrl, { erlaubeLoopback: ctx.erlaubeLoopback === true });
+  if (sichereBasis === null) {
+    melde("Workspace-Spiegel aus: Basis-URL unsicher");
+    return { ergebnis: "keine-basis", nachgeholt: 0 };
+  }
+
+  const transport = transportBauen({
+    settings: einstellungen,
+    fetchImpl: ctx.fetchImpl,
+    timeoutMs: ctx.timeoutMs,
+    erlaubeLoopback: ctx.erlaubeLoopback === true,
+  });
+  if (transport === null) {
+    melde("Workspace-Spiegel aus: Transport nicht baubar");
+    return { ergebnis: "keine-basis", nachgeholt: 0 };
+  }
+  const kennungFuerLog = (typeof ctx.kennungFn === "function" ? ctx.kennungFn : kennungStandard)(eintrag && eintrag.id);
+  const key = chatKey(eintrag, typeof ctx.kennungFn === "function" ? ctx.kennungFn : undefined);
+  if (key === null) {
+    protokolliere({ key: "", status: 0, meldung: "ungueltiger-key", bodyKurz: kennungFuerLog });
+    melde("Workspace-Spiegel verworfen: Key nicht baubar");
+    return { ergebnis: "verworfen", nachgeholt: 0 };
+  }
+  const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
+
+  // K3: defensive Defaults, ein leerer Zustand wirft nicht.
+  const z = zustand && typeof zustand === "object" ? zustand : {};
+  if (!Array.isArray(z.warteschlange)) z.warteschlange = [];
+
+  // Q1: Lauf-Lock auch fuer den Spiegel; zwei parallele Laeufe auf
+  // derselben Warteschlange wuerden Eintraege doppelt senden.
+  if (AKTIVE_SPIEGEL.has(z)) {
+    return { ergebnis: "laeuft-bereits", nachgeholt: 0 };
+  }
+  AKTIVE_SPIEGEL.add(z);
+  try {
+  let geschrieben;
+  try {
+    geschrieben = await objektSchreiben(transport, key, inhalt);
+  } catch (fehler) {
+    geschrieben = { status: 0, ok: false, fehler };
+  }
+
+  if (!geschrieben.ok) {
+    // Q4: ein unmessbarer Body wird durch Wiederholen nicht messbar.
+    if (geschrieben.grund === "unmessbar" || !wiederholbar(geschrieben.status)) {
+      // Endgueltige Ablehnung: einmal protokollieren, nie einreihen.
+      protokolliere({ key, status: geschrieben.status, meldung: "endgueltig-abgelehnt", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
+      melde("Workspace-Spiegel verworfen");
+      return { ergebnis: "verworfen", nachgeholt: 0 };
+    }
+    // Q3: ein Eintrag ueber der Byte-Grenze landet NIE in der Schlange;
+    // er wuerde sie nur leeren und selbst nie durchpassen.
+    if (utf8ByteLength(String(inhalt ?? "")) > WARTESCHLANGE_MAX_BYTES) {
+      protokolliere({ key, status: geschrieben.status, meldung: "zu-gross-fuer-warteschlange", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
+      melde("Workspace-Spiegel: Chat zu gross fuer die Warteschlange");
+      return { ergebnis: "verworfen", nachgeholt: 0 };
+    }
+    // Dedupe pro Key: der letzte Stand gewinnt, Position am Ende.
+    z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
+    const frisch = { key, inhalt, versuche: 0, bodyKurz: bodyKurzVon(key, kennungFuerLog) };
+    z.warteschlange.push(frisch);
+    while (z.warteschlange.length > WARTESCHLANGE_MAX_EINTRAEGE) {
+      const raus = z.warteschlange.shift();
+      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt", bodyKurz: raus.bodyKurz });
+    }
+    // Q3: Byte-Verdraengung trifft zuerst den GROESSTEN Eintrag (nie den
+    // frischen), nicht den aeltesten; so ueberleben viele kleine Chats
+    // einen einzelnen Brocken.
+    const bytesVon = (e) => utf8ByteLength(String(e.inhalt ?? ""));
+    let gesamt = z.warteschlange.reduce((summe, e) => summe + bytesVon(e), 0);
+    while (gesamt > WARTESCHLANGE_MAX_BYTES && z.warteschlange.length > 1) {
+      let groessterIdx = -1;
+      let groessterWert = -1;
+      for (let n = 0; n < z.warteschlange.length; n += 1) {
+        if (z.warteschlange[n] === frisch) continue;
+        const b = bytesVon(z.warteschlange[n]);
+        if (b > groessterWert) {
+          groessterWert = b;
+          groessterIdx = n;
+        }
+      }
+      if (groessterIdx === -1) break;
+      const raus = z.warteschlange.splice(groessterIdx, 1)[0];
+      gesamt -= groessterWert;
+      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt", bodyKurz: raus.bodyKurz });
+    }
+    protokolliere({ key, status: geschrieben.status, meldung: "aufgeschoben", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
+    melde("Workspace-Spiegel aufgeschoben");
+    return { ergebnis: "aufgeschoben", nachgeholt: 0 };
+  }
+
+  // Frischer Erfolg: veraltete Fassungen desselben Keys fliegen raus,
+  // niemals landet eine alte Fassung ueber der frischen.
+  const vorher = z.warteschlange.length;
+  z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
+  if (z.warteschlange.length < vorher) {
+    protokolliere({ key, status: 0, meldung: "veraltet-verworfen", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
+  }
+
+  let nachgeholt = 0;
+  let bearbeitet = 0;
+  const nachholStart = jetzt();
+  while (z.warteschlange.length > 0 && bearbeitet < NACHHOL_MAX_STUECK) {
+    // K4: Zeitbudget fuer den gesamten Nachhol-Lauf.
+    if (jetzt() - nachholStart >= NACHHOL_BUDGET_MS) break;
+    // Q1: VOR dem Schreiben per Identitaet entnehmen; ein blindes shift
+    // nach dem await koennte einen fremden Kopf treffen.
+    const kopfEintrag = z.warteschlange[0];
+    const idx = z.warteschlange.indexOf(kopfEintrag);
+    if (idx === -1) break;
+    z.warteschlange.splice(idx, 1);
+    bearbeitet += 1;
+    let r;
+    try {
+      r = await objektSchreiben(transport, kopfEintrag.key, kopfEintrag.inhalt);
+    } catch (_fehler) {
+      r = { status: 0, ok: false };
+    }
+    if (r.ok) {
+      nachgeholt += 1;
+      continue;
+    }
+    if (r.grund === "unmessbar" || !wiederholbar(r.status)) {
+      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "endgueltig-abgelehnt", bodyKurz: kopfEintrag.bodyKurz });
+      continue;
+    }
+    kopfEintrag.versuche = (kopfEintrag.versuche ?? 0) + 1;
+    if (kopfEintrag.versuche >= VERSUCHE_MAX) {
+      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "aufgegeben", bodyKurz: kopfEintrag.bodyKurz });
+      continue;
+    }
+    // wiederholbar: vorne wieder einsetzen, Lauf endet.
+    z.warteschlange.unshift(kopfEintrag);
+    break;
+  }
+  melde(nachgeholt > 0 ? `Workspace-Spiegel ok, ${nachgeholt} nachgeholt` : "Workspace-Spiegel ok");
+  return { ergebnis: "gespiegelt", nachgeholt };
+  } finally {
+    AKTIVE_SPIEGEL.delete(z);
+  }
+}
+
+// S2: das Listing ist fremde Eingabe; Keys laufen durch dieselbe
+// Segmentpruefung wie der Ordner-Sync. Der lokale Dateiname wird ohnehin
+// NIE aus dem Remote-Key abgeleitet (siehe Integrationsdoku).
+// Z3: nur noch json; der Inhalt der Chats IST JSON, md-Keys im Listing
+// sind Fremdkoerper.
+function wiederherstellbareChats(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((o) => o && o.key)
+    .filter((k) => keyPruefen(CHATS_PRAEFIX, k, ["json"]))
+    .sort();
+}
+// Second-Brain-Ordner-Sync in den Vault-Workspace (Zuschnitt B).
+//
+// Reine Planungs- und Entscheidungslogik: was hochgeladen wird (Hash-Index
+// statt Blind-Upload), wie eingehende Notizen behandelt werden (Konfliktkopie
+// statt Ueberschreiben, eigene begrenzte Namenssuche kompatibel zum
+// Namensschema von konfliktDateiname) und dass Loeschungen im MVP
+// ausdruecklich nicht propagiert werden. Den Transport macht der Aufrufer
+// (Hooks in main.src.js) ueber die workspace-sync-Funktionen; dieses Modul
+// haengt bewusst nur am key-pruefung-Leaf, nie an der Transportschicht.
+//
+// Vertraege und Begruendungen: ordner-sync.test.js.
+
+
+// T2/D5: bewusst KEIN require auf den Core-Monolithen; ein lokaler Fehler
+// mit demselben Namen genuegt dem Vertrag und haelt den Bundler-Needle
+// frei von der require-Zeile, an der bundle.mjs die Eigenstaendigkeit
+// prueft.
+class VertragsFehler extends Error {
+  constructor(meldung) {
+    super(meldung);
+    this.name = "UnitedShareError";
+    this.status = 400;
+  }
+}
+
+const NOTES_PRAEFIX = "obsidian/notes/";
+
+// Haertung (Security-Finding 1): je Segment pruefen, damit kein
+// Parser-Differential (Backslash, Laufwerks-Praefix, leere Segmente,
+// Windows-Normalisierung von Punkt/Leerzeichen am Ende) aus dem
+// Notes-Praefix herausfuehrt.
+const ENDUNGEN = ["md", "canvas"];
+
+// Delegiert an die gemeinsame Segmentpruefung in key-pruefung.js; NFC vor
+// Validierung und Key-Bau, damit Validator und Dateisystem dieselbe Sicht
+// haben (macOS liefert NFD, der Key traegt NFC).
+function keyAusRelpfad(relpfad) {
+  const rel = String(relpfad ?? "").normalize("NFC");
+  return relpfadGueltig(rel, ENDUNGEN) ? NOTES_PRAEFIX + rel : null;
+}
+
+function relpfadAusKey(key) {
+  const k = String(key ?? "");
+  if (!k.startsWith(NOTES_PRAEFIX)) return null;
+  // P1: NFC zurueckgeben, damit Plan-Vergleiche und Index dieselbe Sicht
+  // haben wie keyAusRelpfad.
+  const rel = k.slice(NOTES_PRAEFIX.length).normalize("NFC");
+  return keyAusRelpfad(rel) ? rel : null;
+}
+
+// Plant einen Sync-Lauf. dateien = lokaler Ist-Stand des gewaehlten Ordners
+// ({pfad, hash, groesse} mit Pfaden relativ zum Ordner), index = zuletzt
+// gespiegelter Stand (pfad -> hash), entfernt = Listing des Workspace.
+// P3-Nachtrag: der Default von listingVollstaendig ist FALSE, der
+// sichere Zustand. Vollstaendigkeit muss der Aufrufer ausdruecklich aus
+// objekteListen(...).vollstaendig durchreichen.
+function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand = {}, maxBytes = MAX_OBJEKT_BYTES, listingVollstaendig = false } = {}) {
+  const hochladen = [];
+  const uebersprungen = [];
+  // K6: Push-Schutz gegen Last-Writer-Wins. Weicht die Remote-Fassung vom
+  // zuletzt gesehenen Stand ab (oder wurde sie nie gesehen), wird nicht
+  // hochgeladen, sondern der Konfliktpfad gewaehlt. Erst Pull, dann Push.
+  const remoteAbweichung = [];
+  const remoteNachPfad = new Map();
+  for (const objekt of entfernt) {
+    const rel = relpfadAusKey(objekt && objekt.key);
+    if (rel !== null) remoteNachPfad.set(rel, objekt);
+  }
+  const lokalePfade = new Set();
+
+  for (const datei of dateien) {
+    // K2: macOS liefert NFD; Index, Keys und Vergleiche laufen auf NFC.
+    const pfad = String(datei.pfad ?? "").normalize("NFC");
+    lokalePfade.add(pfad);
+    if (keyAusRelpfad(pfad) === null) {
+      uebersprungen.push({ pfad, grund: "ungueltiger-pfad" });
+      continue;
+    }
+    // K5: ohne gueltigen Hash ist Aenderungserkennung Raten.
+    if (typeof datei.hash !== "string" || datei.hash.length === 0) {
+      uebersprungen.push({ pfad, grund: "ungueltiger-hash" });
+      continue;
+    }
+    // Security-Finding 3: ohne gueltige Groesse kein Upload, sonst waere
+    // das Limit mit fehlenden oder unsinnigen Metadaten umgehbar.
+    const groesse = Number(datei.groesse);
+    if (!Number.isFinite(groesse) || groesse < 0) {
+      uebersprungen.push({ pfad, grund: "ungueltige-groesse" });
+      continue;
+    }
+    if (groesse > maxBytes) {
+      uebersprungen.push({ pfad, grund: "zu-gross" });
+      continue;
+    }
+    if (index[pfad] === datei.hash) continue;
+    const remoteObjekt = remoteNachPfad.get(pfad);
+    // P3: bei unvollstaendigem Listing ist "nicht gelistet" KEIN Beweis
+    // fuer "remote nicht vorhanden"; solche Pfade gehen in den Konfliktpfad.
+    if (!listingVollstaendig && !remoteObjekt) {
+      remoteAbweichung.push({ pfad, grund: "listing-unvollstaendig" });
+      continue;
+    }
+    if (remoteObjekt) {
+      const erinnert = Object.hasOwn(remoteStand ?? {}, pfad) ? remoteStand[pfad] : null;
+      // P2: Hash entscheidet, wenn beide Seiten einen tragen (remoteStand
+      // aus dem Pull, kuenftig ETag im Listing). Die Groessen-Rueckfall-
+      // ebene ist eine DOKUMENTIERTE LUECKE: groessengleiche Fremd-
+      // aenderungen sieht sie nicht.
+      const hashesVorhanden = erinnert && typeof erinnert.hash === "string" && typeof remoteObjekt.hash === "string";
+      const unveraendertGesehen = hashesVorhanden
+        ? erinnert.hash === remoteObjekt.hash
+        : erinnert && Number(erinnert.size) === Number(remoteObjekt.size);
+      if (!unveraendertGesehen) {
+        remoteAbweichung.push({ pfad, grund: "remote-geaendert", remoteSize: remoteObjekt.size });
+        continue;
+      }
+    }
+    hochladen.push({ pfad, hash: datei.hash, groesse });
+  }
+
+  // P3: verwaiste Index-Pfade (lokal geloescht, im unvollstaendigen
+  // Listing nicht sichtbar) gehen ebenfalls in den Konfliktpfad statt in
+  // eine Entscheidung ohne Datenlage.
+  if (!listingVollstaendig) {
+    for (const indexPfad of Object.keys(index && typeof index === "object" ? index : {})) {
+      if (!remoteNachPfad.has(indexPfad) && !lokalePfade.has(indexPfad)) {
+        remoteAbweichung.push({ pfad: indexPfad, grund: "listing-unvollstaendig" });
+      }
+    }
+  }
+
+  // Keys ohne lokale Datei sind KEIN Loeschauftrag: ohne Tombstones ist
+  // "geloescht" von "hier nie gesehen" nicht unterscheidbar. Bei
+  // unvollstaendigem Listing wird diese Auswertung GAR NICHT berechnet.
+  const geloeschtIgnoriert = [];
+  if (listingVollstaendig) {
+    for (const objekt of entfernt) {
+      const rel = relpfadAusKey(objekt && objekt.key);
+      if (rel !== null && !lokalePfade.has(rel)) geloeschtIgnoriert.push(objekt.key);
+    }
+  }
+
+  return { hochladen, uebersprungen, geloeschtIgnoriert, remoteAbweichung };
+}
+
+// K7 und Q2: das Lauf-Lock verhindert ueberlappende Sync-Laeufe. Es lebt
+// in einem WeakSet statt als Feld im Zustand, denn laufend ist TRANSIENT:
+// ein nach einem Absturz aus data.json geladenes laufend:true darf den
+// naechsten Lauf nicht fuer immer blockieren, und in saveData gehoert das
+// Flag nie hinein.
+const AKTIVE_LAEUFE = new WeakSet();
+
+function laufStarten(zustand) {
+  if (!zustand || typeof zustand !== "object") return false;
+  if (AKTIVE_LAEUFE.has(zustand)) return false;
+  AKTIVE_LAEUFE.add(zustand);
+  return true;
+}
+
+function laufBeenden(zustand) {
+  if (zustand && typeof zustand === "object") AKTIVE_LAEUFE.delete(zustand);
+}
+
+// Entscheidung fuer eine eingehende Notiz. Niemals stilles Ueberschreiben,
+// fail-closed: existiert und lokalText sind ADDITIVE Signale. "anlegen"
+// gibt es nur, wenn beide sagen "da ist nichts". Widersprechen sie sich
+// (Race, kaputter Adapter) oder wirft existiert, wird die Konfliktkopie
+// gewaehlt. Der Relpfad wird wie in keyAusRelpfad auf NFC normalisiert.
+function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
+  if (typeof existiert !== "function") {
+    throw new VertragsFehler("eingehendeNotiz braucht existiert als Funktion");
+  }
+  const pfad = String(relpfad ?? "").normalize("NFC");
+  // S1: eigene Pruefung statt Vertrauen in den Aufrufer. Dieselben Regeln
+  // wie beim Key-Bau; ein Pfad, der dort nie zum Key wuerde, darf hier
+  // auch nie zu einer Schreibaktion werden.
+  if (!relpfadGueltig(pfad, ENDUNGEN)) {
+    return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
+  }
+  // Z2: der existiert-Vertrag ist DATEISYSTEMTREU (adapter.exists ist auf
+  // APFS und NTFS case-insensitiv); die fruehere toLowerCase-Kruecke haette
+  // nur einen Teil der Falt-Kollisionen erwischt und die Verantwortung
+  // verschleiert. Zwei Keys mit identischem Casefold sind damit derselbe
+  // Zielpfad: existiert liefert fuer beide dasselbe Urteil.
+  let vorhanden;
+  try {
+    vorhanden = Boolean(existiert(pfad));
+  } catch (_fehler) {
+    return konfliktErgebnis(pfad, existiert);
+  }
+  const lesbar = lokalText !== null && lokalText !== undefined;
+  if (!vorhanden && !lesbar) {
+    return { aktion: "anlegen", zielPfad: pfad };
+  }
+  if (vorhanden && lesbar && lokalText === remoteText) {
+    return { aktion: "unveraendert", zielPfad: pfad };
+  }
+  return konfliktErgebnis(pfad, existiert);
+}
+
+// Begrenzte, fail-closed Namenssuche fuer die Konfliktkopie, Namensschema
+// kompatibel zu konfliktDateiname aus unitedshare-core. Eine werfende Probe
+// heisst BELEGT (weiter suchen), nie frei: sonst koennte die Kopie einen
+// vergebenen Namen treffen. Bleibt die Lage unbestaetigt oder ist die
+// Grenze erschoepft, traegt das Ergebnis bestaetigungErforderlich; der
+// Schreibpfad muss Konfliktkopien ohnehin IMMER exklusiv anlegen.
+const KONFLIKT_SUCHGRENZE = 100;
+
+function konfliktErgebnis(pfad, existiert) {
+  const slash = pfad.lastIndexOf("/");
+  const ordner = slash === -1 ? "" : pfad.slice(0, slash + 1);
+  const basisName = slash === -1 ? pfad : pfad.slice(slash + 1);
+  const punkt = basisName.lastIndexOf(".");
+  const stamm = punkt > 0 ? basisName.slice(0, punkt) : basisName;
+  const endung = punkt > 0 ? basisName.slice(punkt) : "";
+
+  // S6: der Stamm wird so gekuerzt, dass Stamm plus Konflikt-Zusatz plus
+  // Endung unter der Segmentgrenze bleiben; ein beim Kuerzen entstandenes
+  // einsames Surrogat wird mit abgeschnitten.
+  const kandidatFuer = (zaehler) => {
+    const zusatz = zaehler === 1 ? "(Konflikt)" : `(Konflikt ${zaehler})`;
+    let stammKurz = stamm;
+    while (stammKurz.length > 0 && utf8ByteLength(`${stammKurz} ${zusatz}${endung}`) > MAX_SEGMENT_BYTES) {
+      stammKurz = stammKurz.slice(0, -1);
+      const letzter = stammKurz.charCodeAt(stammKurz.length - 1);
+      if (letzter >= 0xd800 && letzter <= 0xdbff) stammKurz = stammKurz.slice(0, -1);
+    }
+    return `${ordner}${stammKurz} ${zusatz}${endung}`;
+  };
+
+  let unbestaetigt = false;
+  for (let zaehler = 1; zaehler <= KONFLIKT_SUCHGRENZE; zaehler += 1) {
+    const kandidat = kandidatFuer(zaehler);
+    let belegt;
+    try {
+      belegt = Boolean(existiert(kandidat));
+    } catch (_fehler) {
+      unbestaetigt = true;
+      belegt = true;
+    }
+    if (!belegt) {
+      // S1: auch der erzeugte Zielpfad muss die Pruefung bestehen.
+      if (!relpfadGueltig(kandidat, ENDUNGEN)) {
+        return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
+      }
+      return { aktion: "konflikt", zielPfad: kandidat, bestaetigungErforderlich: unbestaetigt };
+    }
+  }
+  // Grenze erschoepft: unerprobter Kandidat jenseits der Grenze, nur mit
+  // exklusivem Anlegen zu schreiben. Z4: auch er besteht die Pfadpruefung
+  // oder das Ergebnis ist abgelehnt.
+  const grenzKandidat = kandidatFuer(KONFLIKT_SUCHGRENZE + 1);
+  if (!relpfadGueltig(grenzKandidat, ENDUNGEN)) {
+    return { aktion: "abgelehnt", grund: "ungueltiger-pfad" };
+  }
+  return { aktion: "konflikt", zielPfad: grenzKandidat, bestaetigungErforderlich: true };
+}
+
+// S7: der Index kommt deserialisiert aus den Plugin-Daten und ist damit
+// Fremdeingabe. Null-Prototyp als Ziel, Uebernahme nur eigener
+// Eigenschaften, Prototype-Schluessel fliegen raus.
+const VERBOTENE_SCHLUESSEL = new Set(["__proto__", "constructor", "prototype"]);
+
+function indexNachSync(index, hochgeladen) {
+  const neu = Object.create(null);
+  const quelle = index && typeof index === "object" ? index : {};
+  for (const schluessel of Object.keys(quelle)) {
+    if (VERBOTENE_SCHLUESSEL.has(schluessel)) continue;
+    if (!Object.hasOwn(quelle, schluessel)) continue;
+    neu[schluessel] = quelle[schluessel];
+  }
+  for (const datei of Array.isArray(hochgeladen) ? hochgeladen : []) {
+    if (!datei || typeof datei.pfad !== "string") continue;
+    if (VERBOTENE_SCHLUESSEL.has(datei.pfad)) continue;
+    // K5: nur bestaetigte Staende mit echtem Hash in den Index.
+    if (typeof datei.hash !== "string" || datei.hash.length === 0) continue;
+    neu[datei.pfad] = datei.hash;
+  }
+  return neu;
+}
 
 const { FileView, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, addIcon, requestUrl, setIcon } = require("obsidian");
 class UnitedShareError extends Error {
@@ -640,13 +1547,6 @@ function wikilinkAusPfad(notePath) {
   return `[[${base}]]`;
 }
 
-function utf8ByteLength(text) {
-  if (typeof Buffer !== "undefined" && typeof Buffer.byteLength === "function") {
-    return Buffer.byteLength(text, "utf8");
-  }
-  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
-  return text.length;
-}
 
 function jsonPostHeaders(apiKey, payload) {
   return {
@@ -5532,6 +6432,42 @@ function duckdbTabelleAusZeilen(zeilen) {
   return { spalten, zeilen: rows.map(ausZeile) };
 }
 
+// -- DuckDB-Laufzeit: die Ansicht braucht den Unterordner duckdb/ im
+// Plugin-Ordner (wasm + worker + commonjs). Der Community-Installer und
+// das Release-Workflow liefern NUR main.js/manifest.json/styles.css --
+// fehlt eine dieser Dateien, muss die Meldung genau benennen, was fehlt
+// und was zu tun ist, statt der allgemeinen "ließ sich nicht laden"-
+// Fassung, die den Menschen ueber die Ursache im Unklaren liess.
+const DUCKDB_LAUFZEIT = Object.freeze([
+  "duckdb-eh.wasm",
+  "duckdb-browser-eh.worker.js",
+  "duckdb-browser.cjs",
+]);
+
+// vorhanden: Liste der Dateinamen, die der Adapter tatsächlich gefunden
+// hat. Ungültige Eingabe (null, kein Array) zählt als "nichts vorhanden",
+// denn fail-closed heißt hier: alles fehlt, nichts wird unterschlagen.
+function duckdbLaufzeitLuecken(vorhandene) {
+  const vorhanden = new Set(
+    Array.isArray(vorhandene) ? vorhandene.filter((name) => typeof name === "string") : [],
+  );
+  return DUCKDB_LAUFZEIT.filter((datei) => !vorhanden.has(datei));
+}
+
+// Benannte Meldung für die Oberfläche: nennt die fehlenden Dateien, den
+// genauen Zielordner im Tresor und die Ursache (Installer/Release liefert
+// die Laufzeit nicht mit) samt der einen nötigen Aktion.
+function duckdbLaufzeitMeldung(fehlt) {
+  if (!Array.isArray(fehlt) || fehlt.length === 0) return "";
+  return (
+    "DuckDB-Laufzeit unvollständig: fehlt " + fehlt.join(", ")
+    + " im Ordner .obsidian/plugins/unitedshare/duckdb/. "
+    + "Der Community-Installer lädt nur die drei Stammdateien; diesen "
+    + "vollständigen Ordner duckdb/ ergänzen (als Anhänge im Release oder im "
+    + "kompletten Plugin-Ordner), dann öffnen sich .parquet und .sql."
+  );
+}
+
 // Findet String-Literale in einem SQL-Text, die wie ein Dateipfad relativ
 // zum Tresor aussehen (z. B. 'daten.parquet' in FROM 'daten.parquet'),
 // damit der SQL-Codeblock-Prozessor sie VOR der Abfrage per
@@ -6254,6 +7190,8 @@ const DEFAULT_SETTINGS = {
   embedModel: "",
   absichtModell: "",
   requireWriteConfirm: true,
+  secondBrainOrdner: "",
+  workspaceSyncWarteschlange: [],
   bildOrdner: BILD_ORDNER,
   bildFormat: "png",
   bildBreite: 1024,
@@ -6444,13 +7382,44 @@ function requestUrlAsFetch() {
       if (key.toLowerCase() === "content-length") continue;
       headers[key] = given[key];
     }
-    const res = await requestUrl({
+    // Obsidians requestUrl kennt kein Abort. init.signal wird trotzdem
+    // eingeloest: der Wrapper bricht per Race ab, der native Request laeuft
+    // ins Leere aus (dokumentierte Transportgrenze). Ohne das wuerde die
+    // Frist aus workspace-sync (mitFrist) nie greifen.
+    const anfrage = requestUrl({
       url,
       method: init.method,
       headers,
       body: init.body,
       throw: false,
     });
+    let res;
+    if (init && init.signal) {
+      if (init.signal.aborted) {
+        const abbruch = new Error("abgebrochen");
+        abbruch.name = "AbortError";
+        // anfrage laeuft weiter; ohne Beobachter wuerde eine spaetere
+        // Ablehnung als unbeobachtete Rejection knallen.
+        anfrage.catch(() => {});
+        throw abbruch;
+      }
+      res = await Promise.race([
+        anfrage,
+        new Promise((_aufloesen, ablehnen) => {
+          init.signal.addEventListener(
+            "abort",
+            () => {
+              const abbruch = new Error("abgebrochen");
+              abbruch.name = "AbortError";
+              ablehnen(abbruch);
+            },
+            { once: true }
+          );
+        }),
+      ]);
+    } else {
+      res = await anfrage;
+    }
     const wrapped = {
       ok: res.status >= 200 && res.status < 300,
       status: res.status,
@@ -7694,6 +8663,324 @@ class UnitedShareView extends ItemView {
       // das diese Ablage loesen soll.
       console.error("UnitedShare: das Gespräch ließ sich nicht ablegen.", error);
     }
+    try {
+      // Hook 1: Spiegel in den Vault-Workspace. Eigener try/catch, die
+      // Spiegelung darf das lokale Speichern nie mitreissen.
+      await this.spiegleChatInWorkspace(eintrag, adapter);
+    } catch (fehler) {
+      console.error("UnitedShare: Workspace-Spiegel fehlgeschlagen.", fehler);
+    }
+  }
+
+  async spiegleChatInWorkspace(eintrag, adapter) {
+    const zustand = this.workspaceSyncZustand;
+    if (!zustand) return;
+    const ergebnis = await chatSpiegeln(
+      {
+        settings: this.settings,
+        fetchImpl: requestUrlAsFetch(),
+        // DEVSECOPS: der Spiegel-Body ist die LOKALE Ablageform OHNE
+        // Bildlast; die Core-Fassung chatAlsText wendet
+        // nachrichtOhneBildlast an. Der Eintrag im zweiten Parameter
+        // unten liefert chatSpiegeln nur Slug-Quelle und Leerpruefung.
+        chatAlsText: () => chatAlsText(eintrag),
+        kennungFn: chatKennung,
+        status: () => {},
+        protokoll: (nutzlast) => {
+          void debugLogSchreiben(adapter || this.chatAdapter(), nutzlast);
+        },
+      },
+      // title ist hier NUR Slug-Quelle, messages NUR Leerpruefung; der
+      // gespiegelte Body kommt aus chatAlsText des Original-Eintrags oben.
+      { title: eintrag.titel, erstellt: eintrag.erstellt, id: eintrag.id, messages: eintrag.messages },
+      zustand
+    );
+    // Reaktionen laut Ergebnis-Union der Integrationsdoku: aufgeschoben und
+    // gespiegelt persistieren den Zustand UNBEDINGT (Versuchszaehler und
+    // Verdraengungen leben in den Eintraegen); alles andere ist still und
+    // steht im Protokoll.
+    if (ergebnis.ergebnis === "aufgeschoben" || ergebnis.ergebnis === "gespiegelt") {
+      await this.speichereWorkspaceZustand();
+    }
+    return ergebnis;
+  }
+
+  async speichereWorkspaceZustand() {
+    this.settings.workspaceSyncWarteschlange = this.workspaceSyncZustand.warteschlange;
+    await this.saveSettings();
+  }
+
+  async stelleChatsAusWorkspaceWieder() {
+    const ctx = transportBauen({ settings: this.settings, fetchImpl: requestUrlAsFetch() });
+    if (!ctx) {
+      new Notice("UnitedShare: API-Key oder Basis-URL sind fuer den Workspace unbrauchbar.");
+      return;
+    }
+    const adapter = this.chatAdapter();
+    if (!adapter) {
+      new Notice("UnitedShare: kein Tresor-Zugriff.");
+      return;
+    }
+    const listing = await objekteListen(ctx, CHATS_PRAEFIX);
+    if (listing.status !== 200) {
+      new Notice(`UnitedShare: Workspace nicht erreichbar (Status ${listing.status}).`);
+      return;
+    }
+    if (listing.vollstaendig === false) {
+      new Notice("UnitedShare: Das Workspace-Listing ist unvollstaendig, aeltere Chats koennen fehlen.");
+    }
+    let geholt = 0;
+    let uebersprungen = 0;
+    for (const key of wiederherstellbareChats(listing.items)) {
+      const antwort = await objektLesen(ctx, key);
+      if (antwort.status !== 200 || antwort.text === null) {
+        uebersprungen += 1;
+        continue;
+      }
+      let chat;
+      try {
+        chat = JSON.parse(antwort.text);
+      } catch (_fehler) {
+        uebersprungen += 1;
+        continue;
+      }
+      // Der lokale Dateiname kommt NIE aus dem Remote-Key, sondern aus dem
+      // Inhalt (erstellt plus Kennung, dasselbe Muster wie chatSpeichern).
+      const pfad = `${CHAT_ORDNER}/${chatDateiname(chat)}`;
+      // exists plus exklusiv: .vault ist versteckt, dort gibt es nur den
+      // Adapter (vault.create kann keine versteckten Pfade); die
+      // exists-Pruefung direkt vor dem Schreiben ist das exklusivste, was
+      // der Adapter hergibt, und NUR lokal fehlende Chats werden angelegt.
+      if (await adapter.exists(pfad)) {
+        uebersprungen += 1;
+        continue;
+      }
+      await adapter.write(pfad, antwort.text);
+      geholt += 1;
+    }
+    new Notice(`UnitedShare: ${geholt} Chats geholt, ${uebersprungen} uebersprungen.`);
+  }
+
+  async syncSecondBrainOrdner() {
+    const ordner = String(this.settings.secondBrainOrdner || "").trim().replace(/\/+$/, "");
+    if (!ordner) {
+      new Notice("UnitedShare: kein Second-Brain-Ordner gesetzt (Einstellungen).");
+      return;
+    }
+    if (!this.secondBrainLock) this.secondBrainLock = {};
+    if (!laufStarten(this.secondBrainLock)) {
+      new Notice("UnitedShare: ein Second-Brain-Sync laeuft bereits.");
+      return;
+    }
+    try {
+      const ctx = transportBauen({ settings: this.settings, fetchImpl: requestUrlAsFetch() });
+      if (!ctx) {
+        new Notice("UnitedShare: API-Key oder Basis-URL sind fuer den Workspace unbrauchbar.");
+        return;
+      }
+      const adapter = this.chatAdapter();
+      if (!adapter) {
+        new Notice("UnitedShare: kein Tresor-Zugriff.");
+        return;
+      }
+      const listing = await objekteListen(ctx, NOTES_PRAEFIX);
+      if (listing.status !== 200) {
+        new Notice(`UnitedShare: Workspace nicht erreichbar (Status ${listing.status}).`);
+        return;
+      }
+      const vollstaendig = listing.vollstaendig === true;
+
+      const standPfad = ".vault/second-brain-sync.json";
+      let stand = {};
+      try {
+        if (await adapter.exists(standPfad)) stand = JSON.parse(await adapter.read(standPfad));
+      } catch (_fehler) {
+        stand = {};
+      }
+      if (!stand || typeof stand !== "object") stand = {};
+      stand.index = stand.index && typeof stand.index === "object" ? stand.index : {};
+      stand.remoteStand = stand.remoteStand && typeof stand.remoteStand === "object" ? stand.remoteStand : {};
+      stand.meta = stand.meta && typeof stand.meta === "object" ? stand.meta : {};
+      // Der Stand gehoert zu GENAU einem Ordner. Nach einem
+      // Setting-Wechsel traefe ein alter Index auf den falschen
+      // Teilbaum, darum wird er bei Abweichung verworfen.
+      if (stand.meta.ordner !== ordner) {
+        stand.index = {};
+        stand.remoteStand = {};
+      }
+      stand.meta.ordner = ordner;
+
+      const sha256Hex = async (text) => {
+        const bytes = new TextEncoder().encode(text);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return Array.from(new Uint8Array(digest))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+      };
+
+      // existiert ist DATEISYSTEMTREU (case-insensitiv wie APFS/NTFS) und
+      // synchron: casefold-Menge aller Tresorpfade.
+      // Community-Scan: das Plugin listet NIE den ganzen Tresor auf
+      // (die Vault-weiten Listenaufrufe sind gemeldete Pruef-Muster).
+      // Es laeuft ausschliesslich der gewaehlte Ordner-Teilbaum.
+      const vault = this.app.vault;
+      const wurzel = vault.getAbstractFileByPath(ordner);
+      if (!wurzel || !Array.isArray(wurzel.children)) {
+        new Notice(`UnitedShare: der Ordner ${ordner} existiert nicht im Tresor.`);
+        return;
+      }
+      const ordnerDateien = [];
+      const stapel = [wurzel];
+      while (stapel.length) {
+        const knoten = stapel.pop();
+        for (const kind of knoten.children) {
+          if (Array.isArray(kind.children)) stapel.push(kind);
+          else ordnerDateien.push(kind);
+        }
+      }
+      const belegt = new Set(ordnerDateien.map((f) => String(f.path).toLowerCase()));
+      const existiert = (rel) => belegt.has(`${ordner}/${rel}`.toLowerCase());
+
+      const protokoll = (nutzlast) => {
+        void debugLogSchreiben(adapter, nutzlast);
+      };
+
+      // PULL mit Konfliktbehandlung, dann erst PUSH.
+      let angelegt = 0;
+      let konfliktKopien = 0;
+      let nachfragen = 0;
+      for (const objekt of listing.items) {
+        const rel = relpfadAusKey(objekt && objekt.key);
+        if (rel === null) continue;
+        const antwort = await objektLesen(ctx, objekt.key);
+        if (antwort.status !== 200 || antwort.text === null) continue;
+        stand.remoteStand[rel] = { size: objekt.size, hash: await sha256Hex(antwort.text) };
+        const voll = `${ordner}/${rel}`;
+        let lokalText = null;
+        if (existiert(rel)) {
+          try {
+            lokalText = await vault.adapter.read(voll);
+          } catch (_fehler) {
+            lokalText = null;
+          }
+        }
+        const entscheidung = eingehendeNotiz({ relpfad: rel, remoteText: antwort.text, lokalText, existiert });
+        if (entscheidung.aktion === "anlegen") {
+          const ordnerTeil = voll.split("/").slice(0, -1).join("/");
+          if (ordnerTeil) {
+            try {
+              await vault.createFolder(ordnerTeil);
+            } catch (_fehler) {
+              // Ordner existiert schon.
+            }
+          }
+          try {
+            // O-EXCL: vault.create wirft bei Existenz.
+            await vault.create(voll, antwort.text);
+            belegt.add(voll.toLowerCase());
+            angelegt += 1;
+          } catch (_fehler) {
+            protokoll({ zeit: Date.now(), status: 0, meldung: "anlegen-kollidiert", body: rel.split("/").pop() });
+          }
+        } else if (entscheidung.aktion === "konflikt") {
+          if (entscheidung.bestaetigungErforderlich) {
+            nachfragen += 1;
+            protokoll({ zeit: Date.now(), status: 0, meldung: "konflikt-nachfrage", body: rel.split("/").pop() });
+            continue;
+          }
+          const zielVoll = `${ordner}/${entscheidung.zielPfad}`;
+          try {
+            await vault.create(zielVoll, antwort.text);
+            belegt.add(zielVoll.toLowerCase());
+            konfliktKopien += 1;
+          } catch (_fehler) {
+            protokoll({ zeit: Date.now(), status: 0, meldung: "konflikt-kollidiert", body: rel.split("/").pop() });
+          }
+        }
+      }
+
+      // PUSH haengt am Feature-Gate Listing vollstaendig (REVIEWER-R13).
+      let hochgeladenAnzahl = 0;
+      let abweichungen = 0;
+      if (!vollstaendig) {
+        new Notice(
+          "UnitedShare: Das Gateway lieferte ein unvollstaendiges Listing (mehr als 50 Objekte). " +
+            "Hochladen ist deaktiviert, bis das Gateway Paginierung kann; Herunterladen und Konflikte liefen normal."
+        );
+      } else {
+        const dateien = [];
+        const neueMeta = {};
+        for (const datei of ordnerDateien) {
+          if (!datei.path.startsWith(`${ordner}/`)) continue;
+          const rel = datei.path.slice(ordner.length + 1);
+          if (keyAusRelpfad(rel) === null) continue;
+          neueMeta[rel] = { mtime: datei.stat.mtime, size: datei.stat.size };
+          if (datei.stat.size > MAX_OBJEKT_BYTES) {
+            // Vorfilter: gar nicht erst hashen; der Plan meldet zu-gross.
+            dateien.push({ pfad: rel, hash: "uebergross-nicht-gehasht", groesse: datei.stat.size });
+            continue;
+          }
+          const meta = stand.meta[rel];
+          let hash;
+          if (meta && meta.mtime === datei.stat.mtime && meta.size === datei.stat.size && stand.index[rel]) {
+            // Vorfilter mtime plus groesse: unveraenderte Dateien behalten
+            // ihren Index-Hash ohne erneutes Lesen.
+            hash = stand.index[rel];
+          } else {
+            hash = await sha256Hex(await vault.cachedRead(datei));
+          }
+          dateien.push({ pfad: rel, hash, groesse: datei.stat.size });
+        }
+        const plan = planeOrdnerSync({
+          dateien,
+          index: stand.index,
+          entfernt: listing.items,
+          remoteStand: stand.remoteStand,
+          listingVollstaendig: vollstaendig,
+        });
+        for (const u of plan.uebersprungen) {
+          protokoll({ zeit: Date.now(), status: 0, meldung: u.grund, body: u.pfad.split("/").pop() });
+        }
+        for (const a of plan.remoteAbweichung) {
+          protokoll({ zeit: Date.now(), status: 0, meldung: a.grund || "remote-abweichung", body: a.pfad.split("/").pop() });
+        }
+        abweichungen = plan.remoteAbweichung.length;
+        // Upload-Parallelitaet 3.
+        const hochgeladen = [];
+        let naechster = 0;
+        const arbeiter = Array.from({ length: 3 }, async () => {
+          while (naechster < plan.hochladen.length) {
+            const auftrag = plan.hochladen[naechster];
+            naechster += 1;
+            let inhalt;
+            try {
+              inhalt = await vault.adapter.read(`${ordner}/${auftrag.pfad}`);
+            } catch (_fehler) {
+              continue;
+            }
+            const r = await objektSchreiben(ctx, keyAusRelpfad(auftrag.pfad), inhalt);
+            if (r.ok) {
+              hochgeladen.push(auftrag);
+              stand.remoteStand[auftrag.pfad] = { size: auftrag.groesse, hash: auftrag.hash };
+            } else {
+              protokoll({ zeit: Date.now(), status: r.status, meldung: r.grund || "upload-fehlgeschlagen", body: auftrag.pfad.split("/").pop() });
+            }
+          }
+        });
+        await Promise.all(arbeiter);
+        hochgeladenAnzahl = hochgeladen.length;
+        stand.index = indexNachSync(stand.index, hochgeladen);
+        stand.meta = neueMeta;
+      }
+
+      await adapter.write(standPfad, JSON.stringify(stand));
+      const teile = [`${angelegt} neu`, `${konfliktKopien} Konfliktkopien`, `${hochgeladenAnzahl} hochgeladen`];
+      if (abweichungen) teile.push(`${abweichungen} Remote-Abweichungen`);
+      if (nachfragen) teile.push(`${nachfragen} brauchen Bestaetigung`);
+      new Notice(`UnitedShare Second-Brain: ${teile.join(", ")}.`);
+    } finally {
+      laufBeenden(this.secondBrainLock);
+    }
   }
 
   async chatsWiederherstellen() {
@@ -8605,6 +9892,16 @@ class UnitedShareSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "Prompt" });
     new Setting(containerEl)
+      .setName("Second-Brain-Ordner")
+      .setDesc("Relativer Ordner, der in den Vault-Workspace synchronisiert wird (nur .md und .canvas). Leer = aus.")
+      .addText((text) => {
+        text.setValue(this.plugin.settings.secondBrainOrdner || "");
+        text.onChange(async (value) => {
+          this.plugin.settings.secondBrainOrdner = String(value || "").trim();
+          await this.plugin.saveSettings();
+        });
+      });
+    new Setting(containerEl)
       .setName("Bildordner")
       .setDesc("Relativer Ordner im Tresor. Leer oder ungültig setzt UnitedShare/bilder.")
       .addText((text) => {
@@ -9046,6 +10343,26 @@ class UnitedShareDuckDbView extends FileView {
           statusEl.setText(DUCKDB_ANSICHT_KEINE_ABFRAGE);
           return;
         }
+        // Dateiverweise im SQL-Text (FROM 'adressen.parquet') genau so
+        // nachziehen wie renderSqlCodeBlock(): tresor-relativ lesen und
+        // unter GENAU dem String registrieren, den DuckDB im FROM sieht.
+        // Ohne Zutun scheitert die .sql-Ansicht nach einem kuehlen Start,
+        // weil der Singleton noch nichts registriert hat -- der Codeblock-
+        // Flusss ahmte dieses Verhalten schon, der Dateiview musste dieselbe
+        // Norm erfuellen. Fehlt eine verwiesene Datei, bleibt sie
+        // unregistriert -- die eigene DuckDB-Meldung zeigt dann nachfolgend,
+        // was nicht lesbar war.
+        for (const verweis of duckdbDateiverweiseAusSql(sql)) {
+          try {
+            const verweisBytes = await this.plugin.readVaultBinary(verweis);
+            await db.registerFileBuffer(
+              verweis,
+              verweisBytes instanceof Uint8Array ? verweisBytes : new Uint8Array(verweisBytes),
+            );
+          } catch (_err) {
+            /* Datei fehlt: unregistriert lassen, DuckDB nennt den Rest. */
+          }
+        }
       } else if (endung === "parquet") {
         const bytes = await this.plugin.readVaultBinary(file.path);
         // registerFileBuffer lebt auf AsyncDuckDB (db), nicht auf der
@@ -9119,6 +10436,16 @@ module.exports = class UnitedSharePlugin extends Plugin {
       id: "vault-index-bge",
       name: "Tresor-Index für bge-m3 nachziehen",
       callback: () => this.tresorIndexNachziehen(),
+    });
+    this.addCommand({
+      id: "workspace-chats-wiederherstellen",
+      name: "UnitedShare: Chats aus dem Workspace wiederherstellen",
+      callback: () => this.stelleChatsAusWorkspaceWieder(),
+    });
+    this.addCommand({
+      id: "second-brain-sync",
+      name: "UnitedShare: Second-Brain-Ordner synchronisieren",
+      callback: () => this.syncSecondBrainOrdner(),
     });
     this.app.workspace.onLayoutReady(() => {
       void this.openSidebar();
@@ -9198,6 +10525,32 @@ module.exports = class UnitedSharePlugin extends Plugin {
     const cjsRel = `${basis}/duckdb/duckdb-browser.cjs`;
     const workerRel = `${basis}/duckdb/duckdb-browser-eh.worker.js`;
     const wasmRel = `${basis}/duckdb/duckdb-eh.wasm`;
+    // Erste Pruefung MIT NAMEN: die drei Laufzeitdateien muessen im
+    // Plugin-Unterordner liegen. Die allgemeine Meldung "ließ sich nicht
+    // laden" verbirgt genau diese Ursache (Community-Installer und Release
+    // liefern nur die drei Stammdateien) -- hier schlägt es früh mit den
+    // benannten Dateien durch, ehe der require() unklare Stackspuren wirft.
+    const laufzeitVorhanden = [];
+    for (const [datei, rel] of [
+      ["duckdb-eh.wasm", wasmRel],
+      ["duckdb-browser-eh.worker.js", workerRel],
+      ["duckdb-browser.cjs", cjsRel],
+    ]) {
+      let da = false;
+      try {
+        da = Boolean(await adapter.exists(rel));
+      } catch (_err) {
+        da = false; // Pruefung gescheitert zaehlt als fehlend (fail-closed)
+      }
+      if (da) laufzeitVorhanden.push(datei);
+    }
+    const laufzeitFehlt = duckdbLaufzeitLuecken(laufzeitVorhanden);
+    if (laufzeitFehlt.length) {
+      throw this._duckdbFehler(
+        duckdbLaufzeitMeldung(laufzeitFehlt),
+        new Error(`duckdb/: es fehlt ${laufzeitFehlt.join(", ")}`),
+      );
+    }
     // Bewusst require() der CommonJS-Variante (duckdb-browser.cjs) statt
     // import() der ES-Modul-Variante (duckdb-browser.mjs) ueber eine
     // file://-URL: dynamisches import() einer file://-URL scheitert in
@@ -10307,6 +11660,11 @@ module.exports = class UnitedSharePlugin extends Plugin {
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (!Array.isArray(this.settings.workspaceSyncWarteschlange)) this.settings.workspaceSyncWarteschlange = [];
+    // Der Spiegel-Zustand teilt sich das Array mit den Settings (data.json);
+    // laufend-Zustaende leben in WeakSets der Module und werden NIE
+    // persistiert.
+    this.workspaceSyncZustand = { warteschlange: this.settings.workspaceSyncWarteschlange };
     if (!isObsidianModel(this.settings.model)) this.settings.model = "";
     this.settings.embedModel = String(this.settings.embedModel || "").trim();
     this.settings.absichtModell = String(this.settings.absichtModell || "").trim();
