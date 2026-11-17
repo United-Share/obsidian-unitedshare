@@ -1,0 +1,127 @@
+"use strict";
+
+// Vertraege fuer den Second-Brain-Ordner-Sync in den Vault-Workspace.
+//
+// ANLASS: Ein gewaehlter Ordner (Setting secondBrainOrdner) soll auf allen
+// Geraeten derselben Identitaet verfuegbar sein. Backend sind die vier
+// Workspace-Endpunkte des Gateways, Keys unter obsidian/notes/<relpfad>.
+//
+// WARUM EIN HASH-INDEX: Blind-Uploads wuerden bei jedem Lauf den ganzen
+// Ordner uebertragen. Der Index merkt sich den zuletzt gespiegelten Stand
+// pro Datei; nur Abweichungen werden hochgeladen.
+//
+// WARUM KONFLIKTKOPIEN STATT UEBERSCHREIBEN: Stiller Datenverlust ist das
+// einzige unverzeihliche Verhalten eines Sync. Ist die lokale Datei anders
+// als die eingehende, bleibt die lokale stehen und die eingehende landet als
+// Konfliktkopie daneben (konfliktDateiname aus unitedshare-core).
+//
+// WARUM KEINE LOESCH-PROPAGATION IM MVP: Ohne Tombstones ist nicht
+// unterscheidbar, ob eine Datei geloescht oder nur noch nie gesehen wurde.
+// Der Plan behandelt entfernte Keys ohne lokale Datei deshalb ausdruecklich
+// als "ignoriert", nie als Loeschauftrag.
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const {
+  NOTES_PRAEFIX,
+  MAX_OBJEKT_BYTES,
+  keyAusRelpfad,
+  relpfadAusKey,
+  planeOrdnerSync,
+  eingehendeNotiz,
+  indexNachSync,
+} = require("./ordner-sync");
+
+test("keyAusRelpfad und relpfadAusKey sind verlustfrei, auch mit Umlauten und Leerzeichen", () => {
+  const rel = "Ideen/Café Plan (2026).md";
+  const key = keyAusRelpfad(rel);
+  assert.equal(key, "obsidian/notes/Ideen/Café Plan (2026).md");
+  assert.equal(relpfadAusKey(key), rel);
+  assert.ok(key.startsWith(NOTES_PRAEFIX));
+});
+
+test("keyAusRelpfad lehnt gefaehrliche Pfade ab", () => {
+  assert.equal(keyAusRelpfad(""), null);
+  assert.equal(keyAusRelpfad("/absolut.md"), null);
+  assert.equal(keyAusRelpfad("a/../b.md"), null);
+  assert.equal(relpfadAusKey("anderes/praefix.md"), null);
+});
+
+test("planeOrdnerSync laedt nur Neues und Geaendertes hoch", () => {
+  const plan = planeOrdnerSync({
+    dateien: [
+      { pfad: "a.md", hash: "h1", groesse: 10 },
+      { pfad: "b.md", hash: "h2-neu", groesse: 10 },
+      { pfad: "c.md", hash: "h3", groesse: 10 },
+    ],
+    index: { "a.md": "h1", "b.md": "h2-alt" },
+    entfernt: [],
+  });
+  assert.deepEqual(plan.hochladen.map((d) => d.pfad).sort(), ["b.md", "c.md"]);
+  assert.deepEqual(plan.uebersprungen, []);
+});
+
+test("planeOrdnerSync ueberspringt Dateien ueber dem Gateway-Limit mit Grund", () => {
+  const plan = planeOrdnerSync({
+    dateien: [
+      { pfad: "klein.md", hash: "h1", groesse: 10 },
+      { pfad: "riesig.pdf", hash: "h2", groesse: MAX_OBJEKT_BYTES + 1 },
+    ],
+    index: {},
+    entfernt: [],
+  });
+  assert.deepEqual(plan.hochladen.map((d) => d.pfad), ["klein.md"]);
+  assert.equal(plan.uebersprungen.length, 1);
+  assert.equal(plan.uebersprungen[0].pfad, "riesig.pdf");
+  assert.equal(plan.uebersprungen[0].grund, "zu-gross");
+});
+
+test("planeOrdnerSync propagiert Loeschungen nicht, sondern weist sie nur aus", () => {
+  const plan = planeOrdnerSync({
+    dateien: [{ pfad: "bleibt.md", hash: "h1", groesse: 5 }],
+    index: { "bleibt.md": "h1", "lokal-geloescht.md": "h9" },
+    entfernt: [
+      { key: "obsidian/notes/bleibt.md", size: 5 },
+      { key: "obsidian/notes/nur-remote.md", size: 7 },
+    ],
+  });
+  assert.deepEqual(plan.hochladen, []);
+  assert.deepEqual(plan.geloeschtIgnoriert.sort(), ["obsidian/notes/nur-remote.md"]);
+  assert.ok(!("loeschen" in plan));
+});
+
+test("eingehendeNotiz legt Neues direkt an und macht bei Abweichung eine Konfliktkopie", () => {
+  const neu = eingehendeNotiz({
+    relpfad: "Ideen/neu.md",
+    remoteText: "Inhalt",
+    lokalText: null,
+    existiert: () => false,
+  });
+  assert.equal(neu.aktion, "anlegen");
+  assert.equal(neu.zielPfad, "Ideen/neu.md");
+
+  const gleich = eingehendeNotiz({
+    relpfad: "Ideen/gleich.md",
+    remoteText: "Inhalt",
+    lokalText: "Inhalt",
+    existiert: () => true,
+  });
+  assert.equal(gleich.aktion, "unveraendert");
+
+  const belegt = new Set(["Ideen/anders.md"]);
+  const konflikt = eingehendeNotiz({
+    relpfad: "Ideen/anders.md",
+    remoteText: "Remote-Fassung",
+    lokalText: "Lokale Fassung",
+    existiert: (p) => belegt.has(p),
+  });
+  assert.equal(konflikt.aktion, "konflikt");
+  assert.notEqual(konflikt.zielPfad, "Ideen/anders.md");
+  assert.ok(konflikt.zielPfad.includes("Konflikt"));
+});
+
+test("indexNachSync uebernimmt die hochgeladenen Staende und vergisst nichts anderes", () => {
+  const neu = indexNachSync({ "a.md": "h1" }, [{ pfad: "b.md", hash: "h2" }]);
+  assert.deepEqual(neu, { "a.md": "h1", "b.md": "h2" });
+});
