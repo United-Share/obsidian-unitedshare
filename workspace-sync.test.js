@@ -26,6 +26,7 @@ const {
   basisPruefen,
   transportBauen,
   WARTESCHLANGE_MAX_EINTRAEGE,
+  WARTESCHLANGE_MAX_BYTES,
   slugAusTitel,
   chatKey,
   urlFuerObjekt,
@@ -858,6 +859,99 @@ test("201 gilt als Erfolg und leerer Zustand wirft nicht", async () => {
   } finally {
     server.close();
   }
+});
+
+// Gate-Runde 2, Q1: auch der Chat-Spiegel hat ein Lauf-Lock. Zwei
+// parallele Laeufe auf derselben Warteschlange wuerden sonst Eintraege
+// doppelt senden oder beim blinden shift fremde Koepfe entfernen.
+test("ueberlappende chatSpiegeln-Laeufe werden abgewiesen", async () => {
+  let freigeben;
+  const blockiert = new Promise((f) => (freigeben = f));
+  const zustand = { warteschlange: [{ key: "obsidian/chats/alt-b.json", inhalt: "b" }] };
+  const ctx = {
+    settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+    fetchImpl: async () => {
+      await blockiert;
+      return { status: 200 };
+    },
+  };
+  const lauf1 = chatSpiegeln(ctx, chatVon("q1a", "x"), zustand);
+  await new Promise((f) => setTimeout(f, 10));
+  const lauf2 = await chatSpiegeln(ctx, chatVon("q1b", "y"), zustand);
+  assert.equal(lauf2.ergebnis, "laeuft-bereits");
+  assert.ok(zustand.warteschlange.some((e) => e.key === "obsidian/chats/alt-b.json"), "alt-B bleibt erhalten");
+  freigeben();
+  const e1 = await lauf1;
+  assert.equal(e1.ergebnis, "gespiegelt");
+  assert.equal(zustand.warteschlange.length, 0);
+});
+
+// Gate-Runde 2, Q3: ein Eintrag ueber der Byte-Grenze landet NIE in der
+// Schlange, und verdraengt wird zuerst der groesste statt der aelteste.
+test("ein Riese landet nie in der Schlange und verdraengt nichts", async () => {
+  const protokoll = [];
+  const kleine = Array.from({ length: 20 }, (_x, n) => ({ key: `obsidian/chats/klein-${n}.json`, inhalt: "k" }));
+  const zustand = { warteschlange: [...kleine] };
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      fetchImpl: async () => ({ status: 500 }),
+      chatAlsText: () => "r".repeat(WARTESCHLANGE_MAX_BYTES + 1),
+      protokoll: (n) => protokoll.push(n),
+    },
+    chatVon("riese", "x"),
+    zustand
+  );
+  assert.equal(e.ergebnis, "verworfen");
+  assert.equal(zustand.warteschlange.length, 20, "die kleinen bleiben alle");
+  assert.ok(protokoll.some((n) => n.meldung === "zu-gross-fuer-warteschlange"));
+});
+
+test("die Byte-Verdraengung trifft zuerst den groessten Eintrag", async () => {
+  const protokoll = [];
+  const zustand = {
+    warteschlange: [
+      { key: "obsidian/chats/brocken.json", inhalt: "g".repeat(3 * 1024 * 1024) },
+      { key: "obsidian/chats/klein-a.json", inhalt: "a".repeat(600 * 1024) },
+      { key: "obsidian/chats/klein-b.json", inhalt: "b".repeat(600 * 1024) },
+    ],
+  };
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      fetchImpl: async () => ({ status: 500 }),
+      chatAlsText: () => "n".repeat(600 * 1024),
+      protokoll: (n) => protokoll.push(n),
+    },
+    chatVon("q3neu", "x"),
+    zustand
+  );
+  assert.equal(e.ergebnis, "aufgeschoben");
+  const keys = zustand.warteschlange.map((x) => x.key);
+  assert.ok(!keys.includes("obsidian/chats/brocken.json"), "der Brocken fliegt zuerst");
+  assert.ok(keys.includes("obsidian/chats/klein-a.json"));
+  assert.ok(keys.includes("obsidian/chats/klein-b.json"));
+  assert.ok(keys.some((k) => k.includes("q3neu")), "der frische Eintrag bleibt");
+});
+
+// Gate-Runde 2, Q4: ein unmessbarer Body wird durch Wiederholen nicht
+// messbar; das Ergebnis ist endgueltig.
+test("unmessbare Bodies gelten als endgueltig und landen nicht in der Schlange", async () => {
+  const protokoll = [];
+  const zustand = { warteschlange: [] };
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      fetchImpl: async () => ({ status: 200 }),
+      chatAlsText: () => ({ kein: "string" }),
+      protokoll: (n) => protokoll.push(n),
+    },
+    chatVon("q4", "x"),
+    zustand
+  );
+  assert.equal(e.ergebnis, "verworfen");
+  assert.equal(zustand.warteschlange.length, 0);
+  assert.equal(protokoll.length, 1);
 });
 
 test("die Warteschlange verdraengt bei Ueberlauf das Aelteste", async () => {

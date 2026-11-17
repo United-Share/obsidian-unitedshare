@@ -517,6 +517,17 @@ test("laufStarten verhindert ueberlappende Laeufe", () => {
   assert.equal(laufStarten(zustand), true);
 });
 
+// Gate-Runde 2, Q2: laufend ist transienter Zustand. Ein aus data.json
+// geladenes laufend:true (Absturz mitten im Lauf) darf den naechsten Lauf
+// nicht fuer immer blockieren.
+test("persistiertes laufend-Flag blockiert keinen neuen Lauf", () => {
+  const geladen = JSON.parse('{"laufend":true,"warteschlange":[]}');
+  assert.equal(laufStarten(geladen), true);
+  assert.equal(laufStarten(geladen), false);
+  laufBeenden(geladen);
+  assert.equal(laufStarten(geladen), true);
+});
+
 test("existiert wird case-insensitiv befragt (APFS)", () => {
   const e = eingehendeNotiz({
     relpfad: "README.md",

@@ -143,17 +143,22 @@ function planeOrdnerSync({ dateien = [], index = {}, entfernt = [], remoteStand 
   return { hochladen, uebersprungen, geloeschtIgnoriert, remoteAbweichung };
 }
 
-// K7: ein laufend-Flag im Zustand verhindert ueberlappende Sync-Laeufe;
-// beide Kommandos (manuell und Datei-Speichern) kehren dann frueh zurueck.
+// K7 und Q2: das Lauf-Lock verhindert ueberlappende Sync-Laeufe. Es lebt
+// in einem WeakSet statt als Feld im Zustand, denn laufend ist TRANSIENT:
+// ein nach einem Absturz aus data.json geladenes laufend:true darf den
+// naechsten Lauf nicht fuer immer blockieren, und in saveData gehoert das
+// Flag nie hinein.
+const AKTIVE_LAEUFE = new WeakSet();
+
 function laufStarten(zustand) {
   if (!zustand || typeof zustand !== "object") return false;
-  if (zustand.laufend === true) return false;
-  zustand.laufend = true;
+  if (AKTIVE_LAEUFE.has(zustand)) return false;
+  AKTIVE_LAEUFE.add(zustand);
   return true;
 }
 
 function laufBeenden(zustand) {
-  if (zustand && typeof zustand === "object") zustand.laufend = false;
+  if (zustand && typeof zustand === "object") AKTIVE_LAEUFE.delete(zustand);
 }
 
 // Entscheidung fuer eine eingehende Notiz. Niemals stilles Ueberschreiben,

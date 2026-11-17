@@ -158,6 +158,7 @@ function kopf(apiKey) {
 // der Pruefung nichts mutierbar ist, und transportGueltig prueft die Basis
 // zur Tiefenverteidigung erneut (rein und billig).
 const GEPRUEFTE_TRANSPORTE = new WeakSet();
+const AKTIVE_SPIEGEL = new WeakSet();
 
 function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}) {
   const einstellungen = settings || {};
@@ -358,6 +359,13 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   const z = zustand && typeof zustand === "object" ? zustand : {};
   if (!Array.isArray(z.warteschlange)) z.warteschlange = [];
 
+  // Q1: Lauf-Lock auch fuer den Spiegel; zwei parallele Laeufe auf
+  // derselben Warteschlange wuerden Eintraege doppelt senden.
+  if (AKTIVE_SPIEGEL.has(z)) {
+    return { ergebnis: "laeuft-bereits", nachgeholt: 0 };
+  }
+  AKTIVE_SPIEGEL.add(z);
+  try {
   let geschrieben;
   try {
     geschrieben = await objektSchreiben(transport, key, inhalt);
@@ -366,24 +374,47 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   }
 
   if (!geschrieben.ok) {
-    if (!wiederholbar(geschrieben.status)) {
+    // Q4: ein unmessbarer Body wird durch Wiederholen nicht messbar.
+    if (geschrieben.grund === "unmessbar" || !wiederholbar(geschrieben.status)) {
       // Endgueltige Ablehnung: einmal protokollieren, nie einreihen.
       protokolliere({ key, status: geschrieben.status, meldung: "endgueltig-abgelehnt" });
       melde("Workspace-Spiegel verworfen");
       return { ergebnis: "verworfen", nachgeholt: 0 };
     }
+    // Q3: ein Eintrag ueber der Byte-Grenze landet NIE in der Schlange;
+    // er wuerde sie nur leeren und selbst nie durchpassen.
+    if (utf8ByteLength(String(inhalt ?? "")) > WARTESCHLANGE_MAX_BYTES) {
+      protokolliere({ key, status: geschrieben.status, meldung: "zu-gross-fuer-warteschlange" });
+      melde("Workspace-Spiegel: Chat zu gross fuer die Warteschlange");
+      return { ergebnis: "verworfen", nachgeholt: 0 };
+    }
     // Dedupe pro Key: der letzte Stand gewinnt, Position am Ende.
     z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
-    z.warteschlange.push({ key, inhalt, versuche: 0 });
-    // Obergrenzen: Anzahl und Gesamtbytes, Verdraengung des Aeltesten.
+    const frisch = { key, inhalt, versuche: 0 };
+    z.warteschlange.push(frisch);
     while (z.warteschlange.length > WARTESCHLANGE_MAX_EINTRAEGE) {
       const raus = z.warteschlange.shift();
       protokolliere({ key: raus.key, status: 0, meldung: "verdraengt" });
     }
-    let gesamt = z.warteschlange.reduce((summe, w) => summe + utf8ByteLength(String(w.inhalt ?? "")), 0);
+    // Q3: Byte-Verdraengung trifft zuerst den GROESSTEN Eintrag (nie den
+    // frischen), nicht den aeltesten; so ueberleben viele kleine Chats
+    // einen einzelnen Brocken.
+    const bytesVon = (e) => utf8ByteLength(String(e.inhalt ?? ""));
+    let gesamt = z.warteschlange.reduce((summe, e) => summe + bytesVon(e), 0);
     while (gesamt > WARTESCHLANGE_MAX_BYTES && z.warteschlange.length > 1) {
-      const raus = z.warteschlange.shift();
-      gesamt -= utf8ByteLength(String(raus.inhalt ?? ""));
+      let groessterIdx = -1;
+      let groessterWert = -1;
+      for (let n = 0; n < z.warteschlange.length; n += 1) {
+        if (z.warteschlange[n] === frisch) continue;
+        const b = bytesVon(z.warteschlange[n]);
+        if (b > groessterWert) {
+          groessterWert = b;
+          groessterIdx = n;
+        }
+      }
+      if (groessterIdx === -1) break;
+      const raus = z.warteschlange.splice(groessterIdx, 1)[0];
+      gesamt -= groessterWert;
       protokolliere({ key: raus.key, status: 0, meldung: "verdraengt" });
     }
     protokolliere({ key, status: geschrieben.status, meldung: "aufgeschoben" });
@@ -405,7 +436,12 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   while (z.warteschlange.length > 0 && bearbeitet < NACHHOL_MAX_STUECK) {
     // K4: Zeitbudget fuer den gesamten Nachhol-Lauf.
     if (jetzt() - nachholStart >= NACHHOL_BUDGET_MS) break;
+    // Q1: VOR dem Schreiben per Identitaet entnehmen; ein blindes shift
+    // nach dem await koennte einen fremden Kopf treffen.
     const kopfEintrag = z.warteschlange[0];
+    const idx = z.warteschlange.indexOf(kopfEintrag);
+    if (idx === -1) break;
+    z.warteschlange.splice(idx, 1);
     bearbeitet += 1;
     let r;
     try {
@@ -414,26 +450,27 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
       r = { status: 0, ok: false };
     }
     if (r.ok) {
-      z.warteschlange.shift();
       nachgeholt += 1;
       continue;
     }
-    if (!wiederholbar(r.status)) {
-      // Endgueltig abgelehnt: raus damit, der Kopf blockiert nicht.
-      z.warteschlange.shift();
+    if (r.grund === "unmessbar" || !wiederholbar(r.status)) {
       protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "endgueltig-abgelehnt" });
       continue;
     }
     kopfEintrag.versuche = (kopfEintrag.versuche ?? 0) + 1;
     if (kopfEintrag.versuche >= VERSUCHE_MAX) {
-      z.warteschlange.shift();
       protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "aufgegeben" });
       continue;
     }
+    // wiederholbar: vorne wieder einsetzen, Lauf endet.
+    z.warteschlange.unshift(kopfEintrag);
     break;
   }
   melde(nachgeholt > 0 ? `Workspace-Spiegel ok, ${nachgeholt} nachgeholt` : "Workspace-Spiegel ok");
   return { ergebnis: "gespiegelt", nachgeholt };
+  } finally {
+    AKTIVE_SPIEGEL.delete(z);
+  }
 }
 
 // S2: das Listing ist fremde Eingabe; Keys laufen durch dieselbe
@@ -450,6 +487,7 @@ module.exports = {
   CHATS_PRAEFIX,
   transportBauen,
   WARTESCHLANGE_MAX_EINTRAEGE,
+  WARTESCHLANGE_MAX_BYTES,
   ITEM_DECKEL,
   MAX_OBJEKT_BYTES,
   basisPruefen,
