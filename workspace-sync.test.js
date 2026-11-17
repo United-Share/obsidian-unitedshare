@@ -23,6 +23,7 @@ const http = require("node:http");
 const {
   CHATS_PRAEFIX,
   MAX_OBJEKT_BYTES,
+  basisPruefen,
   slugAusTitel,
   chatKey,
   urlFuerObjekt,
@@ -299,21 +300,41 @@ test("chatSpiegeln lehnt unsichere Basis-URLs ohne Request ab", async () => {
   }
 });
 
-test("chatSpiegeln erlaubt fremde Hosts, solange es https ist", async () => {
-  let gesehen = "";
+// S3-Nachtrag: Host-Pinning. Solange es keine kundeneigenen Gateways gibt,
+// ist jede fremde Basis ein Exfiltrationsvektor fuer Key und Inhalte; die
+// fruehere Erlaubnis beliebiger https-Hosts ist revidiert. Die
+// Loopback-Ausnahme gilt nur numerisch (127.0.0.1, [::1]) und nur, wenn
+// der Aufrufer sie explizit freischaltet; localhost loest auf und bleibt
+// deshalb immer verboten.
+test("basisPruefen pinnt den Host auf api.unitedshare.ai", () => {
+  assert.equal(basisPruefen("https://api.unitedshare.ai/v1"), "https://api.unitedshare.ai/v1");
+  assert.equal(basisPruefen("https://angreifer.example/v1"), null);
+  assert.equal(basisPruefen("https://api.unitedshare.ai.angreifer.example/v1"), null);
+});
+
+test("basisPruefen erlaubt Loopback nur numerisch und nur mit Freischaltung", () => {
+  assert.equal(basisPruefen("http://127.0.0.1:9/v1", { erlaubeLoopback: true }), "http://127.0.0.1:9/v1");
+  assert.equal(basisPruefen("http://[::1]:9/v1", { erlaubeLoopback: true }), "http://[::1]:9/v1");
+  assert.equal(basisPruefen("http://127.0.0.1:9/v1"), null);
+  assert.equal(basisPruefen("http://localhost:9/v1", { erlaubeLoopback: true }), null);
+  assert.equal(basisPruefen("http://localhost:9/v1"), null);
+});
+
+test("chatSpiegeln lehnt fremde https-Hosts ab", async () => {
+  let treffer = 0;
   const e = await chatSpiegeln(
     {
       settings: { apiKey: "usk_test_1", baseUrl: "https://andere.example/v1" },
-      fetchImpl: async (url) => {
-        gesehen = url;
-        return { status: 200 };
+      fetchImpl: async () => {
+        treffer += 1;
+        throw new Error("darf nicht passieren");
       },
     },
     { title: "T", erstellt: "2026-11-17T10:00:00Z", id: "c1", messages: [{ role: "user", content: "x" }] },
     { warteschlange: [] }
   );
-  assert.equal(e.ergebnis, "gespiegelt");
-  assert.ok(gesehen.startsWith("https://andere.example/v1/workspace/object?key="));
+  assert.equal(e.ergebnis, "keine-basis");
+  assert.equal(treffer, 0);
 });
 
 test("chatSpiegeln lehnt unbrauchbare apiKeys ohne Request ab", async () => {
@@ -344,6 +365,7 @@ test("chatSpiegeln bei 401 schreibt ins Protokoll und stellt den Chat in die War
   try {
     const ctx = {
       settings: { apiKey: "usk_falsch", baseUrl: `http://127.0.0.1:${port}/v1` },
+      erlaubeLoopback: true,
       fetchImpl: fetch,
       protokoll: (eintrag) => protokoll.push(eintrag),
     };
@@ -373,6 +395,7 @@ test("chatSpiegeln holt die Warteschlange beim naechsten Erfolg nach", async () 
   try {
     const ctx = {
       settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
+      erlaubeLoopback: true,
       fetchImpl: fetch,
     };
     const zustand = { warteschlange: [{ key: "obsidian/chats/2026-11-16-alt.md", inhalt: "alter chat" }] };

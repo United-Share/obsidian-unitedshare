@@ -45,19 +45,29 @@ function basis(baseUrl) {
 }
 
 // S3: Basis-URL und apiKey sind Settings und damit beeinflussbare Eingabe.
-// Nur https verlaesst das Geraet (Ausnahme loopback fuer lokale Tests);
-// Zugangsdaten, Fragment oder Query in der Basis sind verboten, der Key
-// muss nach dem Trimmen dem usk-Alphabet entsprechen.
-function basisPruefen(baseUrl) {
+// Host-Pinning: Solange es keine kundeneigenen Gateways gibt, ist jede
+// andere Basis ein Exfiltrationsvektor fuer Key und Inhalte. Kommen
+// Enterprise-eigene Gateways, wird deren Freigabe ein bewusster,
+// dokumentierter Konfigurationsschritt, kein freies Textfeld. Die
+// Loopback-Ausnahme gilt nur numerisch (127.0.0.1, [::1]) und nur, wenn
+// der Aufrufer sie explizit freischaltet (Tests); localhost loest ueber
+// den Resolver auf und bleibt deshalb immer verboten.
+const ERLAUBTER_ORIGIN = "https://api.unitedshare.ai";
+
+function basisPruefen(baseUrl, optionen) {
   let u;
   try {
     u = new URL(String(baseUrl ?? ""));
   } catch (_fehler) {
     return null;
   }
-  const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost";
-  if (u.protocol !== "https:" && !(u.protocol === "http:" && loopback)) return null;
   if (u.username || u.password || u.hash || u.search) return null;
+  const loopbackFrei = Boolean(optionen && optionen.erlaubeLoopback === true);
+  const numerischLokal = u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+  const erlaubt =
+    u.origin === ERLAUBTER_ORIGIN ||
+    (loopbackFrei && u.protocol === "http:" && numerischLokal);
+  if (!erlaubt) return null;
   return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
 }
 
@@ -186,7 +196,7 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     melde("Workspace-Spiegel aus: API-Key unbrauchbar");
     return { ergebnis: "kein-schluessel", nachgeholt: 0 };
   }
-  const sichereBasis = basisPruefen(einstellungen.baseUrl);
+  const sichereBasis = basisPruefen(einstellungen.baseUrl, { erlaubeLoopback: ctx.erlaubeLoopback === true });
   if (sichereBasis === null) {
     melde("Workspace-Spiegel aus: Basis-URL unsicher");
     return { ergebnis: "keine-basis", nachgeholt: 0 };
