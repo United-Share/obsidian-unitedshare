@@ -36,10 +36,31 @@ function slugAusTitel(titel) {
   return slug.length > 0 ? slug : "chat";
 }
 
-function chatKey(eintrag, datum) {
-  const tag = String(datum ?? "").slice(0, 10);
-  const titel = eintrag && eintrag.title ? eintrag.title : "";
-  return `${CHATS_PRAEFIX}${tag}-${slugAusTitel(titel)}.md`;
+// Lokale Kopie des Kennungs-Musters aus unitedshare-core (chatKennung):
+// alles ausser Buchstaben, Ziffern, Strich und Unterstrich fliegt raus.
+function chatKennung(id) {
+  const roh = String(id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+  return roh || "ohne-kennung";
+}
+
+// K1: nach ERSTELLT plus Kennung benannt, wie das Hausmuster chatDateiname.
+// UTC, nicht Ortszeit: sonst bekaeme dasselbe Gespraech nach einem Flug
+// einen anderen Namen. Der Titel-Slug ist nur lesbares Suffix (maximal 80
+// Zeichen), die Endung ist .json, weil der Inhalt JSON ist und chatsLaden
+// auf .json filtert.
+function chatKey(eintrag) {
+  const roh = eintrag ? eintrag.erstellt : undefined;
+  const zeitpunkt =
+    roh instanceof Date
+      ? roh
+      : typeof roh === "number" && Number.isFinite(roh)
+        ? new Date(roh)
+        : new Date(String(roh ?? ""));
+  const iso = Number.isNaN(zeitpunkt.getTime()) ? "1970-01-01T00:00:00.000Z" : zeitpunkt.toISOString();
+  const tag = iso.slice(0, 10);
+  const stunde = iso.slice(11, 16).replace(":", "");
+  const slug = slugAusTitel(eintrag && eintrag.title).slice(0, 80);
+  return `${CHATS_PRAEFIX}${tag}-${stunde}-${chatKennung(eintrag && eintrag.id)}-${slug}.json`;
 }
 
 function basis(baseUrl) {
@@ -210,6 +231,10 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   const einstellungen = (ctx && ctx.settings) || {};
   const melde = typeof ctx.status === "function" ? ctx.status : () => {};
   const protokolliere = typeof ctx.protokoll === "function" ? ctx.protokoll : () => {};
+  // K1: leere Chats werden nicht gespiegelt; es gaebe nichts zurueckzuholen.
+  if (!eintrag || !Array.isArray(eintrag.messages) || eintrag.messages.length === 0) {
+    return { ergebnis: "leer", nachgeholt: 0 };
+  }
   if (!einstellungen.apiKey) {
     melde("Workspace-Spiegel aus: kein API-Key hinterlegt");
     return { ergebnis: "kein-schluessel", nachgeholt: 0 };
@@ -230,8 +255,7 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     apiKey,
     fetchImpl: ctx.fetchImpl,
   };
-  const datum = ctx.datum ?? new Date().toISOString();
-  const key = chatKey(eintrag, datum);
+  const key = chatKey(eintrag);
   const inhalt = typeof ctx.chatAlsText === "function" ? ctx.chatAlsText(eintrag) : JSON.stringify(eintrag);
 
   let geschrieben;

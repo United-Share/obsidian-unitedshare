@@ -49,11 +49,50 @@ test("slugAusTitel normalisiert Umlaute und Sonderzeichen", () => {
   assert.equal(slugAusTitel(""), "chat");
 });
 
-test("chatKey baut den Schluessel aus Datum und Titel", () => {
-  const eintrag = { title: "Projektplanung Q1", messages: [{ role: "user", content: "x" }] };
-  assert.equal(chatKey(eintrag, "2026-11-17"), "obsidian/chats/2026-11-17-projektplanung-q1.md");
-  assert.equal(chatKey(eintrag, "2026-11-17T15:40:00Z"), "obsidian/chats/2026-11-17-projektplanung-q1.md");
-  assert.ok(chatKey(eintrag, "2026-11-17").startsWith(CHATS_PRAEFIX));
+// Nacharbeit K1: nach ERSTELLT plus Kennung benannt, wie das Hausmuster
+// chatDateiname. Der Name muss ueber alle Speichervorgaenge derselbe
+// bleiben (sonst waechst der Workspace bei jeder Antwort um ein Objekt),
+// zwei Chats gleichen Titels duerfen nie kollidieren, und die Endung ist
+// .json, weil der Inhalt JSON ist.
+test("chatKey ist stabil ueber Speichervorgaenge und kollisionsfrei", () => {
+  const a = { title: "Planung", erstellt: "2026-11-17T09:15:00Z", id: "abc123", messages: [{ role: "user", content: "x" }] };
+  const b = { title: "Planung", erstellt: "2026-11-17T11:40:00Z", id: "zzz999", messages: [{ role: "user", content: "y" }] };
+  assert.equal(chatKey(a), chatKey(a));
+  assert.equal(chatKey(a), "obsidian/chats/2026-11-17-0915-abc123-planung.json");
+  assert.notEqual(chatKey(a), chatKey(b));
+  assert.ok(chatKey(b).endsWith(".json"));
+});
+
+test("chatKey vertraegt Date, Millisekunden und Muell als erstellt", () => {
+  const alsDate = { title: "T", erstellt: new Date(Date.UTC(2026, 10, 17, 9, 15)), id: "d1", messages: [{}] };
+  assert.ok(chatKey(alsDate).startsWith("obsidian/chats/2026-11-17-0915-d1-"));
+  const alsMs = { title: "T", erstellt: Date.UTC(2026, 10, 17, 9, 15), id: "m1", messages: [{}] };
+  assert.ok(chatKey(alsMs).startsWith("obsidian/chats/2026-11-17-0915-m1-"));
+  const muell = { title: "T", erstellt: "kein datum", id: "x!/..y", messages: [{}] };
+  assert.ok(chatKey(muell).startsWith("obsidian/chats/1970-01-01-0000-xy-"));
+});
+
+test("chatKey deckelt den Titel-Slug auf 80 Zeichen", () => {
+  const lang = { title: "w".repeat(200), erstellt: "2026-11-17T00:00:00Z", id: "l1", messages: [{}] };
+  const slugTeil = chatKey(lang).split("-l1-")[1];
+  assert.equal(slugTeil, "w".repeat(80) + ".json");
+});
+
+test("chatSpiegeln spiegelt leere Chats nicht", async () => {
+  let treffer = 0;
+  const e = await chatSpiegeln(
+    {
+      settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+      fetchImpl: async () => {
+        treffer += 1;
+        throw new Error("darf nicht passieren");
+      },
+    },
+    { title: "Leer", erstellt: "2026-11-17T00:00:00Z", id: "e1", messages: [] },
+    { warteschlange: [] }
+  );
+  assert.equal(e.ergebnis, "leer");
+  assert.equal(treffer, 0);
 });
 
 test("urlFuerObjekt percent-encodiert den Key, urlFuerListe den Praefix", () => {
