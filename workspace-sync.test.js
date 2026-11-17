@@ -224,6 +224,34 @@ test("objekt-Funktionen lehnen ungemarkte Kontexte fail-closed ab", async () => 
   assert.equal(treffer, 0);
 });
 
+// T1-Nachtrag: ein In-Objekt-Marker (Symbol) waere per Spread kopierbar.
+// Das Register ist deshalb out-of-band (WeakSet), das ctx ist eingefroren,
+// und transportGueltig prueft die Basis erneut.
+test("ein kopierter oder nachgebauter Transport-Kontext faellt durch", async () => {
+  let treffer = 0;
+  const echt = testTransport(async () => {
+    treffer += 1;
+    throw new Error("darf nicht passieren");
+  });
+  const spreadKopie = { ...echt };
+  const k = await objektLesen(spreadKopie, "obsidian/chats/a.json");
+  assert.equal(k.grund, "ungeprueft", "Spread-Kopie ist ein neues, ungepruftes Objekt");
+
+  const nachgebaut = Object.assign({}, echt);
+  const n = await objekteListen(nachgebaut, CHATS_PRAEFIX);
+  assert.equal(n.grund, "ungeprueft");
+  assert.equal(treffer, 0);
+});
+
+test("ein gebauter Transport-Kontext ist eingefroren", () => {
+  const echt = testTransport(async () => ({}));
+  assert.ok(Object.isFrozen(echt));
+  assert.throws(() => {
+    echt.baseUrl = "https://angreifer.example";
+  }, TypeError);
+  assert.equal(echt.baseUrl, "http://127.0.0.1:1/v1");
+});
+
 test("transportBauen liefert null fuer boese Basis oder kaputten Key", () => {
   assert.equal(transportBauen({ settings: { apiKey: "usk_test_1", baseUrl: "https://angreifer.example/v1" }, fetchImpl: async () => ({}) }), null);
   assert.equal(transportBauen({ settings: { apiKey: " ", baseUrl: "https://api.unitedshare.ai/v1" }, fetchImpl: async () => ({}) }), null);

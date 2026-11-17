@@ -152,10 +152,12 @@ function kopf(apiKey) {
 }
 
 // T1: transportBauen ist der EINZIGE erlaubte Weg zu einem Transport-
-// Kontext. Es buendelt basisPruefen, apiKeyPruefen und mitFrist; die
-// Objekt-Funktionen akzeptieren nur so gebaute Kontexte (Marker), damit
-// kein Aufrufer an den Pruefungen vorbei einen Request bauen kann.
-const TRANSPORT_MARKER = Symbol("workspace-sync-transport");
+// Kontext. Es buendelt basisPruefen, apiKeyPruefen und mitFrist.
+// T1-Nachtrag: das Register ist out-of-band (WeakSet), weil ein Marker im
+// Objekt per Spread kopierbar waere; das ctx ist eingefroren, damit nach
+// der Pruefung nichts mutierbar ist, und transportGueltig prueft die Basis
+// zur Tiefenverteidigung erneut (rein und billig).
+const GEPRUEFTE_TRANSPORTE = new WeakSet();
 
 function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}) {
   const einstellungen = settings || {};
@@ -166,16 +168,18 @@ function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}
   if (typeof fetchImpl !== "function") return null;
   const roh = Number(timeoutMs ?? einstellungen.timeoutMs);
   const frist = Number.isFinite(roh) && roh > 0 ? roh : TIMEOUT_MS_STANDARD;
-  return {
-    [TRANSPORT_MARKER]: true,
+  const ctx = Object.freeze({
     baseUrl: basis,
     apiKey,
     fetchImpl: mitFrist(fetchImpl, frist),
-  };
+  });
+  GEPRUEFTE_TRANSPORTE.add(ctx);
+  return ctx;
 }
 
 function transportGueltig(ctx) {
-  return Boolean(ctx && ctx[TRANSPORT_MARKER] === true);
+  if (!ctx || !GEPRUEFTE_TRANSPORTE.has(ctx)) return false;
+  return basisPruefen(ctx.baseUrl, { erlaubeLoopback: true }) !== null;
 }
 
 // S5: typfeste Messung. Alles ohne messbare Groesse wird abgelehnt statt
