@@ -10,12 +10,9 @@
 //
 // Vertraege und Begruendungen: workspace-sync.test.js.
 
-const { keyPruefen } = require("./key-pruefung");
+const { keyPruefen, utf8ByteLength, MAX_OBJEKT_BYTES } = require("./key-pruefung");
 
 const CHATS_PRAEFIX = "obsidian/chats/";
-// Objektgrenze des Gateways. Am tatsaechlichen Body durchgesetzt
-// (Security-Finding 3), nicht nur an Metadaten.
-const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 // S4-Nachtrag: Deckel fuer Listing-Items; Ueberschuss wird verworfen.
 const ITEM_DECKEL = 500;
 // V5: das Gateway liefert hoechstens die letzten 50 Objekte
@@ -76,9 +73,10 @@ function slugAusTitel(titel) {
   return slug.length > 0 ? slug : "chat";
 }
 
-// Lokale Kopie des Kennungs-Musters aus unitedshare-core (chatKennung):
-// alles ausser Buchstaben, Ziffern, Strich und Unterstrich fliegt raus.
-function chatKennung(id) {
+// T2: KEINE Kopie von chatKennung aus dem Core (beim Inlining waere das
+// eine doppelte Top-Level-Deklaration). Dieser lokale Standard traegt den
+// Vertrag; beim Bundeln bindet Hook 1 die Core-Funktion als kennungFn an.
+function kennungStandard(id) {
   const roh = String(id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
   return roh || "ohne-kennung";
 }
@@ -88,7 +86,7 @@ function chatKennung(id) {
 // einen anderen Namen. Der Titel-Slug ist nur lesbares Suffix (maximal 80
 // Zeichen), die Endung ist .json, weil der Inhalt JSON ist und chatsLaden
 // auf .json filtert.
-function chatKey(eintrag) {
+function chatKey(eintrag, kennungFn = kennungStandard) {
   const roh = eintrag ? eintrag.erstellt : undefined;
   const zeitpunkt =
     roh instanceof Date
@@ -100,7 +98,7 @@ function chatKey(eintrag) {
   const tag = iso.slice(0, 10);
   const stunde = iso.slice(11, 16).replace(":", "");
   const slug = slugAusTitel(eintrag && eintrag.title).slice(0, 80);
-  return `${CHATS_PRAEFIX}${tag}-${stunde}-${chatKennung(eintrag && eintrag.id)}-${slug}.json`;
+  return `${CHATS_PRAEFIX}${tag}-${stunde}-${kennungFn(eintrag && eintrag.id)}-${slug}.json`;
 }
 
 function basis(baseUrl) {
@@ -178,16 +176,6 @@ function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}
 
 function transportGueltig(ctx) {
   return Boolean(ctx && ctx[TRANSPORT_MARKER] === true);
-}
-
-// Hausmuster aus unitedshare-core: Buffer nur mit Guard, der
-// Bundler-Buffer-Stub hat kein byteLength.
-function utf8ByteLength(text) {
-  if (typeof Buffer !== "undefined" && typeof Buffer.byteLength === "function") {
-    return Buffer.byteLength(text, "utf8");
-  }
-  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
-  return text.length;
 }
 
 // S5: typfeste Messung. Alles ohne messbare Groesse wird abgelehnt statt

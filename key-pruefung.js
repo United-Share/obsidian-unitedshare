@@ -44,6 +44,9 @@ const WINDOWS_ZEICHEN = /[*?"<>|]/;
 // stehen, deshalb bleiben genau diese beiden als Restliste gesperrt.
 const NFKC_RESISTENTE_SLASHES = /[\u2044\u2215]/;
 const MAX_SEGMENT_BYTES = 255;
+// T2: gemeinsame Objektgrenze des Gateways. Lebt hier im Leaf, damit beim
+// Inlining in main.js keine doppelte Top-Level-Deklaration entsteht.
+const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
 const PFADBEDEUTSAM = [".", "/", "\\", ":"];
 
 function segmentGueltig(segment) {
@@ -101,6 +104,7 @@ function keyPruefen(praefix, key, endungen) {
 
 module.exports = {
   MAX_SEGMENT_BYTES,
+  MAX_OBJEKT_BYTES,
   utf8ByteLength,
   GERAETENAMEN,
   segmentGueltig,

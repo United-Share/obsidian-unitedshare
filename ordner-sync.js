@@ -8,16 +8,23 @@
 // Namensschema von konfliktDateiname) und dass Loeschungen im MVP
 // ausdruecklich nicht propagiert werden. Den Transport macht der Aufrufer
 // (Hooks in main.src.js) ueber die workspace-sync-Funktionen; dieses Modul
-// ist bewusst ein Standalone-Modul ohne Quer-require.
+// haengt bewusst nur am key-pruefung-Leaf, nie an der Transportschicht.
 //
 // Vertraege und Begruendungen: ordner-sync.test.js.
 
-const { UnitedShareError } = require("./unitedshare-core");
-const { relpfadGueltig, utf8ByteLength, MAX_SEGMENT_BYTES } = require("./key-pruefung");
+const { relpfadGueltig, utf8ByteLength, MAX_SEGMENT_BYTES, MAX_OBJEKT_BYTES } = require("./key-pruefung");
 
-// V2: lokaler Default statt Quer-require auf die Transportschicht; die
-// Grenze ist ein Parameter von planeOrdnerSync.
-const MAX_OBJEKT_BYTES = 16 * 1024 * 1024;
+// T2/D5: bewusst KEIN require auf den Core-Monolithen; ein lokaler Fehler
+// mit demselben Namen genuegt dem Vertrag und haelt den Bundler-Needle
+// frei von der require-Zeile, an der bundle.mjs die Eigenstaendigkeit
+// prueft.
+class VertragsFehler extends Error {
+  constructor(meldung) {
+    super(meldung);
+    this.name = "UnitedShareError";
+    this.status = 400;
+  }
+}
 
 const NOTES_PRAEFIX = "obsidian/notes/";
 
@@ -127,7 +134,7 @@ function laufBeenden(zustand) {
 // gewaehlt. Der Relpfad wird wie in keyAusRelpfad auf NFC normalisiert.
 function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (typeof existiert !== "function") {
-    throw new UnitedShareError("eingehendeNotiz braucht existiert als Funktion", 400);
+    throw new VertragsFehler("eingehendeNotiz braucht existiert als Funktion");
   }
   const pfad = String(relpfad ?? "").normalize("NFC");
   // S1: eigene Pruefung statt Vertrauen in den Aufrufer. Dieselben Regeln

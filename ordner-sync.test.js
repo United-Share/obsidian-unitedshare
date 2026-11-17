@@ -563,8 +563,10 @@ test("aktion konflikt liefert bei ehrlicher Probe nie einen belegten Zielpfad", 
 });
 
 test("eingehendeNotiz verlangt existiert als Funktion", () => {
-  const { UnitedShareError } = require("./unitedshare-core");
-  assert.throws(() => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }), UnitedShareError);
+  assert.throws(
+    () => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }),
+    { name: "UnitedShareError", message: /braucht existiert/ }
+  );
 });
 
 test("indexNachSync uebernimmt die hochgeladenen Staende und vergisst nichts anderes", () => {

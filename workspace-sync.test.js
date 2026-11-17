@@ -377,6 +377,49 @@ test("die Protokoll-Nutzlast traegt zeit, status, meldung und basename", async (
   }
 });
 
+// Gate-Runde 2, T2: beim dokumentierten Inlining der Module in main.js
+// waere jede doppelte Top-Level-Deklaration ein harter SyntaxError.
+// utf8ByteLength und MAX_OBJEKT_BYTES leben deshalb NUR in key-pruefung,
+// und die Kennungsfunktion ist injizierbar statt kopiert.
+test("keine doppelten Top-Level-Namen in den Sync-Modulen", () => {
+  const nfs = require("node:fs");
+  const verboten = /^(const|function|class) (utf8ByteLength|MAX_OBJEKT_BYTES|chatKennung)\b/m;
+  for (const datei of ["workspace-sync.js", "ordner-sync.js"]) {
+    const quelle = nfs.readFileSync(require.resolve("./" + datei.replace(".js", "")), "utf8");
+    assert.ok(!verboten.test(quelle), datei + " dekliniert einen Core- oder Geschwisternamen erneut");
+  }
+});
+
+test("die Byte-Grenze haelt auch ohne Buffer und TextEncoder (Euro-Beweis)", async () => {
+  let treffer = 0;
+  const ctx = testTransport(async () => {
+    treffer += 1;
+    throw new Error("darf nicht passieren");
+  });
+  const euro = "\u20ac".repeat(6 * 1024 * 1024);
+  const bufferAlt = globalThis.Buffer;
+  const encoderAlt = globalThis.TextEncoder;
+  try {
+    globalThis.Buffer = undefined;
+    globalThis.TextEncoder = undefined;
+    const e = await objektSchreiben(ctx, "obsidian/chats/riesig.json", euro);
+    assert.equal(e.ok, false);
+    assert.equal(e.grund, "zu-gross", "18 MB in Euro-Zeichen muessen am Limit scheitern");
+  } finally {
+    globalThis.Buffer = bufferAlt;
+    globalThis.TextEncoder = encoderAlt;
+  }
+  assert.equal(treffer, 0);
+});
+
+test("chatKey nimmt die Kennungsfunktion injiziert entgegen", () => {
+  const eintrag = { title: "T", erstellt: "2026-11-17T09:15:00Z", id: "roh!id", messages: [{}] };
+  const key = chatKey(eintrag, (id) => "INJ" + String(id).replace(/[^a-z]/g, ""));
+  assert.ok(key.includes("-INJrohid-"), key);
+  const standard = chatKey(eintrag);
+  assert.ok(standard.includes("-rohid-"), standard);
+});
+
 // Nacharbeit S5: Body-Messung typfest nach dem utf8ByteLength-Hausmuster.
 // Alles ohne messbare Groesse wird fail-closed abgelehnt, bevor ein Request
 // entsteht; der Bundler-Buffer-Stub hat kein byteLength.
