@@ -429,5 +429,23 @@ test("eingehendeNotiz verlangt existiert als Funktion", () => {
 
 test("indexNachSync uebernimmt die hochgeladenen Staende und vergisst nichts anderes", () => {
   const neu = indexNachSync({ "a.md": "h1" }, [{ pfad: "b.md", hash: "h2" }]);
-  assert.deepEqual(neu, { "a.md": "h1", "b.md": "h2" });
+  assert.equal(neu["a.md"], "h1");
+  assert.equal(neu["b.md"], "h2");
+  assert.equal(Object.keys(neu).length, 2);
+});
+
+// Nacharbeit S7: der Index wird aus den Plugin-Daten geladen und ist damit
+// deserialisierte Fremdeingabe. Prototype-Schluessel duerfen weder
+// uebernommen werden noch das Ergebnisobjekt vergiften.
+test("indexNachSync ist gegen Prototype Pollution gefeit", () => {
+  const giftig = JSON.parse('{"__proto__":"boese","constructor":"x","prototype":"y","echt.md":"h1"}');
+  const neu = indexNachSync(giftig, [
+    { pfad: "__proto__", hash: "boese2" },
+    { pfad: "neu.md", hash: "h2" },
+  ]);
+  assert.equal(neu["echt.md"], "h1");
+  assert.equal(neu["neu.md"], "h2");
+  assert.equal(Object.keys(neu).sort().join(","), "echt.md,neu.md");
+  assert.equal(Object.getPrototypeOf(neu), null);
+  assert.equal({}.boese, undefined);
 });

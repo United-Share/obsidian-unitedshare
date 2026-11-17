@@ -160,9 +160,22 @@ function konfliktErgebnis(pfad, existiert) {
   return { aktion: "konflikt", zielPfad: kandidatFuer(KONFLIKT_SUCHGRENZE + 1), bestaetigungErforderlich: true };
 }
 
+// S7: der Index kommt deserialisiert aus den Plugin-Daten und ist damit
+// Fremdeingabe. Null-Prototyp als Ziel, Uebernahme nur eigener
+// Eigenschaften, Prototype-Schluessel fliegen raus.
+const VERBOTENE_SCHLUESSEL = new Set(["__proto__", "constructor", "prototype"]);
+
 function indexNachSync(index, hochgeladen) {
-  const neu = Object.assign({}, index);
+  const neu = Object.create(null);
+  const quelle = index && typeof index === "object" ? index : {};
+  for (const schluessel of Object.keys(quelle)) {
+    if (VERBOTENE_SCHLUESSEL.has(schluessel)) continue;
+    if (!Object.hasOwn(quelle, schluessel)) continue;
+    neu[schluessel] = quelle[schluessel];
+  }
   for (const datei of Array.isArray(hochgeladen) ? hochgeladen : []) {
+    if (!datei || typeof datei.pfad !== "string") continue;
+    if (VERBOTENE_SCHLUESSEL.has(datei.pfad)) continue;
     neu[datei.pfad] = datei.hash;
   }
   return neu;
