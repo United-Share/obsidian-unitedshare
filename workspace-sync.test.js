@@ -422,8 +422,9 @@ test("die Protokoll-Nutzlast traegt zeit, status, meldung und basename", async (
     assert.equal(typeof n.zeit, "number");
     assert.equal(n.status, 401);
     assert.equal(typeof n.meldung, "string");
-    assert.ok(!n.body.includes("/"), "body ist der Basename");
-    assert.ok(n.body.endsWith(".json"));
+    assert.ok(!n.body.includes("/"), "body traegt keinen Pfad");
+    assert.ok(!n.body.includes("tnutzlast"), "body traegt keinen Titel-Slug");
+    assert.ok(/^\d{4}-\d{2}-\d{2}-\d{4}-/.test(n.body), "body ist Tag, Stunde und Kennung");
   } finally {
     server.close();
   }
@@ -506,9 +507,9 @@ test("fehlender Content-Length-Header wird als feindlich abgelehnt", async () =>
   assert.equal(e2.grund, "unlesbar");
 });
 
-// Nacharbeit S5: Body-Messung typfest nach dem utf8ByteLength-Hausmuster.
-// Alles ohne messbare Groesse wird fail-closed abgelehnt, bevor ein Request
-// entsteht; der Bundler-Buffer-Stub hat kein byteLength.
+// Nacharbeit S5: Body-Messung typfest. Alles ohne messbare Groesse wird
+// fail-closed abgelehnt, bevor ein Request entsteht; den Beweis mit
+// gestubbten Globals fuehrt der Euro-Test weiter oben.
 test("objektSchreiben misst auch Binaer-Bodies und lehnt Unmessbares ab", async () => {
   let treffer = 0;
   const ctx = testTransport(async () => {
@@ -664,13 +665,13 @@ test("chatSpiegeln bei 500 schreibt ins Protokoll und stellt den Chat in die War
   });
   try {
     const ctx = {
-      settings: { apiKey: "usk_falsch", baseUrl: `http://127.0.0.1:${port}/v1` },
+      settings: { apiKey: "usk_test_1", baseUrl: `http://127.0.0.1:${port}/v1` },
       erlaubeLoopback: true,
       fetchImpl: fetch,
       protokoll: (eintrag) => protokoll.push(eintrag),
     };
     const zustand = { warteschlange: [] };
-    const e = await chatSpiegeln(ctx, { title: "Wichtig", messages: [{ role: "user", content: "x" }] }, zustand);
+    const e = await chatSpiegeln(ctx, { title: "Wichtig", erstellt: "2026-11-17T12:00:00Z", id: "w500", messages: [{ role: "user", content: "x" }] }, zustand);
     assert.equal(e.ergebnis, "aufgeschoben");
     assert.equal(zustand.warteschlange.length, 1);
     assert.ok(zustand.warteschlange[0].key.startsWith(CHATS_PRAEFIX));
@@ -880,6 +881,40 @@ test("201 gilt als Erfolg und leerer Zustand wirft nicht", async () => {
   } finally {
     server.close();
   }
+});
+
+// Gate-Runde 2, D1: das Versuchslimit komplett durchlaufen; am Ende ist
+// der Eintrag aufgegeben UND entfernt.
+test("VERSUCHE_MAX Fehlschlaege geben den Eintrag auf und entfernen ihn", async () => {
+  const protokoll = [];
+  const zustand = { warteschlange: [{ key: "obsidian/chats/zaeher.json", inhalt: "z", versuche: 0 }] };
+  const ctx = {
+    settings: { apiKey: "usk_test_1", baseUrl: "https://api.unitedshare.ai/v1" },
+    fetchImpl: async (url) =>
+      String(url).includes("zaeher") ? { status: 500 } : { status: 200 },
+    protokoll: (n) => protokoll.push(n),
+  };
+  let aufgegeben = 0;
+  for (let runde = 0; runde < 6; runde += 1) {
+    await chatSpiegeln(ctx, chatVon("frisch" + runde, "x"), zustand);
+    aufgegeben = protokoll.filter((n) => n.meldung === "aufgegeben").length;
+    if (aufgegeben > 0) break;
+  }
+  assert.equal(aufgegeben, 1, "genau ein Aufgeben-Protokoll");
+  assert.ok(!zustand.warteschlange.some((e) => e.key === "obsidian/chats/zaeher.json"), "Eintrag ist entfernt");
+});
+
+// Gate-Runde 2, D3: vollstaendig ist auf ALLEN Fehlerpfaden false.
+test("objekteListen meldet vollstaendig false auf allen Fehlerpfaden", async () => {
+  const nicht200 = await objekteListen(testTransport(async () => fakeAntwort({ status: 503 })), CHATS_PRAEFIX);
+  assert.equal(nicht200.vollstaendig, false);
+  const feindlich = await objekteListen(
+    testTransport(async () => ({ status: 200, headers: { get: () => "quatsch" }, text: async () => "{}" })),
+    CHATS_PRAEFIX
+  );
+  assert.equal(feindlich.vollstaendig, false);
+  const kaputt = await objekteListen(testTransport(async () => fakeAntwort({ body: "{kaputt" })), CHATS_PRAEFIX);
+  assert.equal(kaputt.vollstaendig, false);
 });
 
 // Gate-Runde 2, Q1: auch der Chat-Spiegel hat ein Lauf-Lock. Zwei

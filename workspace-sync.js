@@ -187,6 +187,13 @@ function transportBauen({ settings, fetchImpl, timeoutMs, erlaubeLoopback } = {}
   return ctx;
 }
 
+// D4: Tag, Stunde und Kennung fuer das Protokoll; der Titel-Slug bleibt
+// draussen.
+function bodyKurzVon(key, kennung) {
+  const basename = String(key ?? "").split("/").pop();
+  return `${basename.slice(0, 15)}-${kennung}`;
+}
+
 function transportGueltig(ctx) {
   if (!ctx || !GEPRUEFTE_TRANSPORTE.has(ctx)) return false;
   return basisPruefen(ctx.baseUrl, { erlaubeLoopback: true }) !== null;
@@ -236,9 +243,12 @@ async function objektSchreiben(ctx, key, inhalt) {
   if (bytes > MAX_OBJEKT_BYTES) {
     return { status: 413, ok: false, grund: "zu-gross" };
   }
+  // D5: expliziter Content-Type. application/octet-stream statt json,
+  // weil der Workspace beliebige Inhalte traegt (Chats sind JSON, Notizen
+  // Markdown); das Gateway behandelt den Body ohnehin als Bytes.
   const antwort = await ctx.fetchImpl(urlFuerObjekt(ctx.baseUrl, key), {
     method: "POST",
-    headers: kopf(ctx.apiKey),
+    headers: { ...kopf(ctx.apiKey), "Content-Type": "application/octet-stream" },
     body: inhalt,
   });
   return { status: antwort.status, ok: antwort.status >= 200 && antwort.status < 300 };
@@ -276,29 +286,29 @@ async function objekteListen(ctx, praefix) {
     method: "GET",
     headers: kopf(ctx.apiKey),
   });
-  if (antwort.status !== 200) return { status: antwort.status, items: [] };
+  if (antwort.status !== 200) return { status: antwort.status, items: [], vollstaendig: false };
   const angekuendigt = contentLengthVon(antwort);
   if (angekuendigt.feindlich) {
-    return { status: 200, items: [], grund: "unlesbar" };
+    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
   }
   if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
-    return { status: 200, items: [], grund: "zu-gross" };
+    return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
   }
   // Dieselbe Schranke wie beim Objekt-Lesen: erst den Text messen, dann
   // parsen. Ein echter Streaming-Abbruch braucht Transportunterstuetzung
   // (requestUrl puffert nativ) und bleibt bewusste Grenze, siehe Doku.
   const text = await antwort.text();
   if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
-    return { status: 200, items: [], grund: "zu-gross" };
+    return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
   }
   let daten;
   try {
     daten = JSON.parse(text);
   } catch (_fehler) {
-    return { status: 200, items: [], grund: "unlesbar" };
+    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
   }
   if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
-    return { status: 200, items: [], grund: "unlesbar" };
+    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
   }
   const vollstaendig = daten.items.length < GATEWAY_LISTING_SCHWELLE;
   if (daten.items.length > ITEM_DECKEL) {
@@ -318,13 +328,17 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   // V3: feste Nutzlast {zeit, status, meldung, body}; body ist der Basename
   // des Keys, nie der volle Pfad. Ein werfendes oder asynchron scheiterndes
   // protokoll reisst den Spiegel nicht mit.
+  // D4: body ist Tag, Stunde und Kennung, NIE der Titel-Slug; Chat-Titel
+  // gehoeren nicht ins debug.log. Fuer Alt-Eintraege ohne bodyKurz bleibt
+  // der datumsgenaue Anfang des Basenames.
   const protokolliere = (eintrag) => {
     if (typeof ctx.protokoll !== "function") return;
+    const basename = String(eintrag.key ?? "").split("/").pop();
     const nutzlast = {
       zeit: jetzt(),
       status: eintrag.status ?? 0,
       meldung: eintrag.meldung ?? "",
-      body: String(eintrag.key ?? "").split("/").pop(),
+      body: eintrag.bodyKurz ?? basename.slice(0, 15),
     };
     try {
       Promise.resolve(ctx.protokoll(nutzlast)).catch(() => {});
@@ -361,9 +375,10 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     melde("Workspace-Spiegel aus: Transport nicht baubar");
     return { ergebnis: "keine-basis", nachgeholt: 0 };
   }
+  const kennungFuerLog = (typeof ctx.kennungFn === "function" ? ctx.kennungFn : kennungStandard)(eintrag && eintrag.id);
   const key = chatKey(eintrag, typeof ctx.kennungFn === "function" ? ctx.kennungFn : undefined);
   if (key === null) {
-    protokolliere({ key: "", status: 0, meldung: "ungueltiger-key" });
+    protokolliere({ key: "", status: 0, meldung: "ungueltiger-key", bodyKurz: kennungFuerLog });
     melde("Workspace-Spiegel verworfen: Key nicht baubar");
     return { ergebnis: "verworfen", nachgeholt: 0 };
   }
@@ -391,24 +406,24 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
     // Q4: ein unmessbarer Body wird durch Wiederholen nicht messbar.
     if (geschrieben.grund === "unmessbar" || !wiederholbar(geschrieben.status)) {
       // Endgueltige Ablehnung: einmal protokollieren, nie einreihen.
-      protokolliere({ key, status: geschrieben.status, meldung: "endgueltig-abgelehnt" });
+      protokolliere({ key, status: geschrieben.status, meldung: "endgueltig-abgelehnt", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
       melde("Workspace-Spiegel verworfen");
       return { ergebnis: "verworfen", nachgeholt: 0 };
     }
     // Q3: ein Eintrag ueber der Byte-Grenze landet NIE in der Schlange;
     // er wuerde sie nur leeren und selbst nie durchpassen.
     if (utf8ByteLength(String(inhalt ?? "")) > WARTESCHLANGE_MAX_BYTES) {
-      protokolliere({ key, status: geschrieben.status, meldung: "zu-gross-fuer-warteschlange" });
+      protokolliere({ key, status: geschrieben.status, meldung: "zu-gross-fuer-warteschlange", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
       melde("Workspace-Spiegel: Chat zu gross fuer die Warteschlange");
       return { ergebnis: "verworfen", nachgeholt: 0 };
     }
     // Dedupe pro Key: der letzte Stand gewinnt, Position am Ende.
     z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
-    const frisch = { key, inhalt, versuche: 0 };
+    const frisch = { key, inhalt, versuche: 0, bodyKurz: bodyKurzVon(key, kennungFuerLog) };
     z.warteschlange.push(frisch);
     while (z.warteschlange.length > WARTESCHLANGE_MAX_EINTRAEGE) {
       const raus = z.warteschlange.shift();
-      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt" });
+      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt", bodyKurz: raus.bodyKurz });
     }
     // Q3: Byte-Verdraengung trifft zuerst den GROESSTEN Eintrag (nie den
     // frischen), nicht den aeltesten; so ueberleben viele kleine Chats
@@ -429,9 +444,9 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
       if (groessterIdx === -1) break;
       const raus = z.warteschlange.splice(groessterIdx, 1)[0];
       gesamt -= groessterWert;
-      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt" });
+      protokolliere({ key: raus.key, status: 0, meldung: "verdraengt", bodyKurz: raus.bodyKurz });
     }
-    protokolliere({ key, status: geschrieben.status, meldung: "aufgeschoben" });
+    protokolliere({ key, status: geschrieben.status, meldung: "aufgeschoben", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
     melde("Workspace-Spiegel aufgeschoben");
     return { ergebnis: "aufgeschoben", nachgeholt: 0 };
   }
@@ -441,7 +456,7 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
   const vorher = z.warteschlange.length;
   z.warteschlange = z.warteschlange.filter((w) => w.key !== key);
   if (z.warteschlange.length < vorher) {
-    protokolliere({ key, status: 0, meldung: "veraltet-verworfen" });
+    protokolliere({ key, status: 0, meldung: "veraltet-verworfen", bodyKurz: bodyKurzVon(key, kennungFuerLog) });
   }
 
   let nachgeholt = 0;
@@ -468,12 +483,12 @@ async function chatSpiegeln(ctx, eintrag, zustand) {
       continue;
     }
     if (r.grund === "unmessbar" || !wiederholbar(r.status)) {
-      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "endgueltig-abgelehnt" });
+      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "endgueltig-abgelehnt", bodyKurz: kopfEintrag.bodyKurz });
       continue;
     }
     kopfEintrag.versuche = (kopfEintrag.versuche ?? 0) + 1;
     if (kopfEintrag.versuche >= VERSUCHE_MAX) {
-      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "aufgegeben" });
+      protokolliere({ key: kopfEintrag.key, status: r.status, meldung: "aufgegeben", bodyKurz: kopfEintrag.bodyKurz });
       continue;
     }
     // wiederholbar: vorne wieder einsetzen, Lauf endet.

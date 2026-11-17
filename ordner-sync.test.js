@@ -371,6 +371,14 @@ test("keyAusRelpfad lehnt NFKC-faltbare und NFKC-resistente Doppelgaenger ab", (
   assert.ok(keyAusRelpfad("Ideen/Caf\u00e9 Plan \u00e4\u00f6\u00fc.md"), "Umlaute bleiben erlaubt");
 });
 
+// Gate-Runde 2, D1: die drei Luecken aus dem Mutationstest als eigene,
+// gezielte Vertraege.
+test("einzelne Slash- und Backslash-Doppelgaenger und mittiges Doppelpunkt-Paar fallen", () => {
+  assert.equal(keyAusRelpfad("a\uff0fb.md"), null, "U+FF0F allein (NFKC wird /)");
+  assert.equal(keyAusRelpfad("a\uff3cb.md"), null, "U+FF3C (NFKC wird Backslash)");
+  assert.equal(keyAusRelpfad("a..b.md"), null, "zwei Punkte mitten im Segment");
+});
+
 // Gate-Runde 2, Z1: restliche Zeichenklassen. Steuerzeichen jenseits
 // ASCII (Cc), unzugewiesene Codepoints (Cn), Variation Selectors und
 // fuehrende oder reine Combining Marks tarnen Keys gegenueber dem
