@@ -50,6 +50,14 @@ Die drei Hooks, jeweils wenige Zeilen:
    aber lokalText vorhanden; oder existiert true, aber lokalText fehlt)
    und ein werfendes existiert ergeben immer die Konfliktkopie. Der
    Relpfad wird intern auf NFC normalisiert, konsistent zu keyAusRelpfad.
+   Konflikt-Ergebnisse tragen bestaetigungErforderlich: true, wenn die
+   Namenssuche unbestaetigt blieb (werfende Probe) oder die Suchgrenze
+   (100 Kandidaten) erschoepft war. Unabhaengig davon gilt: Der
+   Schreibpfad legt Konfliktkopien IMMER exklusiv an (vault.create, das
+   bei Existenz wirft; O_EXCL-Semantik), niemals per Ueberschreib-Write.
+   Wirft das exklusive Anlegen, wird der naechste Kandidat versucht oder
+   der Nutzer gefragt; bei bestaetigungErforderlich ist die Nachfrage
+   Pflicht, requireWriteConfirm greift zusaetzlich.
 
 Einschraenkungen des Second-Brain-Zuschnitts (bewusste Produktentscheidung):
 Synchronisiert werden ausschliesslich Dateien mit den Endungen .md und

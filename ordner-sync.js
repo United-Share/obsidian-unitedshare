@@ -10,7 +10,6 @@
 //
 // Vertraege und Begruendungen: ordner-sync.test.js.
 
-const { konfliktDateiname } = require("./unitedshare-core");
 const { MAX_OBJEKT_BYTES } = require("./workspace-sync");
 
 const NOTES_PRAEFIX = "obsidian/notes/";
@@ -102,21 +101,11 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
     throw new TypeError("eingehendeNotiz braucht existiert als Funktion");
   }
   const pfad = String(relpfad ?? "").normalize("NFC");
-  // Fuer die NAMENSsuche der Konfliktkopie darf eine werfende Probe die
-  // Schleife in konfliktDateiname nicht endlos machen: Wurf heisst dort
-  // "Kandidat gilt als frei", der Schreibpfad bestaetigt ohnehin.
-  const probeFuerNamen = (kandidat) => {
-    try {
-      return Boolean(existiert(kandidat));
-    } catch (_fehler) {
-      return false;
-    }
-  };
   let vorhanden;
   try {
     vorhanden = Boolean(existiert(pfad));
   } catch (_fehler) {
-    return { aktion: "konflikt", zielPfad: konfliktDateiname(pfad, probeFuerNamen) };
+    return konfliktErgebnis(pfad, existiert);
   }
   const lesbar = lokalText !== null && lokalText !== undefined;
   if (!vorhanden && !lesbar) {
@@ -125,7 +114,47 @@ function eingehendeNotiz({ relpfad, remoteText, lokalText, existiert }) {
   if (vorhanden && lesbar && lokalText === remoteText) {
     return { aktion: "unveraendert", zielPfad: pfad };
   }
-  return { aktion: "konflikt", zielPfad: konfliktDateiname(pfad, probeFuerNamen) };
+  return konfliktErgebnis(pfad, existiert);
+}
+
+// Begrenzte, fail-closed Namenssuche fuer die Konfliktkopie, Namensschema
+// kompatibel zu konfliktDateiname aus unitedshare-core. Eine werfende Probe
+// heisst BELEGT (weiter suchen), nie frei: sonst koennte die Kopie einen
+// vergebenen Namen treffen. Bleibt die Lage unbestaetigt oder ist die
+// Grenze erschoepft, traegt das Ergebnis bestaetigungErforderlich; der
+// Schreibpfad muss Konfliktkopien ohnehin IMMER exklusiv anlegen.
+const KONFLIKT_SUCHGRENZE = 100;
+
+function konfliktErgebnis(pfad, existiert) {
+  const slash = pfad.lastIndexOf("/");
+  const ordner = slash === -1 ? "" : pfad.slice(0, slash + 1);
+  const basisName = slash === -1 ? pfad : pfad.slice(slash + 1);
+  const punkt = basisName.lastIndexOf(".");
+  const stamm = punkt > 0 ? basisName.slice(0, punkt) : basisName;
+  const endung = punkt > 0 ? basisName.slice(punkt) : "";
+
+  const kandidatFuer = (zaehler) => {
+    const zusatz = zaehler === 1 ? "(Konflikt)" : `(Konflikt ${zaehler})`;
+    return `${ordner}${stamm} ${zusatz}${endung}`;
+  };
+
+  let unbestaetigt = false;
+  for (let zaehler = 1; zaehler <= KONFLIKT_SUCHGRENZE; zaehler += 1) {
+    const kandidat = kandidatFuer(zaehler);
+    let belegt;
+    try {
+      belegt = Boolean(existiert(kandidat));
+    } catch (_fehler) {
+      unbestaetigt = true;
+      belegt = true;
+    }
+    if (!belegt) {
+      return { aktion: "konflikt", zielPfad: kandidat, bestaetigungErforderlich: unbestaetigt };
+    }
+  }
+  // Grenze erschoepft: unerprobter Kandidat jenseits der Grenze, nur mit
+  // exklusivem Anlegen zu schreiben.
+  return { aktion: "konflikt", zielPfad: kandidatFuer(KONFLIKT_SUCHGRENZE + 1), bestaetigungErforderlich: true };
 }
 
 function indexNachSync(index, hochgeladen) {

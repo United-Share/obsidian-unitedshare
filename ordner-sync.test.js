@@ -288,6 +288,72 @@ test("eingehendeNotiz normalisiert den Relpfad auf NFC", () => {
   assert.equal(gesehen[0], nfc);
 });
 
+// Haertung (Finding Namenssuche): eine werfende Probe heisst BELEGT, nie
+// frei. Sonst koennte die Konfliktkopie einen vergebenen Namen treffen und
+// ihn ueberschreiben. Bleibt die Lage unbestaetigt (Wurf) oder ist die
+// Suchgrenze erschoepft, traegt das Ergebnis bestaetigungErforderlich und
+// der Schreibpfad MUSS exklusiv anlegen (vault.create wirft bei Existenz).
+test("werfende Probe fuehrt zum naechsten Kandidaten statt zur Wiederverwendung", () => {
+  const e = eingehendeNotiz({
+    relpfad: "Ideen/heikel.md",
+    remoteText: "Remote",
+    lokalText: "Lokal",
+    existiert: (p) => {
+      if (p === "Ideen/heikel.md") return true;
+      if (p === "Ideen/heikel (Konflikt).md") throw new Error("Probe kaputt");
+      return false;
+    },
+  });
+  assert.equal(e.aktion, "konflikt");
+  assert.notEqual(e.zielPfad, "Ideen/heikel (Konflikt).md");
+  assert.equal(e.zielPfad, "Ideen/heikel (Konflikt 2).md");
+  assert.equal(e.bestaetigungErforderlich, true);
+});
+
+test("durchgehend werfende Probe liefert bestaetigungErforderlich", () => {
+  const e = eingehendeNotiz({
+    relpfad: "Ideen/blind.md",
+    remoteText: "Remote",
+    lokalText: "Lokal",
+    existiert: (p) => {
+      if (p === "Ideen/blind.md") return true;
+      throw new Error("Adapter blind");
+    },
+  });
+  assert.equal(e.aktion, "konflikt");
+  assert.equal(e.bestaetigungErforderlich, true);
+});
+
+test("erschoepfte Suchgrenze ergibt bestaetigungErforderlich mit unerprobtem Kandidaten", () => {
+  let proben = 0;
+  const e = eingehendeNotiz({
+    relpfad: "Ideen/uebervoll.md",
+    remoteText: "Remote",
+    lokalText: "Lokal",
+    existiert: () => {
+      proben += 1;
+      return true;
+    },
+  });
+  assert.equal(e.aktion, "konflikt");
+  assert.equal(e.bestaetigungErforderlich, true);
+  assert.equal(e.zielPfad, "Ideen/uebervoll (Konflikt 101).md");
+  assert.ok(proben <= 102, `Suchgrenze verletzt: ${proben} Proben`);
+});
+
+test("aktion konflikt liefert bei ehrlicher Probe nie einen belegten Zielpfad", () => {
+  const belegt = new Set(["Ideen/voll.md", "Ideen/voll (Konflikt).md", "Ideen/voll (Konflikt 2).md"]);
+  const e = eingehendeNotiz({
+    relpfad: "Ideen/voll.md",
+    remoteText: "Remote",
+    lokalText: "Lokal",
+    existiert: (p) => belegt.has(p),
+  });
+  assert.equal(e.aktion, "konflikt");
+  assert.ok(!belegt.has(e.zielPfad), e.zielPfad);
+  assert.equal(e.bestaetigungErforderlich, false);
+});
+
 test("eingehendeNotiz verlangt existiert als Funktion", () => {
   assert.throws(() => eingehendeNotiz({ relpfad: "a.md", remoteText: "x", lokalText: null }), TypeError);
 });
