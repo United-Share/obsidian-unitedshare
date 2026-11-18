@@ -568,7 +568,7 @@ test("Quellen nennen die lange Frist, das Bild und die Auflade-Seite", () => {
   const root = __dirname;
   const main = fs.readFileSync(path.join(root, "main.src.js"), "utf8");
   const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
-  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const readme = fs.readFileSync(path.join(root, "docs/handbuch.md"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   assert.match(main, /dauerMs:\s*600000/);
   assert.equal(manifest.version, "1.3.0");

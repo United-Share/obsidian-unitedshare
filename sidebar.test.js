@@ -1102,7 +1102,7 @@ test("Schrift und Zeichen stammen von unitedshare.ai und liegen im Plugin", () =
 });
 
 test("README, Stil und gebündelte main.js enthalten die Seitenleiste", () => {
-  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const readme = fs.readFileSync(path.join(root, "docs/handbuch.md"), "utf8");
   const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
   const main = fs.readFileSync(path.join(root, "main.js"), "utf8");
   assert.equal(readme.includes("rechten Seitenleiste"), true);

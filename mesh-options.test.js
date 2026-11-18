@@ -290,7 +290,7 @@ test("ein Startfehler der Version fragt nichts weiter", async () => {
 });
 
 test("die Anleitung nennt das direkte Netz und lässt Tag und Einstellungssatz", () => {
-  const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+  const readme = fs.readFileSync(path.join(__dirname, "docs/handbuch.md"), "utf8");
   const src = fs.readFileSync(path.join(__dirname, "main.src.js"), "utf8");
   assert.match(readme, /\*\*Direktes Netz\*\*/);
   const manifestVersion = JSON.parse(fs.readFileSync(path.join(__dirname, "manifest.json"), "utf8")).version;

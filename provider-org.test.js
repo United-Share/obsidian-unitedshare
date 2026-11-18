@@ -11,6 +11,7 @@ const PROVIDER = "United Share GmbH";
 
 test("öffentliche Herkunft nennt die Organisation United-Share und den Anbieter United Share GmbH", () => {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const anleitung = fs.readFileSync(path.join(root, "docs/handbuch.md"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   const license = fs.readFileSync(path.join(root, "LICENSE"), "utf8");
 
@@ -29,7 +30,12 @@ test("öffentliche Herkunft nennt die Organisation United-Share und den Anbieter
   // faellt erst nach der Veroeffentlichung auf.
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.ok(readme.includes(`Release-Tag \`${manifest.version}\``),
+    `die Produktbeschreibung nennt nicht ${manifest.version}`);
+  assert.ok(anleitung.includes(`Release-Tag \`${manifest.version}\``),
     `die Anleitung nennt nicht ${manifest.version}`);
+  assert.equal(readme.includes("https://beta.preview.unitedshare.ai/docs"), true);
+  assert.equal(readme.includes("community-plugins.json"), false);
+  assert.equal(anleitung.includes("community-plugins.json` führt"), false);
   const versionen = JSON.parse(fs.readFileSync(path.join(root, "versions.json"), "utf8"));
   assert.ok(Object.hasOwn(versionen, manifest.version),
     `versions.json kennt ${manifest.version} nicht`);

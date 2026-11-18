@@ -646,7 +646,7 @@ test("der Senden-Knopf im schwebenden Feld trägt den Pfeil nach oben", async ()
 });
 
 test("die Anleitung beschreibt die Eingabe unten im Fenster", () => {
-  const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+  const readme = fs.readFileSync(path.join(__dirname, "docs/handbuch.md"), "utf8");
   assert.match(readme, /Seitenleiste zugeklappt/);
   assert.match(readme, /unten im Fenster/);
   assert.match(readme, /UnitedShareAI/);
