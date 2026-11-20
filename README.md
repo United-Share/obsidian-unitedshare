@@ -10,4 +10,4 @@ Werkzeuge, Gespräche, DuckDB, Bilder und Einstellungen stehen in der [Dokumenta
 
 ## Stand
 
-United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.3.0`. Community-Seite: https://community.obsidian.md/plugins/unitedshare .
+United Share GmbH ([unitedshare.ai](https://unitedshare.ai)), MIT-Lizenz. Repo: https://github.com/United-Share/obsidian-unitedshare — Release-Tag `1.3.1`. Community-Seite: https://community.obsidian.md/plugins/unitedshare .
