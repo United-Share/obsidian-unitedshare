@@ -106,6 +106,3 @@ MCP über stdio für lokale Agenten: `node crm/crm-cli.js stdio`
   1 MB, Abfrage-Timeout 30 s.
 - Kein Geheimnis im Klartext-Log außer dem Token-Druck beim Serverstart
   (der Token IST der Zugangscode; wer die Konsole sieht, darf rein).
-- Tests (`crm-headless.test.js`, Teil der Plugin-Suite) decken Absicherungen,
-  Werkzeuge, MCP, ACP, Server und den Verweigerungsfall ab; der Agent-Client
-  wird end-to-end gegen den eigenen Server geprüft, nie gegen Cloud.

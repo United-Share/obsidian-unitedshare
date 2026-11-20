@@ -122,7 +122,6 @@ Ein Nutzerabbruch endet mit der Meldung "Der Auftrag wurde abgebrochen.", offene
 ## Entwickeln
 
 ```bash
-node --test *.test.js       # auch gegen einen echten lokalen Server
 node scripts/bundle.mjs     # main.js aus main.src.js + unitedshare-core.js
 ```
 
