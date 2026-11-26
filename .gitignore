@@ -1,2 +1,25 @@
+# Nutzerdaten und System
 data.json
 .DS_Store
+
+# Agenten- und Werkzeug-Arbeitsverzeichnisse
+.claude/
+.claude-flow/
+.swarm/
+.gstack/
+.obsidian/
+ruvector.db
+
+# Lokale Entwicklung: Tests und Brain leben nicht im öffentlichen Repo
+*.test.js
+brain/
+aicontext/
+
+# Backups und Zwischenstände
+*.bak-*
+*.vorher-wiring
+
+# Lokale Skripte und interne Dev-Dokumente
+scripts/kopiere-plugin.sh
+docs/entwicklung-lokal.md
+docs/brain-workspace.md

@@ -741,6 +741,21 @@ body.theme-light .unitedshare-message-user > .unitedshare-message-content {
   background: var(--background-modifier-hover);
 }
 
+.unitedshare-fortsetzen {
+  margin: 0 0 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+
+.unitedshare-fortsetzen:hover {
+  background: var(--background-modifier-hover);
+}
+
 .unitedshare-bild.is-laden {
   width: min(100%, 360px);
   aspect-ratio: var(--unitedshare-bild-ratio, 1);

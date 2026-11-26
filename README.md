@@ -24,6 +24,10 @@ Der API-Schlüssel liegt nur in `data.json` in deinem Tresor und wird an keinen 
 
 Weitere Funktionen (Werkzeuge, gespeicherte Gespräche, Bilder, Geräte-Sync) stehen in der [Dokumentation](https://unitedshare.ai/docs/).
 
+## Total.js-Entwicklung
+
+Bittest du den Agenten, eine Total.js-Anwendung zu bauen, greift er auf einen eingebetteten Total.js-Kontext und auf Skills in deinem Tresor zu. Dafür gibt es zwei Werkzeuge, die das Modell selbst aufruft: `aicontext_lesen` holt die passende Total.js-Referenz (Architektur, Routen, Schemas, Aktionen), `skill_aufrufen` lädt eine Handlungsanweisung wie `unitedshare-rad`. So baut der Agent Total.js-idiomatisch mit `FUNC`, `MAIN`, `MODS`, `ROUTE`, `NEWSCHEMA` und `NEWACTION`, statt generischen Node-Code zu schreiben. Der Total.js-Kontext liegt in deinem Tresor unter `.obsidian/plugins/unitedshare/aicontext/`.
+
 ## Netzwerk und Daten
 
 Das Plugin macht genau zwei Arten von Netzwerkaufrufen, beide zu dem Endpunkt, den du in den Einstellungen gesetzt hast:
