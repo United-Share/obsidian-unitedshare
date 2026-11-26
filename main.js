@@ -259,10 +259,8 @@ function keyPruefen(praefix, key, endungen) {
 const CHATS_PRAEFIX = "obsidian/chats/";
 // S4-Nachtrag: Deckel fuer Listing-Items; Ueberschuss wird verworfen.
 const ITEM_DECKEL = 500;
-// V5: das Gateway liefert hoechstens die letzten 50 Objekte
-// (serverseitiges items.slice(-50)); ab dieser Schwelle ist ein Listing
-// als unvollstaendig zu betrachten. Cursor-Paginierung ist ein
-// Gateway-Folgethema.
+// Ohne cursor-Feld bleibt die alte Schwelle: weniger als 50 Eintraege
+// gelten als vollstaendig. Liefert der Server cursor, wird weitergeblaettert.
 const GATEWAY_LISTING_SCHWELLE = 50;
 // K3: die Warteschlange ist ein Puffer, kein Archiv. Obergrenzen mit
 // Verdraengung des Aeltesten, Versuchslimit je Eintrag, und endgueltige
@@ -395,10 +393,13 @@ function urlFuerObjekt(baseUrl, key) {
   return `${basis(baseUrl)}/workspace/object?key=${encodeURIComponent(String(key ?? ""))}`;
 }
 
-function urlFuerListe(baseUrl, praefix) {
+function urlFuerListe(baseUrl, praefix, cursor) {
   const grund = `${basis(baseUrl)}/workspace/objects`;
-  if (!praefix) return grund;
-  return `${grund}?prefix=${encodeURIComponent(praefix)}`;
+  const parameter = new URLSearchParams();
+  if (praefix) parameter.set("prefix", praefix);
+  if (cursor) parameter.set("cursor", cursor);
+  const query = parameter.toString();
+  return query ? `${grund}?${query}` : grund;
 }
 
 function kopf(apiKey) {
@@ -527,39 +528,59 @@ async function objektLesen(ctx, key) {
 
 async function objekteListen(ctx, praefix) {
   if (!transportGueltig(ctx)) return { status: 0, items: [], vollstaendig: false, grund: "ungeprueft" };
-  const antwort = await ctx.fetchImpl(urlFuerListe(ctx.baseUrl, praefix), {
-    method: "GET",
-    headers: kopf(ctx.apiKey),
-  });
-  if (antwort.status !== 200) return { status: antwort.status, items: [], vollstaendig: false };
-  const angekuendigt = contentLengthVon(antwort);
-  if (angekuendigt.feindlich) {
-    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+  const alle = [];
+  let cursor = "";
+  let seiten = 0;
+  while (seiten < 20) {
+    seiten += 1;
+    const antwort = await ctx.fetchImpl(urlFuerListe(ctx.baseUrl, praefix, cursor), {
+      method: "GET",
+      headers: kopf(ctx.apiKey),
+    });
+    if (antwort.status !== 200) return { status: antwort.status, items: [], vollstaendig: false };
+    const angekuendigt = contentLengthVon(antwort);
+    if (angekuendigt.feindlich) {
+      return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+    }
+    if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
+      return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
+    }
+    const text = await antwort.text();
+    if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
+      return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
+    }
+    let daten;
+    try {
+      daten = JSON.parse(text);
+    } catch (_fehler) {
+      return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+    }
+    if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
+      return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
+    }
+    alle.push(...daten.items);
+    if (alle.length > ITEM_DECKEL) {
+      return { status: 200, items: alle.slice(0, ITEM_DECKEL), grund: "gedeckelt", vollstaendig: false };
+    }
+    const hatCursor = Object.prototype.hasOwnProperty.call(daten, "cursor");
+    const naechster = hatCursor && typeof daten.cursor === "string" ? daten.cursor : "";
+    if (naechster) {
+      if (naechster === cursor) {
+        return { status: 200, items: alle, grund: "cursor", vollstaendig: false };
+      }
+      cursor = naechster;
+      continue;
+    }
+    if (hatCursor) {
+      return { status: 200, items: alle, vollstaendig: daten.vollstaendig === true };
+    }
+    return {
+      status: 200,
+      items: alle,
+      vollstaendig: daten.items.length < GATEWAY_LISTING_SCHWELLE,
+    };
   }
-  if (angekuendigt.wert !== null && angekuendigt.wert > MAX_OBJEKT_BYTES) {
-    return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
-  }
-  // Dieselbe Schranke wie beim Objekt-Lesen: erst den Text messen, dann
-  // parsen. Ein echter Streaming-Abbruch braucht Transportunterstuetzung
-  // (requestUrl puffert nativ) und bleibt bewusste Grenze, siehe Doku.
-  const text = await antwort.text();
-  if (utf8ByteLength(text) > MAX_OBJEKT_BYTES) {
-    return { status: 200, items: [], grund: "zu-gross", vollstaendig: false };
-  }
-  let daten;
-  try {
-    daten = JSON.parse(text);
-  } catch (_fehler) {
-    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
-  }
-  if (!daten || typeof daten !== "object" || !Array.isArray(daten.items)) {
-    return { status: 200, items: [], grund: "unlesbar", vollstaendig: false };
-  }
-  const vollstaendig = daten.items.length < GATEWAY_LISTING_SCHWELLE;
-  if (daten.items.length > ITEM_DECKEL) {
-    return { status: 200, items: daten.items.slice(0, ITEM_DECKEL), grund: "gedeckelt", vollstaendig: false };
-  }
-  return { status: 200, items: daten.items, vollstaendig };
+  return { status: 200, items: alle.slice(0, ITEM_DECKEL), grund: "gedeckelt", vollstaendig: false };
 }
 
 // Spiegelt einen frisch gespeicherten Chat und holt bei Erfolg die
@@ -6963,6 +6984,12 @@ async function protokolliereAufrufFehler(adapter, error) {
   }
 }
 
+function secondBrainOrdnerNormalisieren(wert) {
+  let ordner = String(wert || "").trim().replace(/\\/g, "/");
+  while (ordner.startsWith("./")) ordner = ordner.slice(2);
+  return ordner.replace(/\/+$/, "");
+}
+
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
 const DUCKDB_ANSICHT_VIEW_TYPE = "unitedshare-duckdb-ansicht";
@@ -8762,7 +8789,7 @@ class UnitedShareView extends ItemView {
   }
 
   async syncSecondBrainOrdner() {
-    const ordner = String(this.settings.secondBrainOrdner || "").trim().replace(/\/+$/, "");
+    const ordner = secondBrainOrdnerNormalisieren(this.settings.secondBrainOrdner);
     if (!ordner) {
       new Notice("UnitedShare: kein Second-Brain-Ordner gesetzt (Einstellungen).");
       return;
@@ -9897,7 +9924,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
       .addText((text) => {
         text.setValue(this.plugin.settings.secondBrainOrdner || "");
         text.onChange(async (value) => {
-          this.plugin.settings.secondBrainOrdner = String(value || "").trim();
+          this.plugin.settings.secondBrainOrdner = secondBrainOrdnerNormalisieren(value);
           await this.plugin.saveSettings();
         });
       });

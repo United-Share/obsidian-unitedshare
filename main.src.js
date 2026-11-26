@@ -29,6 +29,12 @@ async function protokolliereAufrufFehler(adapter, error) {
   }
 }
 
+function secondBrainOrdnerNormalisieren(wert) {
+  let ordner = String(wert || "").trim().replace(/\\/g, "/");
+  while (ordner.startsWith("./")) ordner = ordner.slice(2);
+  return ordner.replace(/\/+$/, "");
+}
+
 const VIEW_TYPE = "unitedshare-sidebar";
 const UNITEDSHARE_ICON = "unitedshare";
 const DUCKDB_ANSICHT_VIEW_TYPE = "unitedshare-duckdb-ansicht";
@@ -1828,7 +1834,7 @@ class UnitedShareView extends ItemView {
   }
 
   async syncSecondBrainOrdner() {
-    const ordner = String(this.settings.secondBrainOrdner || "").trim().replace(/\/+$/, "");
+    const ordner = secondBrainOrdnerNormalisieren(this.settings.secondBrainOrdner);
     if (!ordner) {
       new Notice("UnitedShare: kein Second-Brain-Ordner gesetzt (Einstellungen).");
       return;
@@ -2963,7 +2969,7 @@ class UnitedShareSettingTab extends PluginSettingTab {
       .addText((text) => {
         text.setValue(this.plugin.settings.secondBrainOrdner || "");
         text.onChange(async (value) => {
-          this.plugin.settings.secondBrainOrdner = String(value || "").trim();
+          this.plugin.settings.secondBrainOrdner = secondBrainOrdnerNormalisieren(value);
           await this.plugin.saveSettings();
         });
       });
